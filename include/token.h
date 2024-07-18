@@ -7,6 +7,7 @@ typedef enum
 {
     TOKEN_ERROR,
     TOKEN_EOF,
+    TOKEN_COMMENT,
 
     TOKEN_USE, // use
     TOKEN_FUN, // fun
@@ -65,8 +66,6 @@ typedef enum
     TOKEN_STRING,
 
     TOKEN_IDENTIFIER,
-
-    TOKEN_COMMENT,
 } TokenType;
 
 typedef struct

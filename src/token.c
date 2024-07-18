@@ -9,6 +9,8 @@ char *token_type_string(TokenType type)
         return "ERROR";
     case TOKEN_EOF:
         return "EOF";
+    case TOKEN_COMMENT:
+        return "COMMENT";
     case TOKEN_USE:
         return "USE";
     case TOKEN_FUN:
@@ -109,8 +111,6 @@ char *token_type_string(TokenType type)
         return "STRING";
     case TOKEN_IDENTIFIER:
         return "IDENTIFIER";
-    case TOKEN_COMMENT:
-        return "COMMENT";
     default:
         return "UNKNOWN";
     }

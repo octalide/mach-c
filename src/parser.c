@@ -4,27 +4,59 @@
 #include "op.h"
 #include "parser.h"
 
-void init_parser(Parser *parser, Lexer *lexer)
+#define PARSER_DEBUG_TRACE
+
+void parser_init(Parser *parser, Lexer *lexer)
 {
+#ifdef PARSER_DEBUG_TRACE
+    printf("parser_init\n");
+#endif
+
     parser->lexer = lexer;
     parser->current = next_token(lexer);
     parser->previous.type = TOKEN_EOF;
+}
 
-    printf("P INIT: ln: %-3d type: %-19s len: %-3d val: %.*s\n", parser->lexer->line, token_type_string(parser->current.type), parser->current.length, parser->current.length, parser->current.start);
+void parser_error(Parser *parser, const char *message)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parser_error\n");
+#endif
+
+    fprintf(stderr, "error: %s\n", message);
+    parser->error = message;
 }
 
 void parser_advance(Parser *parser)
 {
+#ifdef PARSER_DEBUG_TRACE
+    printf("parser_advance\n");
+#endif
+
     parser->previous = parser->current;
     parser->current = next_token(parser->lexer);
 
-    printf("P ADVN: ln: %-3d type: %-19s len: %-3d val: %.*s\n", parser->lexer->line, token_type_string(parser->current.type), parser->current.length, parser->current.length, parser->current.start);
+#ifdef PARSER_DEBUG_TRACE
+    printf("L TOK: LN: %-3d T: %-19s: %.*s\n", parser->lexer->line, token_type_string(parser->current.type), parser->current.length, parser->current.start);
+#endif
+}
+
+bool parser_peek(Parser *parser, TokenType type)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parser_peek\n");
+#endif
+
+    return parser->current.type == type;
 }
 
 bool parser_match(Parser *parser, TokenType type)
 {
-    // printf("parser_match\n");
-    if (parser->current.type == type)
+#ifdef PARSER_DEBUG_TRACE
+    printf("parser_match\n");
+#endif
+
+    if (parser_peek(parser, type))
     {
         parser_advance(parser);
         return true;
@@ -33,141 +65,201 @@ bool parser_match(Parser *parser, TokenType type)
     return false;
 }
 
-void parser_consume(Parser *parser, TokenType type, const char *message)
+bool parser_consume(Parser *parser, TokenType type, const char *message)
 {
+#ifdef PARSER_DEBUG_TRACE
     printf("parser_consume\n");
-    if (!parser_match(parser, type))
+#endif
+
+    if (parser_match(parser, type))
     {
-        fprintf(stderr, "error: %s\n", message);
-        exit(1);
+        return true;
+    }
+
+    parser_error(parser, message);
+
+    return false;
+}
+
+Node *parse_expr_type_identifier(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_type_identifier\n");
+#endif
+
+    if (parser->current.type != TOKEN_IDENTIFIER)
+    {
+        // err: expected an identifier (probably the parser's fault)
+        parser_error(parser, "expected an identifier");
+        return NULL;
+    }
+
+    Node *node = new_node(NODE_EXPR_TYPE);
+    node->data.expr_type.identifier = new_node(NODE_EXPR_IDENTIFIER);
+    node->data.expr_type.identifier->data.expr_identifier.name = parser->current.start;
+
+    parser_advance(parser);
+
+    return node;
+}
+
+Node *parse_expr_type_array(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_type_array\n");
+#endif
+
+    if (!parser_consume(parser, TOKEN_LEFT_BRACKET, "expected '['"))
+    {
+        // err: expected left bracket (probably the parser's fault)
+        return NULL;
+    }
+
+    Node *node = new_node(NODE_EXPR_TYPE_ARRAY);
+    node->data.expr_type_array.size = parse_expr(parser);
+    if (node->data.expr_type_array.size == NULL)
+    {
+        // err: size is missing
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_RIGHT_BRACKET, "expected ']'"))
+    {
+        // err: no right bracket after array type
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.expr_type_array.type = parse_expr_type(parser);
+    if (node->data.expr_type_array.type == NULL)
+    {
+        // err: type is missing
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_expr_type_ref(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_type_ref\n");
+#endif
+
+    if (!parser_consume(parser, TOKEN_HASH, "expected '#'"))
+    {
+        // err: expected hash (probably the parser's fault)
+        return NULL;
+    }
+
+    Node *node = new_node(NODE_EXPR_TYPE_REF);
+    node->data.expr_type_ref.type = parse_expr_type(parser);
+    if (node->data.expr_type_ref.type == NULL)
+    {
+        // err: type is missing
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_expr_type_member(Parser *parser, Node *target)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_type_member\n");
+#endif
+
+    Node *node = new_node(NODE_EXPR_TYPE_MEMBER);
+    node->data.expr_type_member.target = target;
+
+    if (parser->current.type != TOKEN_IDENTIFIER)
+    {
+        // err: expected an identifier
+        free_node(node);
+        return NULL;
+    }
+
+    Node *identifier = new_node(NODE_EXPR_IDENTIFIER);
+    identifier->data.expr_identifier.name = parser->current.start;
+
+    node->data.expr_type_member.member = identifier;
+
+    parser_advance(parser);
+
+    return node;
+}
+
+Node *parse_expr_type(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_type\n");
+#endif
+
+    switch (parser->current.type)
+    {
+    case TOKEN_IDENTIFIER:
+        return parse_expr_type_identifier(parser);
+    case TOKEN_LEFT_BRACKET:
+        return parse_expr_type_array(parser);
+    case TOKEN_HASH:
+        return parse_expr_type_ref(parser);
+    default:
+        // err: unexpected token (only type identifiers allowed)
+        parser_error(parser, "expected a type");
+        return NULL;
     }
 }
 
-void parser_error(Parser *parser, const char *message)
+Node *parse_expr_call(Parser *parser, Node *target)
 {
-    fprintf(stderr, "error: %s\n", message);
-    exit(1);
-}
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_call\n");
+#endif
 
-NodeIdentifier *parse_identifier(Parser *parser)
-{
-    printf("parse_identifier\n");
-    parser_consume(parser, TOKEN_IDENTIFIER, "expected identifier");
+    Node *node = new_node(NODE_EXPR_CALL);
+    node->data.expr_call.target = target;
 
-    return new_node_identifier(parser->previous);
-}
-
-NodeComment *parse_comment(Parser *parser)
-{
-    printf("parse_comment\n");
-    parser_consume(parser, TOKEN_COMMENT, "expected comment");
-
-    return new_node_comment(parser->previous);
-}
-
-NodeStmt *parse_stmt(Parser *parser)
-{
-    printf("parse_stmt\n");
-    if (parser_match(parser, TOKEN_USE))
+    if (!parser_consume(parser, TOKEN_LEFT_PAREN, "expected '('"))
     {
-        return parse_stmt_use(parser);
-    }
-    else if (parser_match(parser, TOKEN_FUN))
-    {
-        return parse_stmt_fun(parser);
-    }
-    else if (parser_match(parser, TOKEN_STR))
-    {
-        return parse_stmt_str(parser);
-    }
-    else if (parser_match(parser, TOKEN_VAL))
-    {
-        return parse_stmt_val(parser);
-    }
-    else if (parser_match(parser, TOKEN_VAR))
-    {
-        return parse_stmt_var(parser);
-    }
-    else if (parser_match(parser, TOKEN_IF))
-    {
-        return parse_stmt_if(parser);
-    }
-    else if (parser_match(parser, TOKEN_FOR))
-    {
-        return parse_stmt_for(parser);
-    }
-    else if (parser_match(parser, TOKEN_BRK))
-    {
-        return parse_stmt_brk(parser);
-    }
-    else if (parser_match(parser, TOKEN_CNT))
-    {
-        return parse_stmt_cnt(parser);
-    }
-    else if (parser_match(parser, TOKEN_RET))
-    {
-        return parse_stmt_ret(parser);
-    }
-    else if (parser_match(parser, TOKEN_LEFT_BRACE))
-    {
-        return parse_stmt_expr(parser);
+        // err: no left parenthesis after identifier
+        free_node(node);
+        return NULL;
     }
 
-    return parse_stmt_expr(parser);
-}
-
-// examples:
-// `use foo.bar;`
-// format:
-// `<TOKEN_FUN> <TOKEN_IDENTITY>[<TOKEN_DOT><TOKEN_IDENTITY>...]<TOKEN_SEMICOLON>`
-NodeStmtUse *parse_stmt_use(Parser *parser)
-{
-    printf("parse_stmt_use\n");
-    NodeIdentifier *identifiers = malloc(sizeof(NodeIdentifier));
-    int count = 0;
-
-    while (parser->current.type != TOKEN_SEMICOLON)
+    while (true)
     {
-        identifiers = realloc(identifiers, sizeof(NodeIdentifier) * (count + 1));
-        NodeIdentifier *identifier = parse_identifier(parser);
-        identifiers[count++] = *identifier;
-
-        if (!parser_match(parser, TOKEN_DOT))
+        if (parser->current.type == TOKEN_RIGHT_PAREN)
         {
             break;
         }
-    }
 
-    parser_consume(parser, TOKEN_SEMICOLON, "expected semicolon");
+        Node *argument = parse_expr(parser);
+        if (argument == NULL)
+        {
+            // err: argument is missing
+            free_node(node);
+            return NULL;
+        }
 
-    return new_node_stmt_use(identifiers, count);
-}
+        if (node->data.expr_call.arguments == NULL)
+        {
+            node->data.expr_call.arguments = argument;
+        }
+        else
+        {
+            Node *last = node->data.expr_call.arguments;
+            while (last->next != NULL)
+            {
+                last = last->next;
+            }
 
-// examples:
-// `fun foo(): void {}`
-// `fun foo(bar: #baz): bif {}`
-// `fun foo(bar: #baz, bif: bam): #bop {}`
-// format:
-// `<TOKEN_FUN> <TOKEN_IDENTITY>([<NodeStmtFunParam>|<TOKEN_COMMA>|...])<NodeExprType> <NodeBlock>`
-NodeStmtFun *parse_stmt_fun(Parser *parser)
-{
-    printf("parse_stmt_fun\n");
-    NodeIdentifier *identifier = malloc(sizeof(NodeIdentifier));
-    NodeStmtFunParam *parameters = malloc(sizeof(NodeStmtFunParam));
-    NodeExprType *return_type = malloc(sizeof(NodeExprType));
-    NodeBlock *body = malloc(sizeof(NodeBlock));
+            last->next = argument;
+        }
 
-    identifier = parse_identifier(parser);
-
-    parser_consume(parser, TOKEN_LEFT_PAREN, "expected left parenthesis");
-
-    int count = 0;
-    while (parser->current.type != TOKEN_RIGHT_PAREN)
-    {
-        parameters = realloc(parameters, sizeof(NodeStmtFunParam) * (count + 1));
-        NodeIdentifier *param_identifier = parse_identifier(parser);
-        NodeExprType *param_type = parse_expr_type(parser);
-        parameters[count++] = *new_node_stmt_fun_param(param_identifier, param_type);
+        node->data.expr_call.argument_count++;
 
         if (!parser_match(parser, TOKEN_COMMA))
         {
@@ -175,32 +267,519 @@ NodeStmtFun *parse_stmt_fun(Parser *parser)
         }
     }
 
-    parser_consume(parser, TOKEN_RIGHT_PAREN, "expected right parenthesis");
+    if (!parser_consume(parser, TOKEN_RIGHT_PAREN, "expected ')'"))
+    {
+        // err: no right parenthesis after arguments
+        free_node(node);
+        return NULL;
+    }
 
-    return_type = parse_expr_type(parser);
-    body = parse_block(parser);
-
-    return new_node_stmt_fun(identifier, parameters, count, return_type, body);
+    return node;
 }
 
-// examples:
-// `str foo: {}`
-// `str foo: { var bar: baz; }`
-// `str foo: { var bar: baz; var bim: #bam; }`
-// format:
-// `<TOKEN_STR> <TOKEN_IDENTITY><TOKEN_COLON> <TOKEN_BRACE_LEFT> [<NodeStmtStrField>...] <TOKEN_BRACE_RIGHT>`
-NodeStmtStr *parse_stmt_str(Parser *parser)
+Node *parse_expr_index(Parser *parser, Node *target)
 {
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_index\n");
+#endif
+
+    Node *node = new_node(NODE_EXPR_INDEX);
+    node->data.expr_index.target = target;
+
+    if (!parser_consume(parser, TOKEN_LEFT_BRACKET, "expected '['"))
+    {
+        // err: no left bracket after identifier
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.expr_index.index = parse_expr(parser);
+    if (node->data.expr_index.index == NULL)
+    {
+        // err: index is missing
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_RIGHT_BRACKET, "expected ']'"))
+    {
+        // err: no right bracket after index
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_expr_array(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_array\n");
+#endif
+
+    Node *node = new_node(NODE_EXPR_ARRAY);
+
+    if (!parser_consume(parser, TOKEN_LEFT_BRACKET, "expected '['"))
+    {
+        // err: no left bracket after '['
+        free_node(node);
+        return NULL;
+    }
+
+    while (true)
+    {
+        if (parser->current.type == TOKEN_RIGHT_BRACKET)
+        {
+            break;
+        }
+
+        Node *element = parse_expr(parser);
+        if (element == NULL)
+        {
+            // err: element is missing
+            free_node(node);
+            return NULL;
+        }
+
+        if (node->data.expr_array.elements == NULL)
+        {
+            node->data.expr_array.elements = element;
+        }
+        else
+        {
+            Node *last = node->data.expr_array.elements;
+            while (last->next != NULL)
+            {
+                last = last->next;
+            }
+
+            last->next = element;
+        }
+
+        if (!parser_match(parser, TOKEN_COMMA))
+        {
+            break;
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_RIGHT_BRACKET, "expected ']'"))
+    {
+        // err: no right bracket after array
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_expr_unary(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_unary\n");
+#endif
+
+    if (token_is_operator_unary(parser->current.type))
+    {
+        Token operator= parser->current;
+        parser_advance(parser);
+
+        Node *right = parse_expr_unary(parser);
+        if (right == NULL)
+        {
+            // err: right side of unary operator is missing
+            return NULL;
+        }
+
+        Node *node = new_node(NODE_EXPR_UNARY);
+        node->data.expr_unary.right = right;
+        node->data.expr_unary.operator= operator.type;
+
+        return node;
+    }
+
+    return parse_expr_primary(parser);
+}
+
+Node *parse_expr_binary(Parser *parser, int precedence_parent)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_binary\n");
+#endif
+
+    Node *left = parse_expr_unary(parser);
+    if (left == NULL)
+    {
+        // err: left side of binary operator is missing
+        return NULL;
+    }
+
+    while (token_is_operator_binary(parser->current.type) && get_precedence(parser->current.type) >= precedence_parent)
+    {
+        Token operator= parser->current;
+        parser_advance(parser);
+
+        int precedence = get_precedence(operator.type);
+        if (token_is_operator_right_associative(operator.type))
+        {
+            precedence++;
+        }
+
+        Node *right = parse_expr_binary(parser, precedence);
+        if (right == NULL)
+        {
+            // err: right side of binary operator is missing
+            free_node(left);
+            return NULL;
+        }
+
+        Node *node = new_node(NODE_EXPR_BINARY);
+        node->data.expr_binary.left = left;
+        node->data.expr_binary.right = right;
+        node->data.expr_binary.operator= operator.type;
+
+        left = node;
+    }
+
+    return left;
+}
+
+Node *parse_expr_grouping(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_grouping\n");
+#endif
+
+    if (parser_match(parser, TOKEN_LEFT_PAREN))
+    {
+        Node *node = parse_expr(parser);
+        if (node == NULL)
+        {
+            // err: expression is missing
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_RIGHT_PAREN, "expected ')'"))
+        {
+            // err: no right parenthesis after expression
+            free_node(node);
+            return NULL;
+        }
+
+        return node;
+    }
+
+    return parse_expr_primary(parser);
+}
+
+Node *parse_expr_primary(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr_primary\n");
+#endif
+
+    Node *node = NULL;
+
+    switch (parser->current.type)
+    {
+    case TOKEN_NUMBER:
+    case TOKEN_STRING:
+        node = new_node(NODE_EXPR_LITERAL);
+        node->data.expr_literal.value = parser->current;
+        parser_advance(parser);
+        break;
+    case TOKEN_IDENTIFIER:
+        Node *target = new_node(NODE_EXPR_IDENTIFIER);
+        target->data.expr_identifier.name = parser->current.start;
+        parser_advance(parser);
+
+        if (parser_peek(parser, TOKEN_LEFT_PAREN))
+        {
+            node = parse_expr_call(parser, target);
+        }
+        else if (parser_peek(parser, TOKEN_LEFT_BRACKET))
+        {
+            node = parse_expr_index(parser, target);
+        }
+        else
+        {
+            node = target;
+        }
+
+        break;
+    case TOKEN_LEFT_PAREN:
+        node = parse_expr_grouping(parser);
+        break;
+    case TOKEN_LEFT_BRACKET:
+        node = parse_expr_array(parser);
+        break;
+    default:
+        // err: unexpected token (only literals and identifiers allowed)
+        free_node(node);
+        return NULL;
+    }
+
+    while (parser_match(parser, TOKEN_DOT))
+    {
+        node = parse_expr_type_member(parser, node);
+        if (node == NULL)
+        {
+            // err: member is missing
+            return NULL;
+        }
+    }
+
+    return node;
+}
+
+Node *parse_expr(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_expr\n");
+#endif
+
+    return parse_expr_binary(parser, 0);
+}
+
+Node *parse_stmt_use(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_use\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_USE);
+
+    if (!parser_consume(parser, TOKEN_USE, "expected 'use`"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
+
+    if (parser->current.type != TOKEN_IDENTIFIER)
+    {
+        // err: expected an identifier
+        parser_error(parser, "expected an identifier");
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.stmt_use.module = new_node(NODE_EXPR_IDENTIFIER);
+    node->data.stmt_use.module->data.expr_identifier.name = parser->current.start;
+
+    parser_advance(parser);
+
+    while (true)
+    {
+        if (parser->current.type == TOKEN_SEMICOLON)
+        {
+            break;
+        }
+
+        if (!parser_consume(parser, TOKEN_DOT, "expected '.'"))
+        {
+            // err: no dot after part
+            free_node(node);
+            return NULL;
+        }
+
+        if (!parser_match(parser, TOKEN_IDENTIFIER))
+        {
+            // err: expected an identifier
+            parser_error(parser, "expected an identifier");
+            free_node(node);
+            return NULL;
+        }
+
+        Node *part = new_node(NODE_EXPR_IDENTIFIER);
+        part->data.expr_identifier.name = parser->previous.start;
+
+        Node *last = node->data.stmt_use.module;
+        if (last == NULL)
+        {
+            node->data.stmt_use.module = part;
+        }
+        else
+        {
+            while (last->next != NULL)
+            {
+                last = last->next;
+            }
+
+            last->next = part;
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';'"))
+    {
+        // err: no semicolon after use statement
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_stmt_fun(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_fun\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_FUN);
+
+    if (!parser_consume(parser, TOKEN_FUN, "expected 'fun'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
+
+    if (parser->current.type != TOKEN_IDENTIFIER)
+    {
+        // err: next token after `fun` is not an identifier
+        parser_error(parser, "expected an identifier");
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.stmt_fun.identifier = new_node(NODE_EXPR_IDENTIFIER);
+    node->data.stmt_fun.identifier->data.expr_identifier.name = parser->current.start;
+
+    parser_advance(parser);
+
+    if (!parser_consume(parser, TOKEN_LEFT_PAREN, "expected '('"))
+    {
+        // err: next token after identifier is not a left parenthesis
+        free_node(node);
+        return NULL;
+    }
+
+    while (true)
+    {
+        if (parser->current.type == TOKEN_RIGHT_PAREN)
+        {
+            break;
+        }
+
+        if (parser_match(parser, TOKEN_IDENTIFIER))
+        {
+            const char *name = parser->previous.start;
+
+            if (!parser_consume(parser, TOKEN_COLON, "expected ':'"))
+            {
+                // err: no colon after parameter name
+                free_node(node);
+                return NULL;
+            }
+
+            Node *type = parse_expr_type(parser);
+            if (type == NULL)
+            {
+                // err: type is missing
+                free_node(node);
+                return NULL;
+            }
+
+            if (node->data.stmt_fun.parameters == NULL)
+            {
+                node->data.stmt_fun.parameters = (fun_parameter *)malloc(sizeof(fun_parameter));
+            }
+            else
+            {
+                node->data.stmt_fun.parameters = (fun_parameter *)realloc(node->data.stmt_fun.parameters, (node->data.stmt_fun.parameter_count + 1) * sizeof(fun_parameter));
+            }
+
+            node->data.stmt_fun.parameters[node->data.stmt_fun.parameter_count].name = name;
+            node->data.stmt_fun.parameters[node->data.stmt_fun.parameter_count].type = type;
+            node->data.stmt_fun.parameter_count++;
+        }
+
+        if (!parser_match(parser, TOKEN_COMMA))
+        {
+            break;
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_RIGHT_PAREN, "expected ')'"))
+    {
+        // err: no right parenthesis after parameters
+        free_node(node);
+        return NULL;
+    }
+
+    // optional return type
+    if (parser_match(parser, TOKEN_COLON))
+    {
+        node->data.stmt_fun.return_type = parse_expr_type(parser);
+        if (node->data.stmt_fun.return_type == NULL)
+        {
+            // err: return type is missing
+            free_node(node);
+            return NULL;
+        }
+    }
+
+    node->data.stmt_fun.body = parse_stmt_block(parser);
+    if (node->data.stmt_fun.body == NULL)
+    {
+        // err: function body is missing
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_stmt_str(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
     printf("parse_stmt_str\n");
-    NodeIdentifier *identifier = malloc(sizeof(NodeIdentifier));
-    NodeStmtStrField *fields = malloc(sizeof(NodeStmtStrField));
+#endif
 
-    identifier = parse_identifier(parser);
+    Node *node = new_node(NODE_STMT_STR);
 
-    parser_consume(parser, TOKEN_COLON, "expected colon");
-    parser_consume(parser, TOKEN_LEFT_BRACE, "expected left brace");
+    if (!parser_consume(parser, TOKEN_STR, "expected 'str'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
 
-    int count = 0;
+    if (parser->current.type != TOKEN_IDENTIFIER)
+    {
+        // err: next token after `str` is not an identifier
+        parser_error(parser, "expected an identifier");
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.stmt_str.identifier = new_node(NODE_EXPR_IDENTIFIER);
+    node->data.stmt_str.identifier->data.expr_identifier.name = parser->current.start;
+
+    parser_advance(parser);
+
+    if (!parser_consume(parser, TOKEN_COLON, "expected ':'"))
+    {
+        // err: no colon after identifier
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_LEFT_BRACE, "expected '{'"))
+    {
+        // err: no right brace after colon
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_peek(parser, TOKEN_IDENTIFIER))
+    {
+        // err: no fields after left brace
+        parser_error(parser, "expected a field");
+        free_node(node);
+        return NULL;
+    }
+
     while (true)
     {
         if (parser->current.type == TOKEN_RIGHT_BRACE)
@@ -208,525 +787,585 @@ NodeStmtStr *parse_stmt_str(Parser *parser)
             break;
         }
 
-        fields = realloc(fields, sizeof(NodeStmtStrField) * (count + 1));
-        NodeIdentifier *field_identifier = parse_identifier(parser);
-        NodeExprType *field_type = parse_expr_type(parser);
-        fields[count++] = *new_node_stmt_str_field(field_identifier, field_type);
-
-        if (!parser_match(parser, TOKEN_SEMICOLON))
+        if (parser_match(parser, TOKEN_IDENTIFIER))
         {
-            break;
+            const char *name = parser->previous.start;
+
+            if (!parser_consume(parser, TOKEN_COLON, "expected ':'"))
+            {
+                // err: no colon after field name
+                free_node(node);
+                return NULL;
+            }
+
+            Node *type = parse_expr_type(parser);
+            if (type == NULL)
+            {
+                // err: type is missing
+                free_node(node);
+                return NULL;
+            }
+
+            if (node->data.stmt_str.fields == NULL)
+            {
+                node->data.stmt_str.fields = (str_field *)malloc(sizeof(str_field));
+            }
+            else
+            {
+                node->data.stmt_str.fields = (str_field *)realloc(node->data.stmt_str.fields, (node->data.stmt_str.field_count + 1) * sizeof(str_field));
+            }
+
+            node->data.stmt_str.fields[node->data.stmt_str.field_count].name = name;
+            node->data.stmt_str.fields[node->data.stmt_str.field_count].type = type;
+            node->data.stmt_str.field_count++;
+        }
+
+        if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';'"))
+        {
+            // err: no semicolon after field
+            free_node(node);
+            return NULL;
         }
     }
 
-    parser_consume(parser, TOKEN_RIGHT_BRACE, "expected right brace");
+    if (!parser_consume(parser, TOKEN_RIGHT_BRACE, "expected '}'"))
+    {
+        // err: no right brace after fields
+        free_node(node);
+        return NULL;
+    }
 
-    return new_node_stmt_str(identifier, fields, count);
+    return node;
 }
 
-// examples:
-// `val foo: bar;`
-// `val foo: #bar;`
-// `val foo: bar = baz;`
-// format:
-// `<TOKEN_VAL> <TOKEN_IDENTIFIER><NodeExprType> <TOKEN_EQUAL><NodeExpr>`
-NodeStmtVal *parse_stmt_val(Parser *parser)
+Node *parse_stmt_val(Parser *parser)
 {
+#ifdef PARSER_DEBUG_TRACE
     printf("parse_stmt_val\n");
-    NodeIdentifier *identifier = malloc(sizeof(NodeIdentifier));
-    NodeExprType *type = malloc(sizeof(NodeExprType));
-    NodeExpr *initializer = malloc(sizeof(NodeExpr));
+#endif
 
-    identifier = parse_identifier(parser);
-    type = parse_expr_type(parser);
+    Node *node = new_node(NODE_STMT_VAL);
 
-    if (parser_match(parser, TOKEN_EQUAL))
+    if (!parser_consume(parser, TOKEN_VAL, "expected 'val'"))
     {
-        initializer = parse_expr(parser);
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
     }
 
-    if (initializer == NULL)
+    if (parser->current.type != TOKEN_IDENTIFIER)
     {
-        parser_error(parser, "expected initializer");
+        // err: next token after `val` is not an identifier
+        parser_error(parser, "expected an identifier");
+        free_node(node);
+        return NULL;
     }
 
-    return new_node_stmt_val(identifier, type, initializer);
-}
+    node->data.stmt_val.identifier = new_node(NODE_EXPR_IDENTIFIER);
+    node->data.stmt_val.identifier->data.expr_identifier.name = parser->current.start;
 
-// examples:
-// `var foo: bar;`
-// `var foo: #bar;`
-// `var foo: bar = baz;`
-// format:
-// `<TOKEN_VAR> <TOKEN_IDENTIFIER><NodeExprType> [<TOKEN_EQUAL><NodeExpr>]`
-NodeStmtVar *parse_stmt_var(Parser *parser)
-{
-    printf("parse_stmt_var\n");
-    NodeIdentifier *identifier = malloc(sizeof(NodeIdentifier));
-    NodeExprType *type = malloc(sizeof(NodeExprType));
-    NodeExpr *initializer = malloc(sizeof(NodeExpr));
-
-    identifier = parse_identifier(parser);
-    type = parse_expr_type(parser);
-
-    if (parser_match(parser, TOKEN_EQUAL))
-    {
-        initializer = parse_expr(parser);
-    }
-
-    return new_node_stmt_var(identifier, type, initializer);
-}
-
-// examples:
-// `if (foo == bar) {}`
-// `if (foo == bar) {} or {}`
-// `if (foo == bar) {} or (bar == baz) {}`
-// `if (foo == bar) {} or (bar == baz) {} or {}`
-// format:
-// `<TOKEN_IF> <TOKEN_RIGHT_PAREN><NodeExpr><TOKEN_RIGHT_PAREN> <NodeBlock> [<TOKEN_OR> [<TOKEN_RIGHT_PAREN><NodeExpr><TOKEN_PAREN_RIGHT>]<NodeBlock>]...`
-NodeStmtIf *parse_stmt_if(Parser *parser)
-{
-    printf("parse_stmt_if\n");
-    NodeExpr *condition = malloc(sizeof(NodeExpr));
-    NodeBlock *body = malloc(sizeof(NodeBlock));
-    NodeStmtIf *branch = NULL;
-
-    parser_consume(parser, TOKEN_LEFT_PAREN, "expected left parenthesis");
-    condition = parse_expr(parser);
-    parser_consume(parser, TOKEN_RIGHT_PAREN, "expected right parenthesis");
-
-    body = parse_block(parser);
-
-    while (parser_match(parser, TOKEN_OR))
-    {
-        NodeExpr *condition = NULL;
-        NodeBlock *body = malloc(sizeof(NodeBlock));
-
-        if (parser_match(parser, TOKEN_LEFT_PAREN))
-        {
-            condition = parse_expr(parser);
-            parser_consume(parser, TOKEN_RIGHT_PAREN, "expected right parenthesis");
-        }
-
-        body = parse_block(parser);
-
-        branch = realloc(branch, sizeof(NodeStmtIf));
-        branch = new_node_stmt_if(condition, body, branch);
-    }
-
-    return new_node_stmt_if(condition, body, branch);
-}
-
-// examples:
-// `for (i < 1) {}`
-// format:
-// `<TOKEN_FOR> [<TOKEN_RIGHT_PAREN><NodeExpr><TOKEN_RIGHT_PAREN>] <NodeBlock>`
-NodeStmtFor *parse_stmt_for(Parser *parser)
-{
-    printf("parse_stmt_for\n");
-    NodeExpr *condition = malloc(sizeof(NodeExpr));
-    NodeBlock *body = malloc(sizeof(NodeBlock));
-
-    if (parser_match(parser, TOKEN_LEFT_PAREN))
-    {
-        condition = parse_expr(parser);
-        parser_consume(parser, TOKEN_RIGHT_PAREN, "expected right parenthesis");
-    }
-
-    body = parse_block(parser);
-
-    return new_node_stmt_for(condition, body);
-}
-
-// examples:
-// `brk;`
-// format:
-// `<TOKEN_BRK><TOKEN_SEMICOLON>`
-NodeStmtBrk *parse_stmt_brk(Parser *parser)
-{
-    printf("parse_stmt_brk\n");
-    parser_consume(parser, TOKEN_SEMICOLON, "expected semicolon");
-
-    return new_node_stmt_brk();
-}
-
-// examples:
-// `cnt;`
-// format:
-// `<TOKEN_CNT><TOKEN_SEMICOLON>`
-NodeStmtCnt *parse_stmt_cnt(Parser *parser)
-{
-    printf("parse_stmt_cnt\n");
-    parser_consume(parser, TOKEN_SEMICOLON, "expected semicolon");
-
-    return new_node_stmt_cnt();
-}
-
-// examples:
-// `ret;`
-// `ret foo;`
-// format:
-// `<TOKEN_RET> [<NodeExpr>]<TOKEN_SEMICOLON>`
-NodeStmtRet *parse_stmt_ret(Parser *parser)
-{
-    printf("parse_stmt_ret\n");
-    NodeExpr *value = malloc(sizeof(NodeExpr));
-
-    if (parser->current.type != TOKEN_SEMICOLON)
-    {
-        value = parse_expr(parser);
-    }
-
-    parser_consume(parser, TOKEN_SEMICOLON, "expected semicolon");
-
-    return new_node_stmt_ret(value);
-}
-
-// examples:
-// `{ foo; }`
-// `{ foo; bar; }`
-// format:
-// `<TOKEN_BRACE_LEFT> [<NodeStmt>...] <TOKEN_BRACE_RIGHT>`
-NodeBlock *parse_block(Parser *parser)
-{
-    printf("parse_block\n");
-    NodeStmt *statements = malloc(sizeof(NodeStmt));
-    int count = 0;
-
-    parser_consume(parser, TOKEN_LEFT_BRACE, "expected left brace");
-
-    while (parser->current.type != TOKEN_RIGHT_BRACE)
-    {
-        statements = realloc(statements, sizeof(NodeStmt) * (count + 1));
-        NodeStmt *statement = parse_stmt(parser);
-        statements[count++] = *statement;
-    }
-
-    parser_consume(parser, TOKEN_RIGHT_BRACE, "expected right brace");
-
-    return new_node_block(statements, count);
-}
-
-// examples:
-// `foo;`
-// `foo(bar);`
-// `foo + bar;`
-// format:
-// `<NodeExpr><TOKEN_SEMICOLON>`
-NodeStmtExpr *parse_stmt_expr(Parser *parser)
-{
-    printf("parse_stmt_expr\n");
-    NodeExpr *expression = parse_expr(parser);
-
-    parser_consume(parser, TOKEN_SEMICOLON, "expected semicolon");
-
-    return new_node_stmt_expr(expression);
-}
-
-// examples:
-// `123`
-// `"foo"`
-// `'a'`
-// format:
-// `<TOKEN_NUMBER>`
-// `<TOKEN_CHARACTER>`
-// `<TOKEN_STRING>`
-NodeExprLiteral *parse_expr_literal(Parser *parser)
-{
-    printf("parse_expr_literal\n");
     parser_advance(parser);
 
-    return new_node_expr_literal(parser->previous);
-}
-
-// examples:
-// `+foo`
-// `-foo`
-// `!foo`
-// format:
-// `<OPERATOR><NodeExpr>`
-NodeExprUnary *parse_expr_unary(Parser *parser)
-{
-    printf("parse_expr_unary\n");
-    Token *op = NULL;
-
-    switch (parser->current.type)
+    if (!parser_consume(parser, TOKEN_COLON, "expected ':'"))
     {
-    case TOKEN_PLUS:     // + positive
-    case TOKEN_MINUS:    // - negative
-    case TOKEN_TILDE:    // ~ bitwise not
-    case TOKEN_BANG:     // ! logical not
-    case TOKEN_QUESTION: // ? address
-    case TOKEN_AT:       // @ dereference
-        op = &parser->current;
-        parser_advance(parser);
-        break;
-    default:
-        break;
-    }
-
-    if (op == NULL)
-    {
+        // err: no colon after val name
+        free_node(node);
         return NULL;
     }
 
-    NodeExpr *operand = parse_expr(parser);
-
-    if (operand == NULL)
+    node->data.stmt_val.type = parse_expr_type(parser);
+    if (node->data.stmt_val.type == NULL)
     {
-        parser_error(parser, "expected expression");
-    }
-
-    return new_node_expr_unary(*op, operand);
-}
-
-// examples:
-// `foo + bar`
-// `foo - bar`
-// `foo * bar`
-// `foo / bar`
-// format:
-// `<NodeExpr><OPERATOR><NodeExpr>`
-NodeExprBinary *parse_expr_binary(Parser *parser)
-{
-    printf("parse_expr_binary\n");
-    Token *op = NULL;
-    NodeExpr *left = parse_expr(parser);
-
-    switch (parser->current.type)
-    {
-    case TOKEN_PLUS:                // +  addition
-    case TOKEN_MINUS:               // -  subtraction
-    case TOKEN_STAR:                // *  multiplication
-    case TOKEN_SLASH:               // /  division
-    case TOKEN_PERCENT:             // %  modulus
-    case TOKEN_AMPERSAND:           // &  bitwise and
-    case TOKEN_PIPE:                // |  bitwise or
-    case TOKEN_CARET:               // ^  bitwise xor
-    case TOKEN_LESS:                // <  less than
-    case TOKEN_GREATER:             // >  greater than
-    case TOKEN_EQUAL_EQUAL:         // == equal
-    case TOKEN_BANG_EQUAL:          // != not equal
-    case TOKEN_LESS_EQUAL:          // <= less than or equal
-    case TOKEN_GREATER_EQUAL:       // >= greater than or equal
-    case TOKEN_LESS_LESS:           // << left shift
-    case TOKEN_GREATER_GREATER:     // >> right shift
-    case TOKEN_AMPERSAND_AMPERSAND: // && logical and
-    case TOKEN_PIPE_PIPE:           // || logical or
-        op = &parser->current;
-        parser_advance(parser);
-        break;
-    default:
-        break;
-    }
-
-    if (op == NULL)
-    {
+        // err: type is missing
+        free_node(node);
         return NULL;
     }
 
-    NodeExpr *right = parse_expr(parser);
-    if (right == NULL)
+    if (!parser_consume(parser, TOKEN_EQUAL, "expected '='"))
     {
-        parser_error(parser, "expected expression");
+        // err: no assignment operator after type
+        free_node(node);
+        return NULL;
     }
 
-    return new_node_expr_binary(*op, left, right);
+    node->data.stmt_val.initializer = parse_expr(parser);
+    if (node->data.stmt_val.initializer == NULL)
+    {
+        // err: value is missing
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';'"))
+    {
+        // err: no semicolon after value
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
 }
 
-// examples:
-// `foo()`
-// `foo(bar)`
-// `foo(bar, baz)`
-// format:
-// `<NodeExpr>([<NodeExpr>|<TOKEN_COMMA>|...])`
-NodeExprCall *parse_expr_call(Parser *parser)
+Node *parse_stmt_var(Parser *parser)
 {
-    printf("parse_expr_call\n");
-    NodeExpr *callee = parse_expr(parser);
-    NodeExpr *arguments = malloc(sizeof(NodeExpr));
-    int count = 0;
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_var\n");
+#endif
 
-    parser_consume(parser, TOKEN_LEFT_PAREN, "expected left parenthesis");
+    Node *node = new_node(NODE_STMT_VAR);
 
-    while (parser->current.type != TOKEN_RIGHT_PAREN)
+    if (!parser_consume(parser, TOKEN_VAR, "expected 'var'"))
     {
-        arguments = realloc(arguments, sizeof(NodeExpr) * (count + 1));
-        NodeExpr *argument = parse_expr(parser);
-        arguments[count++] = *argument;
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
 
-        if (!parser_match(parser, TOKEN_COMMA))
+    if (parser->current.type != TOKEN_IDENTIFIER)
+    {
+        // err: next token after `var` is not an identifier
+        parser_error(parser, "expected an identifier");
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.stmt_var.identifier = new_node(NODE_EXPR_IDENTIFIER);
+    node->data.stmt_var.identifier->data.expr_identifier.name = parser->current.start;
+
+    parser_advance(parser);
+
+    if (!parser_consume(parser, TOKEN_COLON, "expected ':'"))
+    {
+        // err: no colon after var name
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.stmt_var.type = parse_expr_type(parser);
+    if (node->data.stmt_var.type == NULL)
+    {
+        // err: type is missing
+        free_node(node);
+        return NULL;
+    }
+
+    // initializer is optional
+    if (parser_match(parser, TOKEN_EQUAL))
+    {
+        node->data.stmt_var.initializer = parse_expr(parser);
+        if (node->data.stmt_var.initializer == NULL)
         {
-            break;
+            // err: initializer is missing after assignment operator
+            free_node(node);
+            return NULL;
         }
     }
 
-    parser_consume(parser, TOKEN_RIGHT_PAREN, "expected right parenthesis");
-
-    return new_node_expr_call(callee, arguments, count);
-}
-
-// examples:
-// `foo[0]`
-// `foo[bar]`
-// format:
-// `<NodeExpr>[<NodeExpr>]`
-NodeExprIndex *parse_expr_index(Parser *parser)
-{
-    printf("parse_expr_index\n");
-    NodeExpr *target = parse_expr(parser);
-
-    parser_consume(parser, TOKEN_LEFT_BRACKET, "expected left bracket");
-
-    NodeExpr *index = parse_expr(parser);
-
-    parser_consume(parser, TOKEN_RIGHT_BRACKET, "expected right bracket");
-
-    return new_node_expr_index(target, index);
-}
-
-// examples:
-// `: foo`
-// `: #bar`
-// format:
-// `<TOKEN_COLON> [<TOKEN_HASH> || <TOKEN_RIGHT_BRACE><TOKEN_NUMBER><TOKEN_LEFT_BRACE>...]<TOKEN_IDENTITY>`
-NodeExprType *parse_expr_type(Parser *parser)
-{
-    parser_consume(parser, TOKEN_COLON, "expected colon");
-
-    if (parser_match(parser, TOKEN_HASH))
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';'"))
     {
-        return new_node_expr_type(parse_identifier(parser), true);
-    }
-
-    return new_node_expr_type(parse_identifier(parser), false);
-}
-
-NodeExpr *parse_primary(Parser *parser);
-NodeExpr *parse_unary(Parser *parser);
-NodeExpr *parse_binary(Parser *parser, int parentPrecedence);
-NodeExpr *parse_grouping(Parser *parser);
-NodeExpr *parse_expr_identifier(Parser *parser);
-
-NodeExpr *parse_primary(Parser *parser)
-{
-    printf("parse_primary\n");
-    switch (parser->current.type)
-    {
-    case TOKEN_NUMBER:
-    case TOKEN_CHARACTER:
-    case TOKEN_STRING:
-        return parse_expr_literal(parser);
-    case TOKEN_IDENTIFIER:
-        return parse_expr_identifier(parser);
-    case TOKEN_LEFT_PAREN:
-        return parse_grouping(parser);
-    default:
+        // err: no semicolon after type
+        free_node(node);
         return NULL;
     }
+
+    return node;
 }
 
-NodeExpr *parse_expr_identifier(Parser *parser)
+Node *parse_stmt_if(Parser *parser)
 {
-    printf("parse_expr_identifier\n");
-    NodeIdentifier *identifier = parse_identifier(parser);
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_if\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_IF);
+
+    if (!parser_consume(parser, TOKEN_IF, "expected 'if'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_LEFT_PAREN, "expected '('"))
+    {
+        // err: no left parenthesis after `if`
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.stmt_if.condition = parse_expr(parser);
+    if (node->data.stmt_if.condition == NULL)
+    {
+        // err: condition is missing
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_RIGHT_PAREN, "expected ')'"))
+    {
+        // err: no right parenthesis after condition
+        free_node(node);
+        return NULL;
+    }
+
+    node->data.stmt_if.body = parse_stmt(parser);
+    if (node->data.stmt_if.body == NULL)
+    {
+        // err: body is missing
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_stmt_or(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_or\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_OR);
+
+    if (!parser_consume(parser, TOKEN_OR, "expected 'or'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
 
     if (parser_match(parser, TOKEN_LEFT_PAREN))
     {
-        return parse_expr_call(parser);
-    }
-
-    if (parser_match(parser, TOKEN_LEFT_BRACKET))
-    {
-        return parse_expr_index(parser);
-    }
-
-    if (parser_match(parser, TOKEN_EQUAL))
-    {
-        NodeExpr *value = parse_expr(parser);
-
-        return new_node_expr_assign(identifier, value);
-    }
-
-    return new_node_expr_identifier(identifier);
-}
-
-NodeExpr *parse_unary(Parser *parser)
-{
-    printf("parse_unary\n");
-    if (parser_match(parser, TOKEN_PLUS) || parser_match(parser, TOKEN_MINUS) || parser_match(parser, TOKEN_TILDE) || parser_match(parser, TOKEN_BANG) || parser_match(parser, TOKEN_QUESTION) || parser_match(parser, TOKEN_AT))
-    {
-        Token operator= parser->previous;
-        NodeExpr *right = parse_unary(parser);
-
-        return new_node_expr_unary(operator, right);
-    }
-
-    return parse_primary(parser);
-}
-
-NodeExpr *parse_binary(Parser *parser, int parentPrecedence)
-{
-    printf("parse_binary\n");
-    NodeExpr *left = parse_unary(parser);
-
-    while (true)
-    {
-        int precedence = get_precedence(parser->current.type);
-        if (precedence <= parentPrecedence)
+        node->data.stmt_or.condition = parse_expr(parser);
+        if (node->data.stmt_or.condition == NULL)
         {
-            break;
+            // err: condition is missing
+            free_node(node);
+            return NULL;
         }
 
-        parser_advance(parser);
-        NodeExpr *right = parse_binary(parser, precedence);
-        left = new_node_expr_binary(parser->previous, left, right);
+        if (!parser_consume(parser, TOKEN_RIGHT_PAREN, "expected ')'"))
+        {
+            // err: no right parenthesis after condition
+            free_node(node);
+            return NULL;
+        }
     }
 
-    return left;
+    node->data.stmt_or.body = parse_stmt(parser);
+    if (node->data.stmt_or.body == NULL)
+    {
+        // err: body is missing
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
 }
 
-NodeExpr *parse_grouping(Parser *parser)
+Node *parse_stmt_for(Parser *parser)
 {
-    printf("parse_grouping\n");
-    NodeExpr *expr = parse_expr(parser);
-    parser_consume(parser, TOKEN_RIGHT_PAREN, "expected right parenthesis");
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_for\n");
+#endif
 
-    return expr;
+    Node *node = new_node(NODE_STMT_FOR);
+
+    if (!parser_consume(parser, TOKEN_FOR, "expected 'for'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
+
+    // condition is an optional singular expression -- no C style bs
+    if (parser_match(parser, TOKEN_LEFT_PAREN))
+    {
+        node->data.stmt_for.condition = parse_expr(parser);
+        if (node->data.stmt_for.condition == NULL)
+        {
+            // err: condition is missing
+            free_node(node);
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_RIGHT_PAREN, "expected ')'"))
+        {
+            // err: no right parenthesis after condition
+            free_node(node);
+            return NULL;
+        }
+    }
+
+    node->data.stmt_for.body = parse_stmt(parser);
+    if (node->data.stmt_for.body == NULL)
+    {
+        // err: body is missing
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
 }
 
-NodeExpr *parse_expr(Parser *parser)
+Node *parse_stmt_brk(Parser *parser)
 {
-    printf("parse_expr\n");
-    return parse_binary(parser, 0);
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_brk\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_BRK);
+
+    if (!parser_consume(parser, TOKEN_BRK, "expected 'brk'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';'"))
+    {
+        // err: no semicolon after `brk`
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
 }
 
-NodeProgram *parse(Parser *parser)
+Node *parse_stmt_cnt(Parser *parser)
 {
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_cnt\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_CNT);
+
+    if (!parser_consume(parser, TOKEN_CNT, "expected 'cnt'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';'"))
+    {
+        // err: no semicolon after `cnt`
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_stmt_ret(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_ret\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_RET);
+
+    if (!parser_consume(parser, TOKEN_RET, "expected 'ret'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_peek(parser, TOKEN_SEMICOLON))
+    {
+        node->data.stmt_ret.value = parse_expr(parser);
+        if (node->data.stmt_ret.value == NULL)
+        {
+            // err: value is missing
+            free_node(node);
+            return NULL;
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';'"))
+    {
+        // err: no semicolon after value
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_stmt_block(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_block\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_BLOCK);
+
+    if (!parser_consume(parser, TOKEN_LEFT_BRACE, "expected '{'"))
+    {
+        // err: invalid token (probably the parser's fault)
+        free_node(node);
+        return NULL;
+    }
+
+    while (parser->current.type != TOKEN_RIGHT_BRACE && parser->current.type != TOKEN_EOF)
+    {
+        Node *stmt = parse_stmt(parser);
+        if (stmt == NULL)
+        {
+            // err: statement is missing
+            free_node(node);
+            return NULL;
+        }
+
+        Node *last = node->data.stmt_block.statements;
+        if (last == NULL)
+        {
+            node->data.stmt_block.statements = stmt;
+        }
+        else
+        {
+            while (last->next != NULL)
+            {
+                last = last->next;
+            }
+
+            last->next = stmt;
+        }
+
+        node->data.stmt_block.statement_count++;
+    }
+
+    if (!parser_consume(parser, TOKEN_RIGHT_BRACE, "expected '}'"))
+    {
+        // err: no right brace after statements
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_stmt_expr(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt_expr\n");
+#endif
+
+    Node *node = new_node(NODE_STMT_EXPR);
+
+    node->data.stmt_expr.expression = parse_expr(parser);
+    if (node->data.stmt_expr.expression == NULL)
+    {
+        // err: expression is missing
+        free_node(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';'"))
+    {
+        // err: no semicolon after expression
+        free_node(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+Node *parse_stmt(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
+    printf("parse_stmt\n");
+#endif
+
+    Node *node = NULL;
+
+    switch (parser->current.type)
+    {
+    case TOKEN_USE:
+        node = parse_stmt_use(parser);
+        break;
+    case TOKEN_FUN:
+        node = parse_stmt_fun(parser);
+        break;
+    case TOKEN_STR:
+        node = parse_stmt_str(parser);
+        break;
+    case TOKEN_VAL:
+        node = parse_stmt_val(parser);
+        break;
+    case TOKEN_VAR:
+        node = parse_stmt_var(parser);
+        break;
+    case TOKEN_IF:
+        node = parse_stmt_if(parser);
+        break;
+    case TOKEN_OR:
+        node = parse_stmt_or(parser);
+        break;
+    case TOKEN_FOR:
+        node = parse_stmt_for(parser);
+        break;
+    case TOKEN_BRK:
+        node = parse_stmt_brk(parser);
+        break;
+    case TOKEN_CNT:
+        node = parse_stmt_cnt(parser);
+        break;
+    case TOKEN_RET:
+        node = parse_stmt_ret(parser);
+        break;
+    case TOKEN_LEFT_BRACE:
+        node = parse_stmt_block(parser);
+        break;
+    default:
+        node = parse_stmt_expr(parser);
+        break;
+    }
+
+#ifdef PARSER_DEBUG_TRACE
+    printf("P SMT: %s\n\n", node_type_string(node->type));
+#endif
+
+    return node;
+}
+
+Node *parse(Parser *parser)
+{
+#ifdef PARSER_DEBUG_TRACE
     printf("parse\n");
-    NodeStmt *statements = malloc(sizeof(NodeStmt));
+#endif
 
-    int count = 0;
+    Node *node = new_node(NODE_PROGRAM);
+
     while (parser->current.type != TOKEN_EOF)
     {
-        statements = realloc(statements, sizeof(NodeStmt) * (count + 1));
-        NodeStmt *statement = parse_stmt(parser);
-
-        switch (statement->base.type)
+        Node *stmt = parse_stmt(parser);
+        if (stmt == NULL)
         {
-        case NODE_STMT_USE:
-        case NODE_STMT_FUN:
-        case NODE_STMT_STR:
-        case NODE_STMT_VAL:
-            break;
-        default:
-            parser_error(parser, "illegal top-level statement: expected use, fun, str, or val");
+            // err: statement is missing
+            free_node(node);
+            return NULL;
         }
 
-        statements[count++] = *statement;
+        Node *last = node->data.base_program.statements;
+        if (last == NULL)
+        {
+            node->data.base_program.statements = stmt;
+        }
+        else
+        {
+            while (last->next != NULL)
+            {
+                last = last->next;
+            }
 
-        printf("P STMT: %d\n", count);
+            last->next = stmt;
+        }
+
+        node->data.base_program.statement_count++;
     }
 
-    return new_node_program(statements, count);
+    return node;
 }

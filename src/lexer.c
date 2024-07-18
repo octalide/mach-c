@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
 #include "lexer.h"
@@ -68,8 +69,8 @@ void skip_whitespace(Lexer *lexer)
             lexer_advance(lexer);
             break;
         case '\n':
-            lexer->line++;
             lexer_advance(lexer);
+            lexer->line++;
             break;
         default:
             return;
@@ -152,9 +153,8 @@ Token number(Lexer *lexer)
     // - '0b': binary
     // - '0o': octal
     // - '0x': hexadecimal
-    switch (lexer_peek(lexer))
+    if (lexer_peek(lexer) == '0')
     {
-    case '0':
         switch (lexer_peek_next(lexer))
         {
         case 'b':
@@ -228,12 +228,16 @@ Token number(Lexer *lexer)
 
 Token string(Lexer *lexer)
 {
-    while ((lexer_peek(lexer) != '"' && lexer_peek(lexer) != '\n') && !is_at_end(lexer))
+    while (!is_at_end(lexer) && (lexer_peek(lexer) != '"' || (lexer_peek(lexer) == '\\' && lexer_peek_next(lexer) == '"')))
     {
+        if (lexer_peek(lexer) == '\\' && (lexer_peek_next(lexer) == '"' || lexer_peek_next(lexer) == '\\'))
+        {
+            lexer_advance(lexer);
+        }
         lexer_advance(lexer);
     }
 
-    if (lexer_peek(lexer) == '\n' || is_at_end(lexer))
+    if (is_at_end(lexer) || lexer_peek(lexer) == '\n')
     {
         return make_token_error("unterminated string literal");
     }
@@ -260,27 +264,23 @@ Token character(Lexer *lexer)
     return make_token(lexer, TOKEN_CHARACTER);
 }
 
-Token comment(Lexer *lexer)
-{
-    while (lexer_peek(lexer) != '`' && !is_at_end(lexer))
-    {
-        if (lexer_peek(lexer) == '\n')
-        {
-            lexer->line++;
-        }
+// TODO: find a reasonable way to do comments
+// Token comment(Lexer *lexer)
+// {
+//     while (lexer_peek(lexer) != '`' && !is_at_end(lexer))
+//     {
+//         lexer_advance(lexer);
+//     }
 
-        lexer_advance(lexer);
-    }
+//     if (is_at_end(lexer))
+//     {
+//         return make_token_error("unterminated comment");
+//     }
 
-    if (is_at_end(lexer))
-    {
-        return make_token_error("unterminated comment");
-    }
+//     lexer_advance(lexer);
 
-    lexer_advance(lexer);
-
-    return make_token(lexer, TOKEN_COMMENT);
-}
+//     return make_token(lexer, TOKEN_COMMENT);
+// }
 
 Token next_token(Lexer *lexer)
 {
@@ -292,17 +292,19 @@ Token next_token(Lexer *lexer)
         return make_token(lexer, TOKEN_EOF);
     }
 
-    char c = lexer_advance(lexer);
+    char c = lexer_peek(lexer);
 
-    if (isalpha(c))
+    if (isalpha(c) || c == '_')
     {
         // check for string types:
         // - 'f': format string
         if (c == 'f')
         {
-            if (lexer_peek(lexer) == '"')
+            if (lexer_peek_next(lexer) == '"')
             {
                 lexer_advance(lexer);
+                lexer_advance(lexer);
+
                 return string(lexer);
             }
         }
@@ -315,7 +317,7 @@ Token next_token(Lexer *lexer)
         return number(lexer);
     }
 
-    switch (c)
+    switch (lexer_advance(lexer))
     {
     case '(':
         return make_token(lexer, TOKEN_LEFT_PAREN);
@@ -339,8 +341,6 @@ Token next_token(Lexer *lexer)
         return make_token(lexer, TOKEN_AT);
     case '#':
         return make_token(lexer, TOKEN_HASH);
-    case '`':
-        return comment(lexer);
     case '\'':
         return character(lexer);
     case '\"':

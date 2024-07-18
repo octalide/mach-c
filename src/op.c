@@ -1,0 +1,42 @@
+#include "token.h"
+
+int get_precedence(TokenType op)
+{
+    switch (op)
+    {
+    case TOKEN_PLUS:
+    case TOKEN_MINUS:
+    case TOKEN_TILDE:
+    case TOKEN_BANG:
+    case TOKEN_QUESTION:
+    case TOKEN_AT:
+        return 1;
+    case TOKEN_STAR:
+    case TOKEN_SLASH:
+    case TOKEN_PERCENT:
+        return 2;
+    case TOKEN_LESS_LESS:
+    case TOKEN_GREATER_GREATER:
+        return 3;
+    case TOKEN_LESS:
+    case TOKEN_GREATER:
+    case TOKEN_LESS_EQUAL:
+    case TOKEN_GREATER_EQUAL:
+        return 4;
+    case TOKEN_EQUAL_EQUAL:
+    case TOKEN_BANG_EQUAL:
+        return 5;
+    case TOKEN_AMPERSAND:
+        return 6;
+    case TOKEN_CARET:
+        return 7;
+    case TOKEN_PIPE:
+        return 8;
+    case TOKEN_AMPERSAND_AMPERSAND:
+        return 9;
+    case TOKEN_PIPE_PIPE:
+        return 10;
+    default:
+        return -1;
+    }
+}

@@ -1,0 +1,86 @@
+use foo.bar;
+use baz;
+
+fun no_params_no_body(): void {}
+
+fun no_params(): void {
+    ret;
+}
+
+fun one_param(one: i32): i32 {
+    ret one;
+}
+
+fun two_params(one: i32, two: i32): i32 {
+    ret one + two;
+}
+
+str no_fields: {}
+
+str one_field: {
+    one: i32;
+}
+
+str two_fields: {
+    one: i32;
+    two: i32;
+}
+
+fun main(): i32 {
+    val one: i32 = 1;
+    var two: i32 = 2;
+    var res: i32;
+
+    two = 0x2;
+    two = 0o2;
+    two = 0b10;
+
+    val val_no_fields: no_fields;
+    var var_one_field: one_field;
+    var var_two_fields: two_fields;
+
+    var_one_field.one = one;
+    var_two_fields.one = one;
+    var_two_fields.two = two;
+
+    no_params_no_body();
+    no_params();
+    one_param(one);
+    one_param(var_one_field.one);
+    two_params(one, two);
+    two_params(var_two_fields.one, var_two_fields.two);
+    res = one_param(one);
+    res = one_param(var_one_field.one);
+    res = two_params(one, two);
+    res = two_params(var_two_fields.one, var_two_fields.two);
+
+    res = 1;
+    res = 1 + 1;
+    res = +1;
+    res = (1);
+    res = +(1);
+    res = (1 + 1);
+    res = (1) + 1;
+    res = +(1) + (+1);
+
+    res = var_one_field.one;
+    res = var_one_field.one + var_one_field.two;
+    res = var_one_field.one + (1 + var_one_field.two);
+
+    var str: string = "regular string";
+    str = f"format string {res}";
+    str = "escape string \'\"\\\n"
+
+    print("regular string");
+    print(f"format string {res}\n");
+    print("escape string \'\"\\\n");
+
+    var i: i32 = 0;
+    for (i < 10) {
+        print(f"i: {i}");
+        i += 1
+    }
+
+    // comment independent
+    ret 0; // comment after line
+}

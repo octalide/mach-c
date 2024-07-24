@@ -6,9 +6,87 @@
 
 void lexer_init(Lexer *lexer, const char *source)
 {
+    lexer->source = source;
     lexer->start = source;
     lexer->current = source;
     lexer->line = 1;
+}
+
+void lexer_free(Lexer *lexer)
+{
+    free(lexer->source);
+    free(lexer->start);
+    free(lexer->current);
+}
+
+char *lexer_get_line(Lexer *lexer, int line)
+{
+    const char *start = lexer->source;
+    while (line > 1)
+    {
+        if (*start == '\0')
+        {
+            return NULL;
+        }
+
+        if (*start == '\n')
+        {
+            line--;
+        }
+
+        start++;
+    }
+
+    const char *end = start;
+    while (*end != '\n' && *end != '\0')
+    {
+        end++;
+    }
+
+    int length = (int)(end - start);
+    char *line_buffer = malloc(length + 1);
+    strncpy(line_buffer, start, length);
+    line_buffer[length] = '\0';
+
+    return line_buffer;
+}
+
+int lexer_get_token_line_index(Lexer *lexer, Token *token)
+{
+    if (!token)
+    {
+        return -1;
+    }
+
+    const char *start = lexer->source;
+    int line = 1;
+    while (start < token->start)
+    {
+        if (*start == '\n')
+        {
+            line++;
+        }
+
+        start++;
+    }
+
+    return line;
+}
+
+int lexer_get_token_line_char_index(Lexer *lexer, Token *token)
+{
+    if (!token)
+    {
+        return -1;
+    }
+    
+    const char *line_start = token->start;
+    while (line_start > lexer->source && *line_start != '\n')
+    {
+        line_start--;
+    }
+
+    return (int)(token->start - line_start);
 }
 
 bool is_at_end(Lexer *lexer)
@@ -78,65 +156,6 @@ void skip_whitespace(Lexer *lexer)
     }
 }
 
-TokenType check_keyword(Lexer *lexer, int start, int length, const char *rest, TokenType type)
-{
-    if (lexer->current - lexer->start == start + length && memcmp(lexer->start + start, rest, length) == 0)
-    {
-        return type;
-    }
-
-    return TOKEN_IDENTIFIER;
-}
-
-TokenType identifier_type(Lexer *lexer)
-{
-    switch (lexer->start[0])
-    {
-    case 'b': // brk
-        return check_keyword(lexer, 1, 2, "rk", TOKEN_BRK);
-    case 'c': // cnt
-        return check_keyword(lexer, 1, 2, "nt", TOKEN_CNT);
-    case 'f': // for, fun
-        if (lexer->current - lexer->start > 1)
-        {
-            switch (lexer->start[1])
-            {
-            case 'o':
-                return check_keyword(lexer, 2, 1, "r", TOKEN_FOR);
-            case 'u':
-                return check_keyword(lexer, 2, 1, "n", TOKEN_FUN);
-            }
-        }
-
-        return TOKEN_IDENTIFIER;
-    case 'i': // if
-        return check_keyword(lexer, 1, 1, "f", TOKEN_IF);
-    case 'o': // or
-        return check_keyword(lexer, 1, 1, "r", TOKEN_OR);
-    case 'r': // ret
-        return check_keyword(lexer, 1, 2, "et", TOKEN_RET);
-    case 's': // str
-        return check_keyword(lexer, 1, 2, "tr", TOKEN_STR);
-    case 'u': // use
-        return check_keyword(lexer, 1, 2, "se", TOKEN_USE);
-    case 'v': // var, val
-        if ((lexer->current - lexer->start > 2) && (lexer->start[1] == 'a'))
-        {
-            switch (lexer->start[2])
-            {
-            case 'r':
-                return check_keyword(lexer, 2, 1, "r", TOKEN_VAR);
-            case 'l':
-                return check_keyword(lexer, 2, 1, "l", TOKEN_VAL);
-            }
-        }
-
-        return TOKEN_IDENTIFIER;
-    default:
-        return TOKEN_IDENTIFIER;
-    }
-}
-
 Token identifier(Lexer *lexer)
 {
     while (isalnum(lexer_peek(lexer)) || lexer_peek(lexer) == '_')
@@ -144,7 +163,7 @@ Token identifier(Lexer *lexer)
         lexer_advance(lexer);
     }
 
-    return make_token(lexer, identifier_type(lexer));
+    return make_token(lexer, TOKEN_IDENTIFIER);
 }
 
 Token number(Lexer *lexer)
@@ -230,10 +249,12 @@ Token string(Lexer *lexer)
 {
     while (!is_at_end(lexer) && (lexer_peek(lexer) != '"' || (lexer_peek(lexer) == '\\' && lexer_peek_next(lexer) == '"')))
     {
+        // special case for escaped double quote
         if (lexer_peek(lexer) == '\\' && (lexer_peek_next(lexer) == '"' || lexer_peek_next(lexer) == '\\'))
         {
             lexer_advance(lexer);
         }
+
         lexer_advance(lexer);
     }
 
@@ -264,23 +285,13 @@ Token character(Lexer *lexer)
     return make_token(lexer, TOKEN_CHARACTER);
 }
 
-// TODO: find a reasonable way to do comments
-// Token comment(Lexer *lexer)
-// {
-//     while (lexer_peek(lexer) != '`' && !is_at_end(lexer))
-//     {
-//         lexer_advance(lexer);
-//     }
-
-//     if (is_at_end(lexer))
-//     {
-//         return make_token_error("unterminated comment");
-//     }
-
-//     lexer_advance(lexer);
-
-//     return make_token(lexer, TOKEN_COMMENT);
-// }
+void skip_to_eol(Lexer *lexer)
+{
+    while (lexer_peek(lexer) != '\n' && !is_at_end(lexer))
+    {
+        lexer_advance(lexer);
+    }
+}
 
 Token next_token(Lexer *lexer)
 {
@@ -319,6 +330,11 @@ Token next_token(Lexer *lexer)
 
     switch (lexer_advance(lexer))
     {
+    case '\'':
+        return character(lexer);
+    case '\"':
+        return string(lexer);
+    
     case '(':
         return make_token(lexer, TOKEN_LEFT_PAREN);
     case ')':
@@ -331,20 +347,19 @@ Token next_token(Lexer *lexer)
         return make_token(lexer, TOKEN_LEFT_BRACKET);
     case ']':
         return make_token(lexer, TOKEN_RIGHT_BRACKET);
+
     case ':':
         return make_token(lexer, TOKEN_COLON);
     case ';':
         return make_token(lexer, TOKEN_SEMICOLON);
+
     case '?':
         return make_token(lexer, TOKEN_QUESTION);
     case '@':
         return make_token(lexer, TOKEN_AT);
     case '#':
         return make_token(lexer, TOKEN_HASH);
-    case '\'':
-        return character(lexer);
-    case '\"':
-        return string(lexer);
+
     case '.':
         return make_token(lexer, TOKEN_DOT);
     case ',':
@@ -422,6 +437,12 @@ Token next_token(Lexer *lexer)
 
         return make_token(lexer, TOKEN_BANG);
     case '/':
+        if (lexer_peek(lexer) == '/')
+        {
+            skip_to_eol(lexer);
+            return next_token(lexer);
+        }
+        
         return make_token(lexer, TOKEN_SLASH);
     case '\\':
         return make_token(lexer, TOKEN_BACKSLASH);

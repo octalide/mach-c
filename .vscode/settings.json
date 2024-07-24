@@ -5,6 +5,13 @@
         "stdlib.h": "c",
         "lexer.h": "c",
         "token.h": "c",
-        "parser.h": "c"
+        "parser.h": "c",
+        "symbol_table.h": "c",
+        "keywords.h": "c",
+        "target.h": "c",
+        "options.h": "c",
+        "compiler.h": "c",
+        "ioutil.h": "c",
+        "semantic_analyzer.h": "c"
     }
 }

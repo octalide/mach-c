@@ -4,7 +4,7 @@ This is the bootstrap compiler for the Mach programming language, written in C.
 
 ## Language Definition
 
-Below is the description of the entire rough syntax of the Mach language.
+Below is the description of the entire syntax of the Mach language.
 
 ### Keywords
 
@@ -22,18 +22,6 @@ Below is the description of the entire rough syntax of the Mach language.
 | `u64`    | 64-bit unsigned integer      |
 | `f32`    | 32-bit floating point number |
 | `f64`    | 64-bit floating point number |
-| `bool`   | boolean type                 |
-| `char`   | character type               |
-| `string` | string type                  |
-
-#### Builtin Value Keywords
-
-| keyword | description   |
-| ------- | ------------- |
-| `true`  | boolean true  |
-| `false` | boolean false |
-| `null`  | null pointer  |
-| `type`  | type struct   |
 
 #### Decleration Keywords
 
@@ -44,7 +32,6 @@ Below is the description of the entire rough syntax of the Mach language.
 | `ptr`   | declares a pointer type                                                |
 | `fun`   | declares a function                                                    |
 | `str`   | declares a structure                                                   |
-| `pub`   | marks a variable, function, or structure as public                     |
 
 Decleration keyword usage:
 

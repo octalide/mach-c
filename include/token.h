@@ -9,19 +9,8 @@ typedef enum
     TOKEN_EOF,
     TOKEN_COMMENT,
 
-    TOKEN_USE, // use
-    TOKEN_FUN, // fun
-    TOKEN_STR, // str
-    TOKEN_VAL, // val
-    TOKEN_VAR, // var
-
-    TOKEN_IF,  // if
-    TOKEN_OR,  // or
-    TOKEN_FOR, // for
-    TOKEN_BRK, // brk
-    TOKEN_CNT, // cnt
-    TOKEN_RET, // ret
-
+    TOKEN_IDENTIFIER,
+    
     TOKEN_LEFT_PAREN,    // (
     TOKEN_RIGHT_PAREN,   // )
     TOKEN_LEFT_BRACKET,  // [
@@ -51,6 +40,7 @@ typedef enum
     TOKEN_EQUAL,               // =
     TOKEN_BANG,                // !
     TOKEN_SLASH,               // /
+    TOKEN_BACKSLASH,
     TOKEN_EQUAL_EQUAL,         // ==
     TOKEN_BANG_EQUAL,          // !=
     TOKEN_LESS_EQUAL,          // <=
@@ -59,20 +49,17 @@ typedef enum
     TOKEN_GREATER_GREATER,     // >>
     TOKEN_AMPERSAND_AMPERSAND, // &&
     TOKEN_PIPE_PIPE,           // ||
-    TOKEN_BACKSLASH,
 
     TOKEN_NUMBER,
     TOKEN_CHARACTER,
     TOKEN_STRING,
-
-    TOKEN_IDENTIFIER,
 } TokenType;
 
 typedef struct
 {
     TokenType type;
     const char *start;
-    int length;
+    char length;
 } Token;
 
 char *token_type_string(TokenType type);

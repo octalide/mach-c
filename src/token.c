@@ -11,28 +11,10 @@ char *token_type_string(TokenType type)
         return "EOF";
     case TOKEN_COMMENT:
         return "COMMENT";
-    case TOKEN_USE:
-        return "USE";
-    case TOKEN_FUN:
-        return "FUN";
-    case TOKEN_STR:
-        return "STR";
-    case TOKEN_VAL:
-        return "VAL";
-    case TOKEN_VAR:
-        return "VAR";
-    case TOKEN_IF:
-        return "IF";
-    case TOKEN_OR:
-        return "OR";
-    case TOKEN_FOR:
-        return "FOR";
-    case TOKEN_BRK:
-        return "BRK";
-    case TOKEN_CNT:
-        return "CNT";
-    case TOKEN_RET:
-        return "RET";
+
+    case TOKEN_IDENTIFIER:
+        return "IDENTIFIER";
+
     case TOKEN_LEFT_PAREN:
         return "LEFT_PAREN";
     case TOKEN_RIGHT_PAREN:
@@ -45,16 +27,19 @@ char *token_type_string(TokenType type)
         return "LEFT_BRACE";
     case TOKEN_RIGHT_BRACE:
         return "RIGHT_BRACE";
+
     case TOKEN_COLON:
         return "COLON";
     case TOKEN_SEMICOLON:
         return "SEMICOLON";
+
     case TOKEN_QUESTION:
         return "QUESTION";
     case TOKEN_AT:
         return "AT";
     case TOKEN_HASH:
         return "HASH";
+
     case TOKEN_DOT:
         return "DOT";
     case TOKEN_COMMA:
@@ -103,14 +88,14 @@ char *token_type_string(TokenType type)
         return "AMPERSAND_AMPERSAND";
     case TOKEN_PIPE_PIPE:
         return "PIPE_PIPE";
+        
     case TOKEN_NUMBER:
         return "NUMBER";
     case TOKEN_CHARACTER:
         return "CHARACTER";
     case TOKEN_STRING:
         return "STRING";
-    case TOKEN_IDENTIFIER:
-        return "IDENTIFIER";
+    
     default:
         return "UNKNOWN";
     }

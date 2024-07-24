@@ -2,191 +2,246 @@
 #include <stdio.h>
 #include "ast.h"
 
-Node *new_node(NodeType type)
+Node *node_new(NodeType type)
 {
-    Node *node = malloc(sizeof(Node));
+    Node *node = calloc(1, sizeof(Node));
     if (!node)
     {
         fprintf(stderr, "fatal: failed to allocate memory for node\n");
         exit(1);
     }
 
-    memset(node, 0, sizeof(Node));
+    node->child = NULL;
     node->type = type;
 
     return node;
 }
 
-void free_node(Node *node)
+void node_free(Node *node)
 {
-    if (!node)
+    if (node == NULL)
     {
         return;
     }
 
+    if (node->child == NULL)
+    {
+        node_free(node->child);
+    }
+    
     switch (node->type)
     {
-    case NODE_PROGRAM:
-        if (node->data.base_program.statements)
-        {
-            if (node->data.base_program.statements->next)
-            {
-                free_node(node->data.base_program.statements->next);
-            }
-
-            free_node(node->data.base_program.statements);
-        }
+    case NODE_BLOCK:
+        node_list_free(&node->data.node_block.statements);
+        break;
+    case NODE_IDENTIFIER:
+        node_free(node->data.node_identifier.member);
         break;
     case NODE_EXPR_IDENTIFIER:
+        node_free(node->data.expr_identifier.identifier);
         break;
-    case NODE_EXPR_LITERAL:
+    case NODE_EXPR_LIT_CHAR:
         break;
-    case NODE_EXPR_TYPE:
-        free_node(node->data.expr_type.identifier);
+    case NODE_EXPR_LIT_NUMBER:
         break;
-    case NODE_EXPR_TYPE_REF:
-        free_node(node->data.expr_type_ref.type);
-        break;
-    case NODE_EXPR_UNARY:
-        free_node(node->data.expr_unary.right);
-        break;
-    case NODE_EXPR_BINARY:
-        free_node(node->data.expr_binary.left);
-        free_node(node->data.expr_binary.right);
+    case NODE_EXPR_LIT_STRING:
         break;
     case NODE_EXPR_CALL:
-        free_node(node->data.expr_call.target);
-        if (node->data.expr_call.arguments)
-        {
-            if (node->data.expr_call.arguments->next)
-            {
-                free_node(node->data.expr_call.arguments->next);
-            }
-
-            free_node(node->data.expr_call.arguments);
-        }
+        node_free(node->data.expr_call.target);
+        node_list_free(&node->data.expr_call.arguments);
         break;
     case NODE_EXPR_INDEX:
-        free_node(node->data.expr_index.target);
-        free_node(node->data.expr_index.index);
+        node_free(node->data.expr_index.target);
+        node_free(node->data.expr_index.index);
         break;
-    case NODE_EXPR_ASSIGN:
-        free_node(node->data.expr_assign.target);
-        free_node(node->data.expr_assign.value);
+    case NODE_EXPR_DEF_STR:
+        node_list_free(&node->data.expr_def_str.initializers);
         break;
-    case NODE_STMT_BLOCK:
-        if (node->data.stmt_block.statements)
-        {
-            if (node->data.stmt_block.statements->next)
-            {
-                free_node(node->data.stmt_block.statements->next);
-            }
-
-            free_node(node->data.stmt_block.statements);
-        }
+    case NODE_EXPR_DEF_UNI:
+        node_free(node->data.expr_def_uni.initializer);
+        break;
+    case NODE_EXPR_DEF_ARRAY:
+        node_free(node->data.expr_def_array.type);
+        node_free(node->data.expr_def_array.size);
+        node_list_free(&node->data.expr_def_array.elements);
+        break;
+    case NODE_EXPR_UNARY:
+        node_free(node->data.expr_unary.rhs);
+        break;
+    case NODE_EXPR_BINARY:
+        node_free(node->data.expr_binary.rhs);
+        node_free(node->data.expr_binary.lhs);
+        break;
+    case NODE_TYPE_ARRAY:
+        node_free(node->data.type_array.size);
+        node_free(node->data.type_array.type);
+        break;
+    case NODE_TYPE_REF:
+        node_free(node->data.type_ref.target);
+        break;
+    case NODE_TYPE_FUN:
+        node_free(node->data.type_fun.return_type);
+        node_list_free(&node->data.type_fun.parameter_types);
+        break;
+    case NODE_TYPE_STR:
+        node_list_free(&node->data.type_str.fields);
+        break;
+    case NODE_TYPE_UNI:
+        node_list_free(&node->data.type_uni.fields);
+        break;
+    case NODE_FIELD:
+        node_free(node->data.node_field.identifier);
+        node_free(node->data.node_field.type);
         break;
     case NODE_STMT_USE:
-        free_node(node->data.stmt_use.module);
-        break;
-    case NODE_STMT_FUN:
-        free_node(node->data.stmt_fun.identifier);
-        for (int i = 0; i < node->data.stmt_fun.parameter_count; i++)
-        {
-            free(node->data.stmt_fun.parameters[i].name);
-            free_node(node->data.stmt_fun.parameters[i].type);
-        }
-        free(node->data.stmt_fun.parameters);
-        break;
-    case NODE_STMT_STR:
-        free_node(node->data.stmt_str.identifier);
-        for (int i = 0; i < node->data.stmt_str.field_count; i++)
-        {
-            free(node->data.stmt_str.fields[i].name);
-            free_node(node->data.stmt_str.fields[i].type);
-        }
-        free(node->data.stmt_str.fields);
-        break;
-    case NODE_STMT_VAL:
-        free_node(node->data.stmt_val.identifier);
-        free_node(node->data.stmt_val.type);
-        free_node(node->data.stmt_val.initializer);
-        break;
-    case NODE_STMT_VAR:
-        free_node(node->data.stmt_var.identifier);
-        free_node(node->data.stmt_var.type);
-        free_node(node->data.stmt_var.initializer);
+        node_free(node->data.stmt_use.path);
         break;
     case NODE_STMT_IF:
-        free_node(node->data.stmt_if.condition);
-        free_node(node->data.stmt_if.body);
+        node_free(node->data.stmt_if.condition);
+        node_free(node->data.stmt_if.body);
         break;
     case NODE_STMT_OR:
-        free_node(node->data.stmt_or.condition);
-        free_node(node->data.stmt_or.body);
+        node_free(node->data.stmt_or.condition);
+        node_free(node->data.stmt_or.body);
         break;
     case NODE_STMT_FOR:
-        free_node(node->data.stmt_for.condition);
-        free_node(node->data.stmt_for.body);
+        node_free(node->data.stmt_for.condition);
+        node_free(node->data.stmt_for.body);
         break;
     case NODE_STMT_BRK:
         break;
     case NODE_STMT_CNT:
         break;
     case NODE_STMT_RET:
-        free_node(node->data.stmt_ret.value);
+        node_free(node->data.stmt_ret.value);
+        break;
+    case NODE_STMT_DECL_TYPE:
+        node_free(node->data.stmt_decl_type.identifier);
+        node_free(node->data.stmt_decl_type.type);
+        break;
+    case NODE_STMT_DECL_VAL:
+        node_free(node->data.stmt_decl_val.identifier);
+        node_free(node->data.stmt_decl_val.type);
+        node_free(node->data.stmt_decl_val.initializer);
+        break;
+    case NODE_STMT_DECL_VAR:
+        node_free(node->data.stmt_decl_var.identifier);
+        node_free(node->data.stmt_decl_var.type);
+        node_free(node->data.stmt_decl_var.initializer);
+        break;
+    case NODE_STMT_DECL_FUN:
+        node_free(node->data.stmt_decl_fun.identifier);
+        node_free(node->data.stmt_decl_fun.return_type);
+        node_list_free(&node->data.stmt_decl_fun.parameters);
+        node_free(node->data.stmt_decl_fun.body);
+        break;
+    case NODE_STMT_DECL_STR:
+        node_free(node->data.stmt_decl_str.identifier);
+        node_list_free(&node->data.stmt_decl_str.fields);
+        break;
+    case NODE_STMT_DECL_UNI:
+        node_free(node->data.stmt_decl_uni.identifier);
+        node_list_free(&node->data.stmt_decl_uni.fields);
         break;
     case NODE_STMT_EXPR:
-        free_node(node->data.stmt_expr.expression);
+        node_free(node->data.stmt_expr.expression);
         break;
     default:
         break;
     }
+}
 
-    free(node);
+void node_list_append(Node ***list, Node *node)
+{
+    if (!node)
+    {
+        return;
+    }
+
+    int length = node_list_length(*list);
+    
+    Node **new_list = realloc(*list, sizeof(Node *) * (length + 2));
+    if (!new_list)
+    {
+        fprintf(stderr, "fatal: failed to allocate memory for node list\n");
+        *list = NULL;
+        exit(1);
+    }
+
+    new_list[length] = node;
+    new_list[length + 1] = NULL;
+
+    *list = new_list;
+}
+
+int node_list_length(Node **list)
+{
+    if (!list)
+    {
+        return 0;
+    }
+
+    int length = 0;
+    while (list[length])
+    {
+        length++;
+    }
+
+    return length;
+}
+
+void node_list_free(Node ***list)
+{
+    for (int i = 0; i < node_list_length(*list); i++)
+    {
+        node_free((*list)[i]);
+    }
+
+    free(*list);
 }
 
 char *node_type_string(NodeType type)
 {
     switch (type)
     {
-    case NODE_PROGRAM:
-        return "PROGRAM";
+    case NODE_BLOCK:
+        return "BLOCK";
     case NODE_EXPR_IDENTIFIER:
         return "EXPR_IDENTIFIER";
-    case NODE_EXPR_LITERAL:
-        return "EXPR_LITERAL";
-    case NODE_EXPR_ARRAY:
-        return "EXPR_ARRAY";
-    case NODE_EXPR_TYPE:
-        return "EXPR_TYPE";
-    case NODE_EXPR_TYPE_ARRAY:
-        return "EXPR_TYPE_ARRAY";
-    case NODE_EXPR_TYPE_REF:
-        return "EXPR_TYPE_REF";
-    case NODE_EXPR_TYPE_MEMBER:
-        return "EXPR_TYPE_MEMBER";
-    case NODE_EXPR_UNARY:
-        return "EXPR_UNARY";
-    case NODE_EXPR_BINARY:
-        return "EXPR_BINARY";
+    case NODE_EXPR_LIT_CHAR:
+        return "EXPR_LIT_CHAR";
+    case NODE_EXPR_LIT_NUMBER:
+        return "EXPR_LIT_NUMBER";
+    case NODE_EXPR_LIT_STRING:
+        return "EXPR_LIT_STRING";
     case NODE_EXPR_CALL:
         return "EXPR_CALL";
     case NODE_EXPR_INDEX:
         return "EXPR_INDEX";
-    case NODE_EXPR_ASSIGN:
-        return "EXPR_ASSIGN";
-    case NODE_STMT_BLOCK:
-        return "STMT_BLOCK";
+    case NODE_EXPR_DEF_STR:
+        return "EXPR_DEF_STR";
+    case NODE_EXPR_DEF_UNI:
+        return "EXPR_DEF_UNI";
+    case NODE_EXPR_DEF_ARRAY:
+        return "EXPR_DEF_ARRAY";
+    case NODE_EXPR_UNARY:
+        return "EXPR_UNARY";
+    case NODE_EXPR_BINARY:
+        return "EXPR_BINARY";
+    case NODE_TYPE_ARRAY:
+        return "TYPE_ARRAY";
+    case NODE_TYPE_REF:
+        return "TYPE_REF";
+    case NODE_TYPE_FUN:
+        return "TYPE_FUN";
+    case NODE_TYPE_STR:
+        return "TYPE_STR";
+    case NODE_TYPE_UNI:
+        return "TYPE_UNI";
+    case NODE_FIELD:
+        return "FIELD";
     case NODE_STMT_USE:
         return "STMT_USE";
-    case NODE_STMT_FUN:
-        return "STMT_FUN";
-    case NODE_STMT_STR:
-        return "STMT_STR";
-    case NODE_STMT_VAL:
-        return "STMT_VAL";
-    case NODE_STMT_VAR:
-        return "STMT_VAR";
     case NODE_STMT_IF:
         return "STMT_IF";
     case NODE_STMT_OR:
@@ -199,6 +254,18 @@ char *node_type_string(NodeType type)
         return "STMT_CNT";
     case NODE_STMT_RET:
         return "STMT_RET";
+    case NODE_STMT_DECL_TYPE:
+        return "STMT_DECL_TYPE";
+    case NODE_STMT_DECL_VAL:
+        return "STMT_DECL_VAL";
+    case NODE_STMT_DECL_VAR:
+        return "STMT_DECL_VAR";
+    case NODE_STMT_DECL_FUN:
+        return "STMT_DECL_FUN";
+    case NODE_STMT_DECL_STR:
+        return "STMT_DECL_STR";
+    case NODE_STMT_DECL_UNI:
+        return "STMT_DECL_UNI";
     case NODE_STMT_EXPR:
         return "STMT_EXPR";
     default:

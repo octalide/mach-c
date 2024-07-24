@@ -5,8 +5,10 @@
             "name": "(gdb) Launch",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/mach.exe",
-            "args": ["test.mach"],
+            "program": "${workspaceFolder}/cmach.exe",
+            "args": [
+                "X:\\dev\\src\\github.com\\octalide\\mach"
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

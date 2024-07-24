@@ -1,6 +1,6 @@
-#include "token.h"
+#include "op.h"
 
-bool token_is_operator_binary(TokenType type)
+bool op_is_binary(TokenType type)
 {
     switch (type)
     {
@@ -29,7 +29,7 @@ bool token_is_operator_binary(TokenType type)
     }
 }
 
-bool token_is_operator_unary(TokenType type)
+bool op_is_unary(TokenType type)
 {
     switch (type)
     {
@@ -45,7 +45,7 @@ bool token_is_operator_unary(TokenType type)
     }
 }
 
-bool token_is_operator_right_associative(TokenType type)
+bool op_is_right_associative(TokenType type)
 {
     switch (type)
     {
@@ -61,7 +61,7 @@ bool token_is_operator_right_associative(TokenType type)
     }
 }
 
-int get_precedence(TokenType op)
+int op_get_precedence(TokenType op)
 {
     switch (op)
     {

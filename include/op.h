@@ -3,9 +3,9 @@
 
 #include "token.h"
 
-bool token_is_operator_binary(TokenType type);
-bool token_is_operator_unary(TokenType type);
-bool token_is_operator_right_associative(TokenType type);
-int get_precedence(TokenType op);
+bool op_is_binary(TokenType type);
+bool op_is_unary(TokenType type);
+bool op_is_right_associative(TokenType type);
+int op_get_precedence(TokenType op);
 
 #endif

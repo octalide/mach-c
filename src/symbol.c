@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "builtin.h"
 #include "symbol_table.h"
 
 SymbolTable *symbol_table_new(int size)
@@ -9,6 +10,7 @@ SymbolTable *symbol_table_new(int size)
     table->symbols = calloc(size, sizeof(Symbol *));
     table->size = size;
     table->scope_level = 0;
+
     return table;
 }
 

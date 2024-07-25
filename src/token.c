@@ -103,10 +103,10 @@ char *token_type_string(TokenType type)
     }
 }
 
-char *token_raw(Token *token)
+char *token_raw(Token token)
 {
-    char *data = malloc(token->length + 1);
-    memcpy(data, token->start, token->length);
-    data[token->length] = '\0';
+    char *data = malloc(token.length + 1);
+    memcpy(data, token.start, token.length);
+    data[token.length] = '\0';
     return data;
 }

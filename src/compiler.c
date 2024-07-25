@@ -270,7 +270,7 @@ void compiler_prepare(Compiler *compiler)
 //
 // A pointer to the Compiler in use is stored in `visitor->data_one` and the
 //   current SourceFile is stored in `visitor->data_two`.
-bool visitor_cb_visit_stmt_use(void *context, Node *node)
+bool compiler_cb_visit_stmt_use(void *context, Node *node)
 {
     if (context == NULL)
     {
@@ -295,7 +295,7 @@ bool visitor_cb_visit_stmt_use(void *context, Node *node)
 
     Token token = node->data.stmt_use.path->data.expr_lit_string.value;
     const char *path_file = source_file->path;
-    char *path_use_raw = token_raw(&token);
+    char *path_use_raw = token_raw(token);
 
     // only preserve text between the first quote and the last, noninclusive
     char *quote = strchr(path_use_raw, '\"');
@@ -366,7 +366,7 @@ void compiler_pass_initial(Compiler *compiler)
 
     Visitor visitor;
     visitor_init(&visitor);
-    visitor.cb_visit_stmt_use = visitor_cb_visit_stmt_use;
+    visitor.cb_visit_stmt_use = compiler_cb_visit_stmt_use;
 
     CompilerVisitorContext context;
     context.compiler = compiler;

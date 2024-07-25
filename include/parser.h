@@ -47,8 +47,9 @@ bool parser_consume(Parser *parser, TokenType type);
 Node *parse_block(Parser *parser);
 Node *parse_identifier(Parser *parser);
 
-Node *parse_postfix(Parser *parser);
+Node *parse_postfix(Parser *parser, Node *target);
 Node *parse_expr_identifier(Parser *parser);
+Node *parse_expr_member(Parser *parser);
 Node *parse_expr_lit_char(Parser *parser);
 Node *parse_expr_lit_number(Parser *parser);
 Node *parse_expr_lit_string(Parser *parser);

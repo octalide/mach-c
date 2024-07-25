@@ -64,6 +64,6 @@ typedef struct
 
 char *token_type_string(TokenType type);
 
-char *token_raw(Token *token);
+char *token_raw(Token token);
 
 #endif // TOKEN_H

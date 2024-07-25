@@ -53,7 +53,6 @@ typedef struct node_block
 typedef struct node_identifier
 {
     Token value;
-    struct Node *member;
 } node_identifier;
 
 typedef struct expr_member

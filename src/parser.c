@@ -29,7 +29,7 @@ void parser_free(Parser *parser)
     {
         return;
     }
-    
+
     if (parser->lexer != NULL)
     {
         lexer_free(parser->lexer);
@@ -217,7 +217,6 @@ Node *parse_block(Parser *parser)
 }
 
 // foo
-// foo.bar
 // ...
 Node *parse_identifier(Parser *parser)
 {
@@ -230,22 +229,11 @@ Node *parse_identifier(Parser *parser)
     Node *node = node_new(NODE_IDENTIFIER);
     node->data.node_identifier.value = parser->last;
 
-    if (parser_consume(parser, TOKEN_DOT))
-    {
-        Node *member = parse_identifier(parser);
-        if (!member)
-        {
-            // err: expected identifier
-            node_free(node);
-            return NULL;
-        }
-
-        node->data.node_identifier.member = member;
-    }
-
     return node;
 }
 
+// foo
+// ...
 Node *parse_expr_identifier(Parser *parser)
 {
     switch (keyword_token_ident_type(parser->curr))
@@ -278,34 +266,30 @@ Node *parse_expr_identifier(Parser *parser)
         return NULL;
     }
 
-    if (parser_match(parser, TOKEN_LEFT_PAREN))
-    {
-        Node *node = parse_expr_call(parser);
-        if (!node)
-        {
-            return NULL;
-        }
-
-        node->data.expr_call.target = identifier;
-
-        return node;
-    }
-
-    if (parser_match(parser, TOKEN_LEFT_BRACKET))
-    {
-        Node *node = parse_expr_index(parser);
-        if (!node)
-        {
-            return NULL;
-        }
-
-        node->data.expr_index.target = identifier;
-
-        return node;
-    }
-
     Node *node = node_new(NODE_EXPR_IDENTIFIER);
     node->data.expr_identifier.identifier = identifier;
+
+    return node;
+}
+
+// .foo
+// ...
+Node *parse_expr_member(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_DOT))
+    {
+        parser_add_error(parser, parser->curr, "expected '.'");
+        return NULL;
+    }
+
+    Node *identifier = parse_identifier(parser);
+    if (!identifier)
+    {
+        return NULL;
+    }
+
+    Node *node = node_new(NODE_EXPR_MEMBER);
+    node->data.expr_member.member = identifier;
 
     return node;
 }
@@ -583,33 +567,17 @@ Node *parse_expr_def_array(Parser *parser)
     return node;
 }
 
-Node *parse_postfix(Parser *parser)
+Node *parse_postfix(Parser *parser, Node *target)
 {
-    Node *node = parse_expr_primary(parser);
-    if (!node)
-    {
-        return NULL;
-    }
-
     if (parser_match(parser, TOKEN_DOT))
     {
-        if (!parser_consume(parser, TOKEN_DOT))
+        Node *member = parse_expr_member(parser);
+        if (!member)
         {
-            parser_add_error(parser, parser->curr, "expected '.'");
-            node_free(node);
             return NULL;
         }
 
-        Node *identifier = parse_identifier(parser);
-        if (!identifier)
-        {
-            node_free(node);
-            return NULL;
-        }
-
-        Node *member = node_new(NODE_EXPR_MEMBER);
-        member->data.expr_member.target = member;
-        member->data.expr_member.member = identifier;
+        member->data.expr_member.target = target;
 
         return member;
     }
@@ -619,11 +587,10 @@ Node *parse_postfix(Parser *parser)
         Node *call = parse_expr_call(parser);
         if (!call)
         {
-            node_free(node);
             return NULL;
         }
 
-        call->data.expr_call.target = node;
+        call->data.expr_call.target = target;
 
         return call;
     }
@@ -633,16 +600,15 @@ Node *parse_postfix(Parser *parser)
         Node *index = parse_expr_index(parser);
         if (!index)
         {
-            node_free(node);
             return NULL;
         }
 
-        index->data.expr_index.target = node;
+        index->data.expr_index.target = target;
 
         return index;
     }
 
-    return node;
+    return target;
 }
 
 // -1
@@ -669,7 +635,7 @@ Node *parse_expr_unary(Parser *parser)
         return node;
     }
 
-    return parse_postfix(parser);
+    return parse_expr_primary(parser);
 }
 
 // 1 + 2
@@ -683,6 +649,8 @@ Node *parse_expr_binary(Parser *parser, int parent_precedence)
     {
         return NULL;
     }
+
+    lhs = parse_postfix(parser, lhs);
 
     while (op_is_binary(parser->curr.type) && op_get_precedence(parser->curr.type) >= parent_precedence)
     {
@@ -1040,6 +1008,7 @@ Node *parse_type(Parser *parser)
         }
     }
 
+    parser_add_error(parser, parser->curr, "expected type");
     return NULL;
 }
 

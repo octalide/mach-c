@@ -96,7 +96,7 @@ void symbol_table_exit_scope(SymbolTable *table)
     }
 }
 
-Symbol *symbol_table_insert(SymbolTable *table, const char *name, NodeType type)
+Symbol *symbol_table_insert(SymbolTable *table, const char *name, Type *type)
 {
     int hash = abs((int)name[0]) % table->size;
     Symbol *symbol = malloc(sizeof(Symbol));

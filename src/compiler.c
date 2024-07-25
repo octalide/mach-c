@@ -368,8 +368,8 @@ void compiler_pass_initial(Compiler *compiler)
     visitor_init(&visitor);
     visitor.cb_visit_stmt_use = visitor_cb_visit_stmt_use;
 
-    CompilerVisitorContext *context = malloc(sizeof(CompilerVisitorContext));
-    context->compiler = compiler;
+    CompilerVisitorContext context;
+    context.compiler = compiler;
 
     for (int i = 0; compiler->source_files[i] != NULL; i++)
     {
@@ -416,8 +416,8 @@ void compiler_pass_initial(Compiler *compiler)
         }
 
         // set up context for visitor
-        context->source_file = source_file;
-        visitor.context = context;
+        context.source_file = source_file;
+        visitor.context = &context;
         visit_node(&visitor, source_file->ast);
     }
 
@@ -426,8 +426,6 @@ void compiler_pass_initial(Compiler *compiler)
     {
         compiler_add_error(compiler, "program entrypoint has no AST");
     }
-
-    free(context);
 }
 
 // compiler_compile performs the following tasks:

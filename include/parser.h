@@ -22,25 +22,27 @@ typedef struct Parser
     Token curr;
     Token next;
 
-    ParseError *error;
-} Parser;
+    Token **comments;
+    ParseError **errors;
 
-void parser_print_error(Parser *parser);
+    bool opt_verbose;
+} Parser;
 
 void parser_init(Parser *parser, Lexer *lexer);
 void parser_free(Parser *parser);
 
-void parser_error(Parser *parser, Token token, const char *message);
+void parser_add_comment(Parser *parser, Token token);
+
+void parser_add_error(Parser *parser, Token token, const char *message);
+bool parser_has_errors(Parser *parser);
+void parser_print_errors(Parser *parser);
+
 void parser_advance(Parser *parser);
 
 bool parser_match_last(Parser *parser, TokenType type);
 bool parser_match(Parser *parser, TokenType type);
 bool parser_match_next(Parser *parser, TokenType type);
-bool parser_expect_last(Parser *parser, TokenType type, const char *message);
-bool parser_expect(Parser *parser, TokenType type, const char *message);
-bool parser_expect_next(Parser *parser, TokenType type, const char *message);
 bool parser_consume(Parser *parser, TokenType type);
-bool parser_consume_required(Parser *parser, TokenType type, const char *message);
 
 Node *parse_block(Parser *parser);
 Node *parse_identifier(Parser *parser);
@@ -85,6 +87,6 @@ Node *parse_stmt_decl_uni(Parser *parser);
 Node *parse_stmt_expr(Parser *parser);
 Node *parse_stmt(Parser *parser);
 
-Node *parse(Parser *parser);
+Node *parser_parse(Parser *parser);
 
 #endif // PARSER_H

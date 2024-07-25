@@ -12,20 +12,46 @@ SymbolTable *symbol_table_new(int size)
     return table;
 }
 
+void symbol_free(Symbol *symbol)
+{
+    if (symbol == NULL)
+    {
+        return;
+    }
+
+    if (symbol->name)
+    {
+        free(symbol->name);
+    }
+
+    if (symbol->next)
+    {
+        symbol_free(symbol->next);
+    }
+}
+
 void symbol_table_free(SymbolTable *table)
 {
-    for (int i = 0; i < table->size; ++i)
+    if (table == NULL)
     {
-        Symbol *symbol = table->symbols[i];
-        while (symbol)
-        {
-            Symbol *next = symbol->next;
-            free(symbol->name);
-            free(symbol);
-            symbol = next;
-        }
+        return;
     }
-    free(table->symbols);
+
+    if (table->symbols)
+    {
+        for (int i = 0; i < table->size; ++i)
+        {
+            symbol_free(table->symbols[i]);
+        }
+        free(table->symbols);
+    }
+}
+
+void symbol_table_add_symbol(SymbolTable *table, Symbol *symbol)
+{
+    int hash = abs((int)symbol->name[0]) % table->size;
+    symbol->next = table->symbols[hash];
+    table->symbols[hash] = symbol;
 }
 
 void symbol_table_enter_scope(SymbolTable *table)

@@ -5,9 +5,9 @@
 
 typedef struct Lexer
 {
-    const char *source;
-    const char *start;
-    const char *current;
+    char *source;
+    char *start;
+    char *current;
     int line;
 } Lexer;
 

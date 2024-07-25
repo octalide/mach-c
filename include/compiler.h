@@ -5,31 +5,42 @@
 #include "options.h"
 #include "lexer.h"
 #include "parser.h"
-#include "semantic_analyzer.h"
+#include "analyzer.h"
+
+typedef struct CompilerError
+{
+    const char *message;
+} CompilerError;
 
 typedef struct Compiler
 {
     Options *options;
-    SemanticAnalyzer *analyzer;
 
-    SourceFile *source_files;
-    int file_count;
+    Analyzer *analyzer;
+    SourceFile **source_files;
 
     Node *program;
 
-    const char *error;
+    CompilerError **errors;
 } Compiler;
+
+typedef struct CompilerVisitorContext
+{
+    Compiler *compiler;
+    SourceFile *source_file;
+} CompilerVisitorContext;
 
 void compiler_init(Compiler *compiler, Options *options);
 void compiler_free(Compiler *compiler);
 
-void compiler_error(Compiler *compiler, const char *message);
-bool compiler_has_error(Compiler *compiler);
-void compiler_add_file(Compiler *compiler, const char *path);
-void compiler_parse_source_file(Compiler *compiler, SourceFile *source_file);
-void compiler_analyze_source_file(Compiler *compiler, SourceFile *source_file);
+void compiler_add_error(Compiler *compiler, const char *message);
+void compiler_add_errorf(Compiler *compiler, const char *format, ...);
+bool compiler_has_errors(Compiler *compiler);
+void compiler_print_errors(Compiler *compiler);
 
-void compiler_pass_import(Compiler *compiler);
+void compiler_add_source_file(Compiler *compiler, const char *path);
+
+void compiler_pass_initial(Compiler *compiler);
 
 void compiler_compile(Compiler *compiler);
 

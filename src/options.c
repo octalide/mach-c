@@ -28,7 +28,7 @@ void options_default(Options *options)
 {
     options->version = "0.0.0";
 
-    options->path_project = ".";
+    options->path_project = getcwd(NULL, 0);
     options_set_path_src(options, "{path_project}/src");
     options_set_path_dep(options, "{path_project}/dep");
     options_set_path_out(options, "{path_project}/out");
@@ -37,7 +37,7 @@ void options_default(Options *options)
     options->dump_irl = false;
     options->dump_tac = false;
     options->dump_asm = false;
-    options->verbose_lex = false;
+    options->verbose_compiler = false;
     options->verbose_parse = false;
     options->verbose_analysis = false;
     options->verbose_codegen = false;
@@ -69,7 +69,8 @@ void options_from_args(Options *options, int argc, char **argv)
         // 4. convert to absolute, check if the directory exists, if it does, check for `mach.json` file inside and parse with `options_from_file`
         if (i == 1 && argv[i][0] != '-')
         {
-            char abs_path[PATH_MAX];
+            char *abs_path = malloc(PATH_MAX);
+            
             if (realpath(argv[i], abs_path) == NULL)
             {
                 fprintf(stderr, "fatal: failed to resolve path: %s\n", argv[i]);
@@ -93,10 +94,17 @@ void options_from_args(Options *options, int argc, char **argv)
                 {
                     options->path_project = dirname(abs_path);
                     options->path_src = dirname(abs_path);
-                    options_set_path_entry(options, abs_path);
+                    options->path_dep = dirname(abs_path);
+                    options->path_out = dirname(abs_path);
+                    options->path_entry = abs_path;
                 }
                 else if (strcmp(abs_path + strlen(abs_path) - 9, "mach.json") == 0)
                 {
+                    options->path_project = dirname(abs_path);
+                    options_set_path_src(options, "{path_project}/src");
+                    options_set_path_dep(options, "{path_project}/dep");
+                    options_set_path_out(options, "{path_project}/out");
+                    options_set_path_entry(options, "{path_src}/main.mach");
                     options_from_file(options, abs_path);
                 }
                 else
@@ -109,7 +117,7 @@ void options_from_args(Options *options, int argc, char **argv)
 
             char mach_json_path[PATH_MAX];
             snprintf(mach_json_path, sizeof(mach_json_path), "%s/mach.json", abs_path);
-            
+
             if (!file_exists(mach_json_path))
             {
                 fprintf(stderr, "fatal: project file not found: %s\n", mach_json_path);
@@ -117,6 +125,10 @@ void options_from_args(Options *options, int argc, char **argv)
             }
 
             options->path_project = abs_path;
+            options_set_path_src(options, "{path_project}/src");
+            options_set_path_dep(options, "{path_project}/dep");
+            options_set_path_out(options, "{path_project}/out");
+            options_set_path_entry(options, "{path_src}/main.mach");
             options_from_file(options, mach_json_path);
             continue;
         }
@@ -182,9 +194,9 @@ void options_from_args(Options *options, int argc, char **argv)
         {
             options->dump_asm = true;
         }
-        else if (strcmp(argv[i], "--verbose-lex") == 0)
+        else if (strcmp(argv[i], "--verbose-compiler") == 0)
         {
-            options->verbose_lex = true;
+            options->verbose_compiler = true;
         }
         else if (strcmp(argv[i], "--verbose-parse") == 0)
         {
@@ -327,49 +339,49 @@ void options_from_file(Options *options, const char *path)
     const cJSON *options_json = cJSON_GetObjectItemCaseSensitive(json, "options");
     if (cJSON_IsObject(options_json))
     {
-        const cJSON *dump_irl = cJSON_GetObjectItemCaseSensitive(options_json, "dump-irl");
+        const cJSON *dump_irl = cJSON_GetObjectItemCaseSensitive(options_json, "dump_irl");
         if (cJSON_IsBool(dump_irl))
         {
             options->dump_irl = cJSON_IsTrue(dump_irl);
         }
 
-        const cJSON *dump_tac = cJSON_GetObjectItemCaseSensitive(options_json, "dump-tac");
+        const cJSON *dump_tac = cJSON_GetObjectItemCaseSensitive(options_json, "dump_tac");
         if (cJSON_IsBool(dump_tac))
         {
             options->dump_tac = cJSON_IsTrue(dump_tac);
         }
 
-        const cJSON *dump_asm = cJSON_GetObjectItemCaseSensitive(options_json, "dump-asm");
+        const cJSON *dump_asm = cJSON_GetObjectItemCaseSensitive(options_json, "dump_asm");
         if (cJSON_IsBool(dump_asm))
         {
             options->dump_asm = cJSON_IsTrue(dump_asm);
         }
 
-        const cJSON *verbose_lex = cJSON_GetObjectItemCaseSensitive(options_json, "verbose-lex");
+        const cJSON *verbose_lex = cJSON_GetObjectItemCaseSensitive(options_json, "verbose_compiler");
         if (cJSON_IsBool(verbose_lex))
         {
-            options->verbose_lex = cJSON_IsTrue(verbose_lex);
+            options->verbose_compiler = cJSON_IsTrue(verbose_lex);
         }
 
-        const cJSON *verbose_parse = cJSON_GetObjectItemCaseSensitive(options_json, "verbose-parse");
+        const cJSON *verbose_parse = cJSON_GetObjectItemCaseSensitive(options_json, "verbose_parse");
         if (cJSON_IsBool(verbose_parse))
         {
             options->verbose_parse = cJSON_IsTrue(verbose_parse);
         }
 
-        const cJSON *verbose_analysis = cJSON_GetObjectItemCaseSensitive(options_json, "verbose-analysis");
+        const cJSON *verbose_analysis = cJSON_GetObjectItemCaseSensitive(options_json, "verbose_analysis");
         if (cJSON_IsBool(verbose_analysis))
         {
             options->verbose_analysis = cJSON_IsTrue(verbose_analysis);
         }
 
-        const cJSON *verbose_codegen = cJSON_GetObjectItemCaseSensitive(options_json, "verbose-codegen");
+        const cJSON *verbose_codegen = cJSON_GetObjectItemCaseSensitive(options_json, "verbose_codegen");
         if (cJSON_IsBool(verbose_codegen))
         {
             options->verbose_codegen = cJSON_IsTrue(verbose_codegen);
         }
 
-        const cJSON *verbose_link = cJSON_GetObjectItemCaseSensitive(options_json, "verbose-link");
+        const cJSON *verbose_link = cJSON_GetObjectItemCaseSensitive(options_json, "verbose_link");
         if (cJSON_IsBool(verbose_link))
         {
             options->verbose_link = cJSON_IsTrue(verbose_link);

@@ -11,6 +11,7 @@ bool op_is_binary(TokenType type)
     case TOKEN_PERCENT:
     case TOKEN_LESS:
     case TOKEN_GREATER:
+    case TOKEN_EQUAL:
     case TOKEN_LESS_EQUAL:
     case TOKEN_GREATER_EQUAL:
     case TOKEN_EQUAL_EQUAL:
@@ -20,7 +21,6 @@ bool op_is_binary(TokenType type)
     case TOKEN_PIPE:
     case TOKEN_AMPERSAND_AMPERSAND:
     case TOKEN_PIPE_PIPE:
-    case TOKEN_EQUAL:
     case TOKEN_LESS_LESS:
     case TOKEN_GREATER_GREATER:
         return true;

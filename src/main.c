@@ -32,12 +32,14 @@ int main(int argc, char *argv[])
 
     Compiler *compiler = malloc(sizeof(Compiler));
     compiler_init(compiler, options);
-
     compiler_compile(compiler);
-    if (compiler_has_error(compiler))
+    if (compiler_has_errors(compiler))
     {
-        printf("error: %s\n", compiler->error);
+        compiler_print_errors(compiler);
     }
     
+    // pain
+    // compiler_free(compiler);
+
     return 0;
 }

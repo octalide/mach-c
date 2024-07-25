@@ -59,9 +59,11 @@ typedef struct
 {
     TokenType type;
     const char *start;
-    char length;
+    int length;
 } Token;
 
 char *token_type_string(TokenType type);
+
+char *token_raw(Token *token);
 
 #endif // TOKEN_H

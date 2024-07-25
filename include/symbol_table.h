@@ -19,8 +19,10 @@ typedef struct SymbolTable
 } SymbolTable;
 
 SymbolTable *symbol_table_new(int size);
+void symbol_free(Symbol *symbol);
 void symbol_table_free(SymbolTable *table);
 
+void symbol_table_add_symbol(SymbolTable *table, Symbol *symbol);
 void symbol_table_enter_scope(SymbolTable *table);
 void symbol_table_exit_scope(SymbolTable *table);
 

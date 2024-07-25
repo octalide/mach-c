@@ -1,4 +1,6 @@
 #include <stdlib.h>
+#include <string.h>
+
 #include "token.h"
 
 char *token_type_string(TokenType type)
@@ -99,4 +101,12 @@ char *token_type_string(TokenType type)
     default:
         return "UNKNOWN";
     }
+}
+
+char *token_raw(Token *token)
+{
+    char *data = malloc(token->length + 1);
+    memcpy(data, token->start, token->length);
+    data[token->length] = '\0';
+    return data;
 }

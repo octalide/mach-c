@@ -13,6 +13,7 @@ typedef struct Options
 
     const char *version;
 
+    // NOTE: these paths should all be absolute
     const char *path_project;
     const char *path_src;
     const char *path_dep;
@@ -22,7 +23,7 @@ typedef struct Options
     bool dump_irl;
     bool dump_tac;
     bool dump_asm;
-    bool verbose_lex;
+    bool verbose_compiler;
     bool verbose_parse;
     bool verbose_analysis;
     bool verbose_codegen;

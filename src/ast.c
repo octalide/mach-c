@@ -206,8 +206,12 @@ char *node_type_string(NodeType type)
     {
     case NODE_BLOCK:
         return "BLOCK";
+    case NODE_IDENTIFIER:
+        return "IDENTIFIER";
     case NODE_EXPR_IDENTIFIER:
         return "EXPR_IDENTIFIER";
+    case NODE_EXPR_MEMBER:
+        return "EXPR_MEMBER";
     case NODE_EXPR_LIT_CHAR:
         return "EXPR_LIT_CHAR";
     case NODE_EXPR_LIT_NUMBER:

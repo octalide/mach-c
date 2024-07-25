@@ -14,9 +14,25 @@ void lexer_init(Lexer *lexer, const char *source)
 
 void lexer_free(Lexer *lexer)
 {
-    free(lexer->source);
-    free(lexer->start);
-    free(lexer->current);
+    if (!lexer)
+    {
+        return;
+    }
+
+    if (lexer->start != NULL)
+    {
+        free(lexer->start);
+    }
+
+    if (lexer->current != NULL)
+    {
+        free(lexer->current);
+    }
+
+    if (lexer->source != NULL)
+    {
+        free(lexer->source);
+    }
 }
 
 char *lexer_get_line(Lexer *lexer, int line)
@@ -79,7 +95,7 @@ int lexer_get_token_line_char_index(Lexer *lexer, Token *token)
     {
         return -1;
     }
-    
+
     const char *line_start = token->start;
     while (line_start > lexer->source && *line_start != '\n')
     {
@@ -285,12 +301,14 @@ Token character(Lexer *lexer)
     return make_token(lexer, TOKEN_CHARACTER);
 }
 
-void skip_to_eol(Lexer *lexer)
+Token comment(Lexer *lexer)
 {
     while (lexer_peek(lexer) != '\n' && !is_at_end(lexer))
     {
         lexer_advance(lexer);
     }
+
+    return make_token(lexer, TOKEN_COMMENT);
 }
 
 Token next_token(Lexer *lexer)
@@ -334,7 +352,7 @@ Token next_token(Lexer *lexer)
         return character(lexer);
     case '\"':
         return string(lexer);
-    
+
     case '(':
         return make_token(lexer, TOKEN_LEFT_PAREN);
     case ')':
@@ -437,12 +455,13 @@ Token next_token(Lexer *lexer)
 
         return make_token(lexer, TOKEN_BANG);
     case '/':
-        if (lexer_peek(lexer) == '/')
+        switch (lexer_peek(lexer))
         {
-            skip_to_eol(lexer);
-            return next_token(lexer);
+        case '/':
+            lexer_advance(lexer);
+            return comment(lexer);
         }
-        
+
         return make_token(lexer, TOKEN_SLASH);
     case '\\':
         return make_token(lexer, TOKEN_BACKSLASH);

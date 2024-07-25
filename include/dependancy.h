@@ -8,13 +8,13 @@ typedef enum DependancyType
     DEPENDANCY_COUNT
 } DependancyType;
 
-typedef struct dependancy_name
+typedef struct dependancy_type_name
 {
     DependancyType type;
     const char *name;
-} dependancy_name;
+} dependancy_type_name;
 
-static const dependancy_name DEPENDANCY_NAMES[] = {
+static const dependancy_type_name DEPENDANCY_NAMES[] = {
     {DEPENDANCY_TYPE_LOCAL, "local"},
 };
 

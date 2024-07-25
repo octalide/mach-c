@@ -364,9 +364,9 @@ void compiler_pass_initial(Compiler *compiler)
         printf("[ COMP ] initial pass...\n");
     }
 
-    Visitor *visitor = malloc(sizeof(Visitor));
-    visitor_init(visitor);
-    visitor->cb_visit_stmt_use = visitor_cb_visit_stmt_use;
+    Visitor visitor;
+    visitor_init(&visitor);
+    visitor.cb_visit_stmt_use = visitor_cb_visit_stmt_use;
 
     CompilerVisitorContext *context = malloc(sizeof(CompilerVisitorContext));
     context->compiler = compiler;
@@ -417,8 +417,8 @@ void compiler_pass_initial(Compiler *compiler)
 
         // set up context for visitor
         context->source_file = source_file;
-        visitor->context = context;
-        visit_node(visitor, source_file->ast);
+        visitor.context = context;
+        visit_node(&visitor, source_file->ast);
     }
 
     compiler->program = compiler->source_files[0]->ast;
@@ -427,7 +427,6 @@ void compiler_pass_initial(Compiler *compiler)
         compiler_add_error(compiler, "program entrypoint has no AST");
     }
 
-    free(visitor);
     free(context);
 }
 

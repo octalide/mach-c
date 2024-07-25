@@ -40,6 +40,7 @@ void compiler_print_errors(Compiler *compiler);
 
 void compiler_add_source_file(Compiler *compiler, const char *path);
 
+bool compiler_cb_visit_stmt_use(void *context, Node *node);
 void compiler_pass_initial(Compiler *compiler);
 
 void compiler_compile(Compiler *compiler);

@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <libgen.h>
+#include <limits.h>
 
 #include "options.h"
 #include "ioutil.h"
@@ -13,10 +14,10 @@
 
 #ifdef _WIN32
 #include <windows.h>
-char *realpath(const char *path, char *resolved_path)
+char *realpath(char *path, char *resolved_path)
 {
-    DWORD length = GetFullPathName(path, PATH_MAX, resolved_path, NULL);
-    if (length == 0 || length > PATH_MAX)
+    DWORD length = GetFullPathName(path, 260, resolved_path, NULL);
+    if (length == 0 || length > 260)
     {
         return NULL;
     }
@@ -24,8 +25,27 @@ char *realpath(const char *path, char *resolved_path)
 }
 #endif
 
-void options_default(Options *options)
+// define default mach installation path by platform:
+// - windows: C:\Program Files\mach
+// - linux: /usr/local/mach
+// - macos: /usr/local/mach
+// - other: /usr/local/mach
+#if defined(_WIN32)
+#define DEFAULT_MACH_PATH "C:\\Program Files\\mach"
+#elif defined(__linux__) || defined(__APPLE__)
+#define DEFAULT_MACH_PATH "/usr/local/mach"
+#else
+#define DEFAULT_MACH_PATH "/usr/local/mach"
+#endif
+
+Options *options_new()
 {
+    char *env_mach_path = getenv("MACH_PATH");
+    char *mach_path = env_mach_path != NULL ? env_mach_path : DEFAULT_MACH_PATH;
+    
+    Options *options = calloc(1, sizeof(Options));
+    options->mach_installation = strdup(mach_path);
+
     options->version = "0.0.0";
 
     options->path_project = getcwd(NULL, 0);
@@ -37,7 +57,7 @@ void options_default(Options *options)
     options->dump_irl = false;
     options->dump_tac = false;
     options->dump_asm = false;
-    options->verbose_compiler = false;
+    options->verbose_compile = false;
     options->verbose_parse = false;
     options->verbose_analysis = false;
     options->verbose_codegen = false;
@@ -46,10 +66,32 @@ void options_default(Options *options)
     options->targets = NULL;
     options->target_count = 0;
 
-    options_add_target(options, target_current());
-
     options->dependancies = NULL;
     options->dependancy_count = 0;
+
+    return options;
+}
+
+void options_free(Options *options)
+{
+    free(options->version);
+    options->version = NULL;
+    free(options->path_project);
+    options->path_project = NULL;
+    free(options->path_src);
+    options->path_src = NULL;
+    free(options->path_dep);
+    options->path_dep = NULL;
+    free(options->path_out);
+    options->path_out = NULL;
+    free(options->path_entry);
+    options->path_entry = NULL;
+    free(options->targets);
+    options->targets = NULL;
+    free(options->dependancies);
+    options->dependancies = NULL;
+
+    free(options);
 }
 
 void options_from_args(Options *options, int argc, char **argv)
@@ -69,7 +111,7 @@ void options_from_args(Options *options, int argc, char **argv)
         // 4. convert to absolute, check if the directory exists, if it does, check for `mach.json` file inside and parse with `options_from_file`
         if (i == 1 && argv[i][0] != '-')
         {
-            char *abs_path = malloc(PATH_MAX);
+            char *abs_path = malloc(strlen(argv[i]) + 1);
             
             if (realpath(argv[i], abs_path) == NULL)
             {
@@ -115,8 +157,9 @@ void options_from_args(Options *options, int argc, char **argv)
                 continue;
             }
 
-            char mach_json_path[PATH_MAX];
-            snprintf(mach_json_path, sizeof(mach_json_path), "%s/mach.json", abs_path);
+            char *mach_json_path = malloc(strlen(abs_path) + 11);
+            strcpy(mach_json_path, abs_path);
+            strcat(mach_json_path, "/mach.json");
 
             if (!file_exists(mach_json_path))
             {
@@ -196,7 +239,7 @@ void options_from_args(Options *options, int argc, char **argv)
         }
         else if (strcmp(argv[i], "--verbose-compiler") == 0)
         {
-            options->verbose_compiler = true;
+            options->verbose_compile = true;
         }
         else if (strcmp(argv[i], "--verbose-parse") == 0)
         {
@@ -217,7 +260,7 @@ void options_from_args(Options *options, int argc, char **argv)
     }
 }
 
-void options_from_file(Options *options, const char *path)
+void options_from_file(Options *options, char *path)
 {
     // open file
     FILE *file = fopen(path, "r");
@@ -357,10 +400,10 @@ void options_from_file(Options *options, const char *path)
             options->dump_asm = cJSON_IsTrue(dump_asm);
         }
 
-        const cJSON *verbose_lex = cJSON_GetObjectItemCaseSensitive(options_json, "verbose_compiler");
+        const cJSON *verbose_lex = cJSON_GetObjectItemCaseSensitive(options_json, "verbose_compile");
         if (cJSON_IsBool(verbose_lex))
         {
-            options->verbose_compiler = cJSON_IsTrue(verbose_lex);
+            options->verbose_compile = cJSON_IsTrue(verbose_lex);
         }
 
         const cJSON *verbose_parse = cJSON_GetObjectItemCaseSensitive(options_json, "verbose_parse");
@@ -427,27 +470,27 @@ void options_from_file(Options *options, const char *path)
     fclose(file);
 }
 
-void options_set_path_project(Options *options, const char *path_project)
+void options_set_path_project(Options *options, char *path_project)
 {
     options->path_project = options_format_string_variables(options, path_project);
 }
 
-void options_set_path_src(Options *options, const char *path_src)
+void options_set_path_src(Options *options, char *path_src)
 {
     options->path_src = options_format_string_variables(options, path_src);
 }
 
-void options_set_path_dep(Options *options, const char *path_dep)
+void options_set_path_dep(Options *options, char *path_dep)
 {
     options->path_dep = options_format_string_variables(options, path_dep);
 }
 
-void options_set_path_out(Options *options, const char *path_out)
+void options_set_path_out(Options *options, char *path_out)
 {
     options->path_out = options_format_string_variables(options, path_out);
 }
 
-void options_set_path_entry(Options *options, const char *path_entry)
+void options_set_path_entry(Options *options, char *path_entry)
 {
     options->path_entry = options_format_string_variables(options, path_entry);
 }
@@ -497,10 +540,10 @@ void options_add_dependancy(Options *options, Dependancy dependancy)
     options->dependancies[options->dependancy_count++] = dependancy;
 }
 
-char *str_replace(const char *str, const char *find, const char *replace)
+char *str_replace(char *str, char *find, char *replace)
 {
     char *result;
-    const char *i = strstr(str, find);
+    char *i = strstr(str, find);
     if (!i)
     {
         return strdup(str);
@@ -533,7 +576,7 @@ char *str_replace(const char *str, const char *find, const char *replace)
 // usage:
 // "path_src":   "{path_project}/src"
 // "path_entry": "{path_src}/main.mach"
-char *options_format_string_variables(Options *options, const char *str)
+char *options_format_string_variables(Options *options, char *str)
 {
     char *result = strdup(str);
     result = str_replace(result, "{version}", options->version);
@@ -543,10 +586,13 @@ char *options_format_string_variables(Options *options, const char *str)
     result = str_replace(result, "{path_entry}", options->path_entry);
     result = str_replace(result, "{mach_installation}", options->mach_installation);
 
-    char mach_std[PATH_MAX];
-    snprintf(mach_std, sizeof(mach_std), "%s/std", options->mach_installation);
+    char *mach_std = malloc(strlen(options->mach_installation) + 5);
+    strcpy(mach_std, options->mach_installation);
+    strcat(mach_std, "/std");
 
-    result = str_replace(result, "{mach_std}", options->mach_installation);
+    result = str_replace(result, "{mach_std}", mach_std);
+
+    free(mach_std);
 
     return result;
 }

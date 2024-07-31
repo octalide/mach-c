@@ -4,7 +4,7 @@
 
 #include "dependancy.h"
 
-DependancyType dependancy_type_from_string(const char *str)
+DependancyType dependancy_type_from_string(char *str)
 {
     for (size_t i = 0; i < DEPENDANCY_COUNT; i++)
     {

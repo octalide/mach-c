@@ -7,21 +7,23 @@
 #include "parser.h"
 #include "analyzer.h"
 
+#include <stdbool.h>
+
 typedef struct CompilerError
 {
-    const char *message;
+    char *message;
 } CompilerError;
 
 typedef struct Compiler
 {
     Options *options;
 
-    Analyzer *analyzer;
     SourceFile **source_files;
 
     Node *program;
+    Analyzer *analyzer;
 
-    CompilerError **errors;
+    bool should_abort;
 } Compiler;
 
 typedef struct CompilerVisitorContext
@@ -30,18 +32,17 @@ typedef struct CompilerVisitorContext
     SourceFile *source_file;
 } CompilerVisitorContext;
 
-void compiler_init(Compiler *compiler, Options *options);
+Compiler *compiler_new(Options *options);
 void compiler_free(Compiler *compiler);
 
-void compiler_add_error(Compiler *compiler, const char *message);
-void compiler_add_errorf(Compiler *compiler, const char *format, ...);
-bool compiler_has_errors(Compiler *compiler);
-void compiler_print_errors(Compiler *compiler);
+void compiler_source_file_add(Compiler *compiler, char *path);
 
-void compiler_add_source_file(Compiler *compiler, const char *path);
+void compiler_visit_use(void *context, Node *node);
+void compiler_visit_error(void *context, Node *node);
 
-bool compiler_cb_visit_stmt_use(void *context, Node *node);
-void compiler_pass_initial(Compiler *compiler);
+void compiler_stage_prepare(Compiler *compiler);
+void compiler_stage_parsing(Compiler *compiler);
+void compiler_stage_analysis(Compiler *compiler);
 
 void compiler_compile(Compiler *compiler);
 

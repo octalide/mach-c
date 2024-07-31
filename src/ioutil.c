@@ -4,7 +4,7 @@
 
 #include "ioutil.h"
 
-bool is_directory(const char *path)
+bool is_directory(char *path)
 {
     struct stat statbuf;
     if (stat(path, &statbuf) != 0)
@@ -15,14 +15,14 @@ bool is_directory(const char *path)
     return S_ISDIR(statbuf.st_mode);
 }
 
-bool file_exists(const char *path)
+bool file_exists(char *path)
 {
     struct stat statbuf;
     return stat(path, &statbuf) == 0;
 }
 
 
-bool path_is_absolute(const char *path)
+bool path_is_absolute(char *path)
 {
     if (path == NULL || strlen(path) < 2)
     {
@@ -38,7 +38,7 @@ bool path_is_absolute(const char *path)
 #endif
 }
 
-char *path_dirname(const char *path)
+char *path_dirname(char *path)
 {
     char *last_slash = strrchr(path, '/');
     if (last_slash == NULL)
@@ -54,7 +54,7 @@ char *path_dirname(const char *path)
     return dirname;
 }
 
-char *path_join(const char *path1, const char *path2)
+char *path_join(char *path1, char *path2)
 {
     size_t length = strlen(path1) + strlen(path2) + 2;
     char *joined = malloc(length);

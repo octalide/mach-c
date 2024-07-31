@@ -1,0 +1,156 @@
+################################################################################
+# This file uses or describes nearly all of the syntax usage edge cases possible
+#   in Mach. If it's not in here, you probably can't do it. Many of the examples
+#   can be combined and possibly extended, but the basic syntax of every
+#   statement and most basic expressions are used.
+################################################################################
+# Only these statements are valid at the file root:
+# - `use`
+# - `def`
+# - `fun`
+# - `val`
+# - `var`
+# - `ext`
+#
+# These statements are NOT allowed inside functions:
+# - `use`
+# - `def`
+# - `fun`
+# - `ext`
+
+# use statements
+use       "dummy"; # without alias
+use dummy "dummy"; # with alias
+
+# type definition
+def t_u32:             u32;         # simple type alias for a builtin
+def t_u32_arr:         []t_u32_arr; # complex type alias for an array
+def t_u32_arr_ali:     t_bar;       # direct alias
+def t_ptr_u32:         *u32;        # pointer to builtin
+def t_ptr_u32_arr:     *[]u32;      # pointer to array of builtin
+def t_ptr_u32_arr_ali: *t_bar;      # pointer to ident
+def t_ptr_void:        *void;       # pointer to void (typeless pointer)
+
+def t_str: str { foo: u32; bar: u32; }; # struct
+def t_uni: uni { foo: u32; bar: f32; }; # union
+def t_fun: fun (u32, u32): u32;         # function signature (body not allowed)
+
+# NOTE:
+# Naming parameters in function signature type declarations are purely for
+#   readability. The names are not referenced during type analysis.
+def t_fun_named_p: fun (a: u32, b: u32): u32; 
+
+# NOTE:
+# Permutations of the above type declarations are valid everywhere types can be
+#   defined.
+
+# external symbol declaration
+ext main: fun (): u32;
+ext i:    u32;
+
+# value and variable definition
+# NOTE:
+# `val` and `var` have identical syntax except that `val` requires an
+#   initializer expression while `var` can be initialized lazily.
+# Variables defined by `val` are not allowed to be modified in any way later.
+# This extends to the struct and union fields encapsulated by the value. Think
+#   of them as a very strict `const`.
+# Most variable definitions in Mach will end up using `var` for this reason.
+# This is intentional.
+val vl_u32:      u32 = 0; # simple constant value
+var vr_u32:      u32;     # simple variable without initializer
+var vr_u32_init: u32 = 1; # simple variable with initializer
+
+var vr_str_init: t_str = t_str { foo = 1; bar = 1; }; # struct variable with initializer
+var vr_str: t_str;                                    # struct variable without initializer
+var vr_uni_init: t_uni = t_uni { foo = 1; };          # union variable with initializer
+var vr_uni: t_uni;                                    # union variable without initializer
+
+# function definition
+fun main(): u32 {
+    var i: u32 = 0;
+
+    # expressions
+    # NOTE:
+    # The following expressions are all valid in Mach. They are all simple
+    #   expressions that can be used in more complex expressions with the
+    #   exception of the assignment expression, which is only valid at the root
+    #   of an expression statement.
+
+    # literal and variable expressions
+    0; # literal
+    i; # identifier
+
+    # unary expressions
+    -i; # negation
+    +i; # positive (allowed for symmetry)
+    !i; # logical not
+    ~i; # bitwise not
+    @i; # dereference (results in a value)
+    ?i; # address (results in a pointer)
+
+    # binary expressions
+    i + 0;  # addition
+    i - 0;  # subtraction
+    i * 0;  # multiplication
+    i / 0;  # division
+    i % 0;  # modulo
+    i == 0; # equality
+    i != 0; # inequality
+    i <  0; # less than
+    i <= 0; # less than or equal to
+    i >  0; # greater than
+    i >= 0; # greater than or equal to
+    i && 0; # logical and
+    i || 0; # logical or
+    i &  0; # bitwise and
+    i |  0; # bitwise or
+    i ^  0; # bitwise xor
+    i << 0; # left shift
+    i >> 0; # right shift
+    i =  0; # assignment
+
+    # flow control
+    # NOTE:
+    # `or` statements may only not include their conditional in the event that
+    #   they are the last and only `or` statement in a chain that begins with
+    #   a single `if` statement.
+    # The statements between an `if` and final `or` statement must all be `or`
+    #   statements that include a conditional.
+    if (i == 0) {} # if statement
+    or (i == 1) {} # or statement with conditional
+    or          {} # or statement without conditional
+
+    # for loop
+    for (i < 10) {} # for statement
+    for          {} # for statement without conditional (infinite)
+
+    # loop control (can only be used inside `for`)
+    for {
+        brk; # break statement
+        cnt; # continue statement
+    }
+
+    # postfix expressions
+    main();       # function call
+    t_u32_arr[0]; # array access
+    t_str.foo;    # member access (struct and union)
+
+    # inline assembly
+    asm {
+        "nop";
+        "nop";
+    }
+
+    # type casting
+    i::u32; # cast to u32
+
+    # pointers
+    var i_ptr: *u32; # variable of a pointer type
+    i_ptr = @i;      # address of operator
+    i = ?i_ptr;      # dereference operator
+
+    # return statement (can only be used inside a function definition)
+    ret;   # return statement without expression
+    ret 0; # return statement with expression
+}

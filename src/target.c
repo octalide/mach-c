@@ -1,8 +1,8 @@
 #include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
 #include "target.h"
-
-#define TARGET_DELIMITER "/"
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/utsname.h>
@@ -28,68 +28,73 @@ bool valid_target(Target target)
     return valid_platform(target.platform) && valid_architecture(target.architecture);
 }
 
-Platform platform_from_string(const char *str)
+Platform platform_from_string(char *str)
 {
     for (int i = 0; i < PLATFORM_UNKNOWN; i++)
     {
-        if (strcmp(str, PLATFORM_NAMES[i].name) == 0)
+        if (strcmp(str, platform_names[i].name) == 0)
         {
-            return PLATFORM_NAMES[i].platform;
+            return platform_names[i].platform;
         }
     }
 
     return PLATFORM_UNKNOWN;
 }
 
-Architecture architecture_from_string(const char *str)
+Architecture architecture_from_string(char *str)
 {
     for (int i = 0; i < ARCH_UNKNOWN; i++)
     {
-        if (strcmp(str, ARCHITECTURE_NAMES[i].name) == 0)
+        if (strcmp(str, architecture_names[i].name) == 0)
         {
-            return ARCHITECTURE_NAMES[i].arch;
+            return architecture_names[i].arch;
         }
     }
 
     return ARCH_UNKNOWN;
 }
 
-Endian endian_from_string(const char *str)
+Endian endian_from_string(char *str)
 {
     for (int i = 0; i < ENDIAN_UNKNOWN; i++)
     {
-        if (strcmp(str, ENDIAN_NAMES[i].name) == 0)
+        if (strcmp(str, endian_names[i].name) == 0)
         {
-            return ENDIAN_NAMES[i].endian;
+            return endian_names[i].endian;
         }
     }
 
     return ENDIAN_UNKNOWN;
 }
 
-Target target_from_string(const char *str)
+Target target_from_string(char *str)
 {
-    char *str_copy = strdup(str);
-    char *platform_str = strtok(str_copy, TARGET_DELIMITER);
-    char *arch_str = strtok(NULL, TARGET_DELIMITER);
+    if (str == NULL)
+    {
+        return (Target){PLATFORM_UNKNOWN, ARCH_UNKNOWN};
+    }
 
-    Target target = {
-        .platform = platform_from_string(platform_str),
-        .architecture = architecture_from_string(arch_str),
-    };
+    if (strcmp(str, "current") == 0)
+    {
+        return target_current();
+    }
 
-    free(str_copy);
+    char *platform_str = strtok(str, &target_delimiter);
+    char *arch_str = strtok(NULL, &target_delimiter);
 
-    return target;
+    Platform platform = platform_from_string(platform_str);
+    Architecture arch = architecture_from_string(arch_str);
+
+    return (Target){platform, arch};
 }
 
 char *platform_to_string(Platform platform)
 {
     for (int i = 0; i < PLATFORM_UNKNOWN; i++)
     {
-        if (platform == PLATFORM_NAMES[i].platform)
+        if (platform == platform_names[i].platform)
         {
-            return PLATFORM_NAMES[i].name;
+            return platform_names[i].name;
         }
     }
 
@@ -100,9 +105,9 @@ char *architecture_to_string(Architecture arch)
 {
     for (int i = 0; i < ARCH_UNKNOWN; i++)
     {
-        if (arch == ARCHITECTURE_NAMES[i].arch)
+        if (arch == architecture_names[i].arch)
         {
-            return ARCHITECTURE_NAMES[i].name;
+            return architecture_names[i].name;
         }
     }
 
@@ -113,9 +118,9 @@ char *endian_to_string(Endian endian)
 {
     for (int i = 0; i < ENDIAN_UNKNOWN; i++)
     {
-        if (endian == ENDIAN_NAMES[i].endian)
+        if (endian == endian_names[i].endian)
         {
-            return ENDIAN_NAMES[i].name;
+            return endian_names[i].name;
         }
     }
 
@@ -188,13 +193,13 @@ TargetInfo target_info(Target target)
 Platform platform_current()
 {
 #if defined(_WIN32) || defined(_WIN64)
-    const char *platform_str = "windows";
+    char *platform_str = "windows";
 #elif defined(__linux__)
-    const char *platform_str = "linux";
+    char *platform_str = "linux";
 #elif defined(__APPLE__) && defined(__MACH__)
-    const char *platform_str = "macos";
+    char *platform_str = "macos";
 #else
-    const char *platform_str = "unknown";
+    char *platform_str = "unknown";
 #endif
 
     return platform_from_string(platform_str);

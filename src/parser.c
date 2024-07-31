@@ -5,22 +5,17 @@
 #include "op.h"
 #include "parser.h"
 
-void parser_init(Parser *parser, Lexer *lexer)
+Parser *parser_new(char *source)
 {
-    parser->lexer = lexer;
-
-    // initialize all tokens as empty tokens
-    parser->last = (Token){TOKEN_ERROR, NULL, 0};
-    parser->curr = (Token){TOKEN_ERROR, NULL, 0};
-    parser->next = (Token){TOKEN_ERROR, NULL, 0};
-
-    parser->errors = calloc(1, sizeof(ParseError *));
-    parser->errors[0] = NULL;
-
+    Parser *parser = calloc(1, sizeof(Parser));
+    parser->lexer = lexer_new(source);
+    parser->last = NULL;
+    parser->curr = NULL;
+    parser->next = NULL;
     parser->comments = calloc(1, sizeof(Token *));
     parser->comments[0] = NULL;
 
-    parser->opt_verbose = false;
+    return parser;
 }
 
 void parser_free(Parser *parser)
@@ -30,143 +25,99 @@ void parser_free(Parser *parser)
         return;
     }
 
-    if (parser->lexer != NULL)
+    lexer_free(parser->lexer);
+    parser->lexer = NULL;
+
+    parser->last = NULL;
+    parser->curr = NULL;
+    parser->next = NULL;
+
+    for (int i = 0; parser->comments[i] != NULL; i++)
     {
-        lexer_free(parser->lexer);
-        free(parser->lexer);
+        token_free(parser->comments[i]);
+        parser->comments[i] = NULL;
     }
 
-    if (parser->comments != NULL)
-    {
-        for (int i = 0; parser->comments[i] != NULL; i++)
-        {
-            free(parser->comments[i]);
-        }
+    free(parser->comments);
+    parser->comments = NULL;
 
-        free(parser->comments);
-    }
-
-    if (parser->errors != NULL)
-    {
-        for (int i = 0; parser->errors[i] != NULL; i++)
-        {
-            free(parser->errors[i]);
-        }
-
-        free(parser->errors);
-    }
+    free(parser);
 }
 
-void parser_add_comment(Parser *parser, Token token)
+void parser_print_error(Parser *parser, Node *node, char *path)
 {
-    Token *comment = malloc(sizeof(Token));
-    comment->type = token.type;
-    comment->start = token.start;
-    comment->length = token.length;
+    if (node->kind != NODE_ERROR)
+    {
+        return;
+    }
 
+    int offset = lexer_token_line_char_offset(parser->lexer, node->token);
+    int line_num = lexer_token_line(parser->lexer, node->token);
+    char *line = lexer_get_line(parser->lexer, line_num);
+    if (line == NULL)
+    {
+        line = strdup("FAILED TO GET LINE TEXT");
+    }
+
+    printf("error: %s\n", node->error.message);
+    printf("%s:%d:%d:\n", path, line_num, offset);
+    printf("%4d | %s\n", line_num, line);
+    printf("     | %*s^\n", offset, "");
+
+    free(line);
+}
+
+void parser_add_comment(Parser *parser, Token *token)
+{
     int i = 0;
-    while (parser->comments[i])
+    while (parser->comments[i] != NULL)
     {
         i++;
     }
 
     parser->comments = realloc(parser->comments, sizeof(Token *) * (i + 2));
-    parser->comments[i] = comment;
+    parser->comments[i] = token;
     parser->comments[i + 1] = NULL;
 }
 
-void parser_add_error(Parser *parser, Token token, const char *message)
+bool parser_has_comments(Parser *parser)
 {
-    ParseError *error = malloc(sizeof(ParseError));
-    error->message = strdup(message);
-    error->token = token;
-
-    int i = 0;
-    while (parser->errors[i])
-    {
-        i++;
-    }
-
-    parser->errors = realloc(parser->errors, sizeof(ParseError *) * (i + 2));
-    parser->errors[i] = error;
-    parser->errors[i + 1] = NULL;
-}
-
-bool parser_has_errors(Parser *parser)
-{
-    return parser->errors[0] != NULL;
-}
-
-void parser_print_errors(Parser *parser)
-{
-    if (!parser->errors)
-    {
-        return;
-    }
-
-    int i = 0;
-    ParseError *error = parser->errors[i];
-    while (error)
-    {
-        if (error->message)
-        {
-            printf("error: %s\n", error->message);
-        }
-
-        int err_line_index = lexer_get_token_line_index(parser->lexer, &error->token);
-        int err_char_index = lexer_get_token_line_char_index(parser->lexer, &error->token);
-
-        printf("%5d | %s\n", err_line_index, lexer_get_line(parser->lexer, err_line_index));
-        for (int i = 0; i < err_char_index + 7; i++)
-        {
-            printf("-");
-        }
-        printf("^\n");
-
-        i++;
-        error = parser->errors[i];
-    }
+    return parser->comments[0] != NULL;
 }
 
 void parser_advance(Parser *parser)
 {
-    Token next = next_token(parser->lexer);
+    Token *next = lexer_next(parser->lexer);
 
     parser->last = parser->curr;
     parser->curr = parser->next;
     parser->next = next;
 
-    if (parser_match_next(parser, TOKEN_ERROR))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "unexpected token");
+        printf("[ PRSE ] [ TOKN ] %-20s `%s`\n", token_kind_string(parser->next->kind), parser->next->raw);
+    }
+
+    if (parser->curr == NULL)
+    {
         parser_advance(parser);
     }
 
-    if (parser_match_next(parser, TOKEN_COMMENT))
+    if (parser->curr->kind == TOKEN_COMMENT)
     {
-        parser_add_comment(parser, parser->next);
+        parser_add_comment(parser, parser->curr);
         parser_advance(parser);
     }
 }
 
-bool parser_match_last(Parser *parser, TokenType type)
+bool parser_match(Parser *parser, TokenKind kind)
 {
-    return parser->last.type == type;
+    return parser->curr->kind == kind;
 }
 
-bool parser_match(Parser *parser, TokenType type)
+bool parser_consume(Parser *parser, TokenKind kind)
 {
-    return parser->curr.type == type;
-}
-
-bool parser_match_next(Parser *parser, TokenType type)
-{
-    return parser->next.type == type;
-}
-
-bool parser_skip(Parser *parser, TokenType type)
-{
-    if (parser_match(parser, type))
+    if (parser_match(parser, kind))
     {
         parser_advance(parser);
         return true;
@@ -175,505 +126,330 @@ bool parser_skip(Parser *parser, TokenType type)
     return false;
 }
 
-bool parser_consume(Parser *parser, TokenType type)
+// Utility function for creating an error node.
+//
+// The parser itself does not keep track of error nodes directly. They are
+//   inserted into the tree by the function that creates the error and must be
+//   found by crawling the tree. This is to preserve the partially parsed state
+//   of a tree with errors as well as allowing for multiple errors to be
+//   collected in one pass.
+Node *parser_error(Token *token, char *message)
 {
-    if (parser_match(parser, type))
-    {
-        parser_advance(parser);
-        return true;
-    }
+    Node *node = node_new(NODE_ERROR, token);
+    node->error.message = strdup(message);
 
-    return false;
+    return node;
 }
 
-// { ... }
-Node *parse_block(Parser *parser)
+Node *parse_program(Parser *parser)
 {
-    if (!parser_consume(parser, TOKEN_LEFT_BRACE))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '{'");
-        return NULL;
+        printf("[ PRSE ] parse_program\n");
     }
 
-    Node *node = node_new(NODE_BLOCK);
+    Node *node = node_new(NODE_PROGRAM, NULL);
 
-    while (!parser_match(parser, TOKEN_RIGHT_BRACE) && !parser_match(parser, TOKEN_EOF))
+    while (!parser_match(parser, TOKEN_EOF))
     {
-        Node *stmt = parse_stmt(parser);
-        if (stmt)
-        {
-            node_list_append(&node->data.node_block.statements, stmt);
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACE))
-    {
-        parser_add_error(parser, parser->curr, "expected '}'");
-        node_free(node);
-        return NULL;
+        Node *stmt = parse_stmt(parser, node);
+        node->program.statements = node_list_add(node->program.statements, stmt);
     }
 
     return node;
 }
 
-// foo
-// ...
-Node *parse_identifier(Parser *parser)
+Node *parse_identifier(Parser *parser, Node *parent)
 {
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_identifier\n");
+    }
+
     if (!parser_consume(parser, TOKEN_IDENTIFIER))
     {
-        parser_add_error(parser, parser->curr, "expected identifier");
-        return NULL;
+        return parser_error(parser->curr, "expected identifier");
     }
 
-    Node *node = node_new(NODE_IDENTIFIER);
-    node->data.node_identifier.value = parser->last;
+    Node *node = node_new(NODE_IDENTIFIER, parser->last);
+    node->parent = parent;
 
     return node;
 }
 
-// foo
-// ...
-Node *parse_expr_identifier(Parser *parser)
+Node *parse_lit_char(Parser *parser, Node *parent)
 {
-    switch (keyword_token_ident_type(parser->curr))
+    if (parser->opt_verbose)
     {
-    case KW_STR:
-        if (!parser_consume(parser, TOKEN_IDENTIFIER))
-        {
-            // NOTE: parser error. expected `str`
-            parser_add_error(parser, parser->curr, "expected identifier");
-            return NULL;
-        }
-
-        return parse_expr_def_str(parser);
-    case KW_UNI:
-        if (!parser_consume(parser, TOKEN_IDENTIFIER))
-        {
-            // NOTE: parser error. expected `uni`
-            parser_add_error(parser, parser->curr, "expected identifier");
-            return NULL;
-        }
-
-        return parse_expr_def_uni(parser);
-    default:
-        break;
+        printf("[ PRSE ] parse_lit_char\n");
     }
 
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
-    {
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_EXPR_IDENTIFIER);
-    node->data.expr_identifier.identifier = identifier;
-
-    return node;
-}
-
-// .foo
-// ...
-Node *parse_expr_member(Parser *parser)
-{
-    if (!parser_consume(parser, TOKEN_DOT))
-    {
-        parser_add_error(parser, parser->curr, "expected '.'");
-        return NULL;
-    }
-
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
-    {
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_EXPR_MEMBER);
-    node->data.expr_member.member = identifier;
-
-    return node;
-}
-
-// 'a'
-Node *parse_expr_lit_char(Parser *parser)
-{
     if (!parser_consume(parser, TOKEN_CHARACTER))
     {
-        parser_add_error(parser, parser->curr, "expected character literal");
-        return NULL;
+        return parser_error(parser->curr, "expected character literal");
     }
 
-    Node *node = node_new(NODE_EXPR_LIT_CHAR);
-    node->data.expr_lit_char.value = parser->last;
+    Node *node = node_new(NODE_LIT_CHAR, parser->last);
+    node->parent = parent;
 
     return node;
 }
 
-// 1
-// 1.1
-// 0x1
-// ...
-Node *parse_expr_lit_number(Parser *parser)
+Node *parse_lit_int(Parser *parser, Node *parent)
 {
-    if (!parser_consume(parser, TOKEN_NUMBER))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected number literal");
-        return NULL;
+        printf("[ PRSE ] parse_lit_int\n");
     }
 
-    Node *node = node_new(NODE_EXPR_LIT_NUMBER);
-    node->data.expr_lit_number.value = parser->last;
+    if (!parser_consume(parser, TOKEN_INT))
+    {
+        return parser_error(parser->curr, "expected integer literal");
+    }
+
+    Node *node = node_new(NODE_LIT_INT, parser->last);
+    node->parent = parent;
 
     return node;
 }
 
-// "foo"
-Node *parse_expr_lit_string(Parser *parser)
+Node *parse_lit_float(Parser *parser, Node *parent)
 {
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_lit_float\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_FLOAT))
+    {
+        return parser_error(parser->curr, "expected float literal");
+    }
+
+    Node *node = node_new(NODE_LIT_FLOAT, parser->last);
+    node->parent = parent;
+
+    return node;
+}
+
+Node *parse_lit_string(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_lit_string\n");
+    }
+
     if (!parser_consume(parser, TOKEN_STRING))
     {
-        parser_add_error(parser, parser->curr, "expected string literal");
-        return NULL;
+        return parser_error(parser->curr, "expected string literal");
     }
 
-    Node *node = node_new(NODE_EXPR_LIT_STRING);
-    node->data.expr_lit_string.value = parser->last;
+    Node *node = node_new(NODE_LIT_STRING, parser->last);
+    node->parent = parent;
 
     return node;
 }
 
-// (...)
-Node *parse_expr_call(Parser *parser)
+Node *parse_expr_member(Parser *parser, Node *parent, Node *target)
 {
-    if (!parser_consume(parser, TOKEN_LEFT_PAREN))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '('");
-        return NULL;
+        printf("[ PRSE ] parse_expr_member\n");
     }
 
-    Node *node = node_new(NODE_EXPR_CALL);
-
-    while (!parser_match(parser, TOKEN_RIGHT_PAREN) && !parser_match(parser, TOKEN_EOF))
+    if (!parser_consume(parser, TOKEN_DOT))
     {
-        Node *argument = parse_expr(parser);
-        if (!argument)
+        return parser_error(parser->curr, "expected '.'");
+    }
+
+    Node *node = node_new(NODE_EXPR_MEMBER, parser->last);
+    node->parent = parent;
+    node->expr_member.target = target;
+    node->expr_member.identifier = parse_identifier(parser, node);
+
+    return node;
+}
+
+Node *parse_expr_call(Parser *parser, Node *parent, Node *target)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_expr_call\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_L_PAREN))
+    {
+        return parser_error(parser->curr, "expected '('");
+    }
+
+    Node *node = node_new(NODE_EXPR_CALL, parser->last);
+    node->parent = parent;
+    node->expr_call.target = target;
+
+    while (!parser_match(parser, TOKEN_R_PAREN) && !parser_match(parser, TOKEN_EOF))
+    {
+        Node *argument = parse_expr(parser, node);
+        node->expr_call.arguments = node_list_add(node->expr_call.arguments, argument);
+
+        if (!parser_consume(parser, TOKEN_COMMA))
         {
-            node_list_append(&node->data.expr_call.arguments, argument);
+            if (!parser_match(parser, TOKEN_R_PAREN))
+            {
+                node_free(node);
+                return parser_error(parser->curr, "expected ',' or ')'");
+            }
         }
-
-        // TODO: this logic for optional commas could use some TLC.
-        parser_consume(parser, TOKEN_COMMA);
     }
 
-    if (!parser_consume(parser, TOKEN_RIGHT_PAREN))
+    if (parser->last->kind == TOKEN_COMMA)
     {
-        parser_add_error(parser, parser->curr, "expected ')'");
         node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "unexpected ','");
+    }
+
+    if (!parser_consume(parser, TOKEN_R_PAREN))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ')'");
     }
 
     return node;
 }
 
-// [...]
-Node *parse_expr_index(Parser *parser)
+Node *parse_expr_index(Parser *parser, Node *parent, Node *target)
 {
-    if (!parser_consume(parser, TOKEN_LEFT_BRACKET))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '['");
-        return NULL;
+        printf("[ PRSE ] parse_expr_index\n");
     }
 
-    Node *node = node_new(NODE_EXPR_INDEX);
-
-    Node *index = parse_expr(parser);
-    if (!index)
+    if (!parser_consume(parser, TOKEN_L_BRACKET))
     {
-        node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "expected '['");
     }
 
-    node->data.expr_index.index = index;
+    Node *node = node_new(NODE_EXPR_INDEX, parser->last);
+    node->parent = parent;
+    node->expr_index.target = target;
+    node->expr_index.index = parse_expr(parser, node);
 
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACKET))
+    if (!parser_consume(parser, TOKEN_R_BRACKET))
     {
-        parser_add_error(parser, parser->curr, "expected ']'");
         node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "expected ']'");
     }
 
     return node;
 }
 
-// {
-//    foo = bar;
-//    ...
-// }
-Node *parse_expr_def_str(Parser *parser)
+Node *parse_expr_cast(Parser *parser, Node *parent, Node *target)
 {
-    if (!parser_consume(parser, TOKEN_LEFT_BRACE))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '{'");
-        return NULL;
+        printf("[ PRSE ] parse_expr_cast\n");
     }
 
-    Node *node = node_new(NODE_EXPR_DEF_STR);
-
-    while (!parser_match(parser, TOKEN_RIGHT_BRACE) && !parser_match(parser, TOKEN_EOF))
+    if (!parser_consume(parser, TOKEN_COLON_COLON))
     {
-        // NOTE: this is expected to be a binary expr with an assignment op
-        Node *expr = parse_expr(parser);
-        if (!expr)
-        {
-            node_free(node);
-            return NULL;
-        }
+        return parser_error(parser->curr, "expected '::'");
+    }
 
-        node_list_append(&node->data.expr_def_str.initializers, expr);
+    Node *node = node_new(NODE_EXPR_CAST, parser->last);
+    node->parent = parent;
+    node->expr_cast.target = target;
+    node->expr_cast.type = parse_type(parser, node);
+
+    return node;
+}
+
+Node *parse_expr_new(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_expr_new\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_NEW))
+    {
+        return parser_error(parser->curr, "expected 'new'");
+    }
+
+    Node *node = node_new(NODE_EXPR_NEW, parser->last);
+    node->parent = parent;
+    node->expr_new.type = parse_type(parser, node);
+
+    if (!parser_consume(parser, TOKEN_L_BRACE))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected '{'");
+    }
+
+    while (!parser_match(parser, TOKEN_R_BRACE) && !parser_match(parser, TOKEN_EOF))
+    {
+        Node *initializer = parse_expr(parser, node);
+        node->expr_new.initializers = node_list_add(node->expr_new.initializers, initializer);
 
         if (!parser_consume(parser, TOKEN_SEMICOLON))
         {
-            parser_add_error(parser, parser->curr, "expected ';'");
             node_free(node);
-            return NULL;
+            return parser_error(parser->curr, "expected ';'");
         }
     }
 
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACE))
+    if (!parser_consume(parser, TOKEN_R_BRACE))
     {
-        parser_add_error(parser, parser->curr, "expected '}'");
         node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "expected '}'");
     }
 
     return node;
 }
 
-// {
-//    foo = bar;
-// }
-Node *parse_expr_def_uni(Parser *parser)
+Node *parse_expr_unary(Parser *parser, Node *parent)
 {
-    if (!parser_consume(parser, TOKEN_LEFT_BRACE))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '{'");
-        return NULL;
+        printf("[ PRSE ] parse_expr_unary\n");
     }
 
-    Node *node = node_new(NODE_EXPR_DEF_UNI);
-
-    // NOTE: optionally expect exactly one initializer expression (same syntax as `str`)
-    if (!parser_match(parser, TOKEN_RIGHT_BRACE))
+    if (op_is_unary(parser->curr->kind))
     {
-        Node *initializer = parse_expr(parser);
-        if (!initializer)
-        {
-            node_free(node);
-            return NULL;
-        }
-
-        node->data.expr_def_uni.initializer = initializer;
-
-        if (!parser_consume(parser, TOKEN_SEMICOLON))
-        {
-            parser_add_error(parser, parser->curr, "expected ';'");
-            node_free(node);
-            return NULL;
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACE))
-    {
-        parser_add_error(parser, parser->curr, "expected '}'");
-        node_free(node);
-        return NULL;
-    }
-
-    return node;
-}
-
-// [ ... ]foo{ ... }
-Node *parse_expr_def_array(Parser *parser)
-{
-    if (!parser_consume(parser, TOKEN_LEFT_BRACKET))
-    {
-        parser_add_error(parser, parser->curr, "expected '['");
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_EXPR_DEF_ARRAY);
-
-    if (!parser_match(parser, TOKEN_RIGHT_BRACKET))
-    {
-        Node *size = parse_expr(parser);
-        if (!size)
-        {
-            node_free(node);
-            return NULL;
-        }
-
-        node->data.expr_def_array.size = size;
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACKET))
-    {
-        parser_add_error(parser, parser->curr, "expected ']'");
-        node_free(node);
-        return NULL;
-    }
-
-    Node *type = parse_type(parser);
-    if (!type)
-    {
-        node_free(node);
-        return NULL;
-    }
-
-    node->data.expr_def_array.type = type;
-
-    if (!parser_consume(parser, TOKEN_LEFT_BRACE))
-    {
-        parser_add_error(parser, parser->curr, "expected '{'");
-        node_free(node);
-        return NULL;
-    }
-
-    if (parser_consume(parser, TOKEN_RIGHT_BRACE))
-    {
-        return node;
-    }
-
-    while (!parser_match(parser, TOKEN_RIGHT_BRACE) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *element = parse_expr(parser);
-        if (!element)
-        {
-            node_free(node);
-            return NULL;
-        }
-
-        node_list_append(&node->data.expr_def_array.elements, element);
-
-        parser_consume(parser, TOKEN_COMMA);
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACE))
-    {
-        parser_add_error(parser, parser->curr, "expected '}'");
-        node_free(node);
-        return NULL;
-    }
-
-    return node;
-}
-
-Node *parse_postfix(Parser *parser, Node *target)
-{
-    if (parser_match(parser, TOKEN_DOT))
-    {
-        Node *member = parse_expr_member(parser);
-        if (!member)
-        {
-            return NULL;
-        }
-
-        member->data.expr_member.target = target;
-
-        return member;
-    }
-
-    if (parser_match(parser, TOKEN_LEFT_PAREN))
-    {
-        Node *call = parse_expr_call(parser);
-        if (!call)
-        {
-            return NULL;
-        }
-
-        call->data.expr_call.target = target;
-
-        return call;
-    }
-
-    if (parser_match(parser, TOKEN_LEFT_BRACKET))
-    {
-        Node *index = parse_expr_index(parser);
-        if (!index)
-        {
-            return NULL;
-        }
-
-        index->data.expr_index.target = target;
-
-        return index;
-    }
-
-    return target;
-}
-
-// -1
-// +1
-// !1
-// ...
-Node *parse_expr_unary(Parser *parser)
-{
-    if (op_is_unary(parser->curr.type))
-    {
-        Token op = parser->curr;
+        Token *op = parser->curr;
         parser_advance(parser);
 
-        Node *rhs = parse_expr_unary(parser);
-        if (!rhs)
-        {
-            return NULL;
-        }
-
-        Node *node = node_new(NODE_EXPR_UNARY);
-        node->data.expr_unary.op = op.type;
-        node->data.expr_unary.rhs = rhs;
+        Node *node = node_new(NODE_EXPR_UNARY, op);
+        node->parent = parent;
+        node->expr_unary.right = parse_expr_unary(parser, node);
 
         return node;
     }
 
-    return parse_expr_primary(parser);
+    return parse_expr_primary(parser, parent);
 }
 
-// 1 + 2
-// 1 - 2
-// foo = bar
-// ...
-Node *parse_expr_binary(Parser *parser, int parent_precedence)
+Node *parse_expr_binary(Parser *parser, Node *parent, int parent_precedence)
 {
-    Node *lhs = parse_expr_unary(parser);
-    if (!lhs)
+    if (parser->opt_verbose)
     {
-        return NULL;
+        printf("[ PRSE ] parse_expr_binary\n");
     }
 
-    lhs = parse_postfix(parser, lhs);
+    Node *lhs = parse_expr_postfix(parser, parent);
 
-    while (op_is_binary(parser->curr.type) && op_get_precedence(parser->curr.type) >= parent_precedence)
+    while (op_is_binary(parser->curr->kind) && op_get_precedence(parser->curr->kind) >= parent_precedence)
     {
-        Token op = parser->curr;
+        Token *op = parser->curr;
         parser_advance(parser);
 
-        int precedence = op_get_precedence(op.type);
-        if (op_is_right_associative(op.type))
+        int precedence = op_get_precedence(op->kind);
+        if (op_is_right_associative(op->kind))
         {
             precedence++;
         }
 
-        Node *rhs = parse_expr_binary(parser, precedence);
-        if (!rhs)
-        {
-            node_free(lhs);
-            return NULL;
-        }
-
-        Node *node = node_new(NODE_EXPR_BINARY);
-        node->data.expr_binary.op = op.type;
-        node->data.expr_binary.lhs = lhs;
-        node->data.expr_binary.rhs = rhs;
+        Node *node = node_new(NODE_EXPR_BINARY, op);
+        node->parent = parent;
+        node->expr_binary.left = lhs;
+        node->expr_binary.right = parse_expr_binary(parser, node, precedence);
 
         lhs = node;
     }
@@ -681,910 +457,877 @@ Node *parse_expr_binary(Parser *parser, int parent_precedence)
     return lhs;
 }
 
-// (...)
-Node *parse_expr_grouping(Parser *parser)
+Node *parse_type_array(Parser *parser, Node *parent)
 {
-    if (!parser_consume(parser, TOKEN_LEFT_PAREN))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '('");
-        return NULL;
+        printf("[ PRSE ] parse_type_array\n");
     }
 
-    Node *node = parse_expr(parser);
-    if (!node)
+    if (!parser_consume(parser, TOKEN_L_BRACKET))
     {
-        return NULL;
+        return parser_error(parser->curr, "expected '['");
     }
 
-    if (!parser_consume(parser, TOKEN_RIGHT_PAREN))
+    Node *node = node_new(NODE_TYPE_ARRAY, parser->last);
+    node->parent = parent;
+
+    if (!parser_match(parser, TOKEN_R_BRACKET))
     {
-        parser_add_error(parser, parser->curr, "expected ')'");
-        return NULL;
+        node->type_arr.size = parse_expr(parser, node);
     }
+
+    if (!parser_consume(parser, TOKEN_R_BRACKET))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ']'");
+    }
+
+    node->type_arr.type = parse_type(parser, node);
 
     return node;
 }
 
-Node *parse_expr_primary(Parser *parser)
+Node *parse_type_pointer(Parser *parser, Node *parent)
 {
-    if (parser_match(parser, TOKEN_IDENTIFIER))
+    if (parser->opt_verbose)
     {
-        return parse_expr_identifier(parser);
+        printf("[ PRSE ] parse_type_pointer\n");
     }
 
-    if (parser_match(parser, TOKEN_CHARACTER))
+    if (!parser_consume(parser, TOKEN_STAR))
     {
-        return parse_expr_lit_char(parser);
+        return parser_error(parser->curr, "expected '*'");
     }
 
-    if (parser_match(parser, TOKEN_NUMBER))
-    {
-        return parse_expr_lit_number(parser);
-    }
+    Node *node = node_new(NODE_TYPE_POINTER, parser->last);
+    node->parent = parent;
+    node->type_ptr.type = parse_type(parser, node);
 
-    if (parser_match(parser, TOKEN_STRING))
-    {
-        return parse_expr_lit_string(parser);
-    }
-
-    if (parser_match(parser, TOKEN_LEFT_PAREN))
-    {
-        return parse_expr_grouping(parser);
-    }
-
-    if (parser_match(parser, TOKEN_LEFT_BRACKET))
-    {
-        return parse_expr_def_array(parser);
-    }
-
-    return NULL;
+    return node;
 }
 
-Node *parse_expr(Parser *parser)
+Node *parse_type_fun(Parser *parser, Node *parent)
 {
-    return parse_expr_binary(parser, 0);
-}
-
-// [ ... ]foo
-Node *parse_type_array(Parser *parser)
-{
-    if (!parser_consume(parser, TOKEN_LEFT_BRACKET))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '['");
-        return NULL;
+        printf("[ PRSE ] parse_type_fun\n");
     }
 
-    Node *node = node_new(NODE_TYPE_ARRAY);
-
-    if (!parser_match(parser, TOKEN_RIGHT_BRACKET))
+    if (!parser_consume(parser, TOKEN_KW_FUN))
     {
-        Node *size = parse_expr(parser);
-        if (!size)
+        return parser_error(parser->curr, "expected 'fun'");
+    }
+
+    Node *node = node_new(NODE_TYPE_FUN, parser->last);
+    node->parent = parent;
+
+    if (!parser_consume(parser, TOKEN_L_PAREN))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected '('");
+    }
+
+    while (!parser_match(parser, TOKEN_R_PAREN) && !parser_match(parser, TOKEN_EOF))
+    {
+        Node *param = parse_field(parser, node);
+        node->type_fun.parameters = node_list_add(node->type_fun.parameters, param);
+
+        if (!parser_consume(parser, TOKEN_COMMA))
         {
-            return NULL;
-        }
-
-        node->data.type_array.size = size;
+            if (!parser_match(parser, TOKEN_R_PAREN))
+            {
+                node_free(node);
+                return parser_error(parser->curr, "expected ',' or ')'");
+            }
+        };
     }
 
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACKET))
+    if (parser->last->kind == TOKEN_COMMA)
     {
-        parser_add_error(parser, parser->curr, "expected ']'");
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "unexpected ','");
     }
 
-    Node *type = parse_type(parser);
-    if (!type)
+    if (!parser_consume(parser, TOKEN_R_PAREN))
     {
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "expected ')'");
     }
 
-    node->data.type_array.type = type;
+    if (parser_consume(parser, TOKEN_COLON))
+    {
+        node->type_fun.return_type = parse_type(parser, node);
+    }
 
     return node;
 }
 
-// #foo
-Node *parse_type_ref(Parser *parser)
+Node *parse_type_str(Parser *parser, Node *parent)
 {
-    if (!parser_consume(parser, TOKEN_HASH))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '#'");
-        return NULL;
+        printf("[ PRSE ] parse_type_str\n");
     }
 
-    Node *type = parse_type(parser);
-    if (!type)
+    if (!parser_consume(parser, TOKEN_KW_STR))
     {
-        return NULL;
+        return parser_error(parser->curr, "expected 'str'");
     }
 
-    Node *node = node_new(NODE_TYPE_REF);
-    node->data.type_ref.target = type;
+    Node *node = node_new(NODE_TYPE_STR, parser->last);
+    node->parent = parent;
 
-    return node;
-}
-
-// ( ... ): foo
-Node *parse_type_fun(Parser *parser)
-{
-    if (!parser_consume(parser, TOKEN_LEFT_PAREN))
+    if (!parser_consume(parser, TOKEN_L_BRACE))
     {
-        parser_add_error(parser, parser->curr, "expected '('");
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "expected '{'");
     }
 
-    Node *node = node_new(NODE_TYPE_FUN);
-
-    while (!parser_match(parser, TOKEN_RIGHT_PAREN) && !parser_match(parser, TOKEN_EOF))
+    while (!parser_match(parser, TOKEN_R_BRACE) && !parser_match(parser, TOKEN_EOF))
     {
-        Node *parameter_type = parse_type(parser);
-        if (!parameter_type)
-        {
-            return NULL;
-        }
-
-        node_list_append(&node->data.type_fun.parameter_types, parameter_type);
-
-        parser_consume(parser, TOKEN_COMMA);
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_PAREN))
-    {
-        parser_add_error(parser, parser->curr, "expected ')'");
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_COLON))
-    {
-        parser_add_error(parser, parser->curr, "expected ':'");
-        return NULL;
-    }
-
-    Node *ret = parse_type(parser);
-    if (!ret)
-    {
-        return NULL;
-    }
-
-    node->data.type_fun.return_type = ret;
-
-    return node;
-}
-
-// { ... }
-Node *parse_type_str(Parser *parser)
-{
-    if (!parser_consume(parser, TOKEN_LEFT_BRACE))
-    {
-        parser_add_error(parser, parser->curr, "expected '{'");
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_TYPE_STR);
-
-    while (!parser_match(parser, TOKEN_RIGHT_BRACE) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *field = parse_field(parser);
-        if (!field)
-        {
-            node_free(node);
-            return NULL;
-        }
-
-        node_list_append(&node->data.type_str.fields, field);
+        Node *field = parse_field(parser, node);
+        node->type_str.fields = node_list_add(node->type_str.fields, field);
 
         if (!parser_consume(parser, TOKEN_SEMICOLON))
         {
-            parser_add_error(parser, parser->curr, "expected ';'");
             node_free(node);
-            return NULL;
+            return parser_error(parser->curr, "expected ';'");
         }
     }
 
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACE))
+    if (!parser_consume(parser, TOKEN_R_BRACE))
     {
-        parser_add_error(parser, parser->curr, "expected '}'");
         node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "expected '}'");
     }
 
     return node;
 }
 
-// { ... }
-Node *parse_type_uni(Parser *parser)
+Node *parse_type_uni(Parser *parser, Node *parent)
 {
-    if (!parser_consume(parser, TOKEN_LEFT_BRACE))
+    if (parser->opt_verbose)
     {
-        parser_add_error(parser, parser->curr, "expected '{'");
-        return NULL;
+        printf("[ PRSE ] parse_type_uni\n");
     }
 
-    Node *node = node_new(NODE_TYPE_UNI);
-
-    while (!parser_match(parser, TOKEN_RIGHT_BRACE) && !parser_match(parser, TOKEN_EOF))
+    if (!parser_consume(parser, TOKEN_KW_UNI))
     {
-        Node *field = parse_field(parser);
-        if (!field)
-        {
-            node_free(node);
-            return NULL;
-        }
+        return parser_error(parser->curr, "expected 'uni'");
+    }
 
-        node_list_append(&node->data.type_uni.fields, field);
+    Node *node = node_new(NODE_TYPE_UNI, parser->last);
+    node->parent = parent;
+
+    if (!parser_consume(parser, TOKEN_L_BRACE))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected '{'");
+    }
+
+    while (!parser_match(parser, TOKEN_R_BRACE) && !parser_match(parser, TOKEN_EOF))
+    {
+        Node *field = parse_field(parser, node);
+        node->type_uni.fields = node_list_add(node->type_uni.fields, field);
 
         if (!parser_consume(parser, TOKEN_SEMICOLON))
         {
-            parser_add_error(parser, parser->curr, "expected ';'");
             node_free(node);
-            return NULL;
+            return parser_error(parser->curr, "expected ';'");
         }
     }
 
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACE))
+    if (!parser_consume(parser, TOKEN_R_BRACE))
     {
-        parser_add_error(parser, parser->curr, "expected '}'");
         node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "expected '}'");
     }
 
     return node;
 }
 
-// foo: bar
-Node *parse_field(Parser *parser)
+Node *parse_field(Parser *parser, Node *parent)
 {
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
+    if (parser->opt_verbose)
     {
-        return NULL;
+        printf("[ PRSE ] parse_field\n");
     }
 
-    Node *node = node_new(NODE_FIELD);
-    node->data.node_field.identifier = identifier;
+    Node *node = node_new(NODE_FIELD, parser->curr);
+    node->parent = parent;
+    node->field.identifier = parse_identifier(parser, node);
 
     if (!parser_consume(parser, TOKEN_COLON))
     {
-        parser_add_error(parser, parser->curr, "expected ':'");
         node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "expected ':'");
     }
 
-    Node *type = parse_type(parser);
-    if (!type)
-    {
-        node_free(node);
-        return NULL;
-    }
-
-    node->data.node_field.type = type;
+    node->field.type = parse_type(parser, node);
 
     return node;
 }
 
-Node *parse_type(Parser *parser)
+Node *parse_stmt_val(Parser *parser, Node *parent)
 {
-    if (parser_match(parser, TOKEN_LEFT_BRACKET))
+    if (parser->opt_verbose)
     {
-        return parse_type_array(parser);
+        printf("[ PRSE ] parse_stmt_val\n");
     }
 
-    if (parser_match(parser, TOKEN_HASH))
+    if (!parser_consume(parser, TOKEN_KW_VAL))
     {
-        return parse_type_ref(parser);
+        return parser_error(parser->curr, "expected 'val'");
     }
 
-    if (parser_match(parser, TOKEN_IDENTIFIER))
-    {
-        switch (keyword_token_ident_type(parser->curr))
-        {
-        case KW_FUN:
-            if (!parser_consume(parser, TOKEN_IDENTIFIER))
-            {
-                parser_add_error(parser, parser->curr, "expected identifier");
-                return NULL;
-            }
-
-            return parse_type_fun(parser);
-        case KW_STR:
-            if (!parser_consume(parser, TOKEN_IDENTIFIER))
-            {
-                parser_add_error(parser, parser->curr, "expected identifier");
-                return NULL;
-            }
-
-            return parse_type_str(parser);
-        case KW_UNI:
-            if (!parser_consume(parser, TOKEN_IDENTIFIER))
-            {
-                parser_add_error(parser, parser->curr, "expected identifier");
-                return NULL;
-            }
-
-            return parse_type_uni(parser);
-        default:
-            return parse_identifier(parser);
-        }
-    }
-
-    parser_add_error(parser, parser->curr, "expected type");
-    return NULL;
-}
-
-// "foo";
-// foo "foo";
-// ...
-Node *parse_stmt_use(Parser *parser)
-{
-    Node *identifier = NULL;
-
-    if (parser_match(parser, TOKEN_IDENTIFIER))
-    {
-        identifier = parse_identifier(parser);
-        if (!identifier)
-        {
-            return NULL;
-        }
-    }
-
-    Node *path = parse_expr_lit_string(parser);
-    if (!path)
-    {
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_STMT_USE);
-    node->data.stmt_use.identifier = identifier;
-    node->data.stmt_use.path = path;
-
-    return node;
-}
-
-// (...) { ... }
-Node *parse_stmt_if(Parser *parser)
-{
-    if (!parser_consume(parser, TOKEN_LEFT_PAREN))
-    {
-        parser_add_error(parser, parser->curr, "expected '('");
-        return NULL;
-    }
-
-    Node *condition = parse_expr(parser);
-    if (!condition)
-    {
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_PAREN))
-    {
-        parser_add_error(parser, parser->curr, "expected ')'");
-        return NULL;
-    }
-
-    Node *body = parse_block(parser);
-    if (!body)
-    {
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_STMT_IF);
-    node->data.stmt_if.condition = condition;
-    node->data.stmt_if.body = body;
-
-    return node;
-}
-
-// (...) { ... }
-Node *parse_stmt_or(Parser *parser)
-{
-    Node *condition = NULL;
-    if (parser_consume(parser, TOKEN_LEFT_PAREN))
-    {
-        condition = parse_expr(parser);
-        if (!condition)
-        {
-            return NULL;
-        }
-
-        if (!parser_consume(parser, TOKEN_RIGHT_PAREN))
-        {
-            parser_add_error(parser, parser->curr, "expected ')'");
-            node_free(condition);
-            return NULL;
-        }
-    }
-
-    Node *body = parse_block(parser);
-    if (!body)
-    {
-        node_free(condition);
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_STMT_OR);
-    node->data.stmt_or.condition = condition;
-    node->data.stmt_or.body = body;
-
-    return node;
-}
-
-// (...) { ... }
-Node *parse_stmt_for(Parser *parser)
-{
-    Node *condition = NULL;
-    if (parser_consume(parser, TOKEN_LEFT_PAREN))
-    {
-        condition = parse_expr(parser);
-        if (!condition)
-        {
-            return NULL;
-        }
-
-        if (!parser_consume(parser, TOKEN_RIGHT_PAREN))
-        {
-            parser_add_error(parser, parser->curr, "expected ')'");
-            node_free(condition);
-            return NULL;
-        }
-    }
-
-    Node *body = parse_block(parser);
-    if (!body)
-    {
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_STMT_FOR);
-    node->data.stmt_for.condition = condition;
-    node->data.stmt_for.body = body;
-
-    return node;
-}
-
-// brk
-Node *parse_stmt_brk(Parser *parser)
-{
-    // avoid unused parameter compiler warning
-    (void)parser;
-
-    Node *node = node_new(NODE_STMT_BRK);
-    return node;
-}
-
-// cnt
-Node *parse_stmt_cnt(Parser *parser)
-{
-    // avoid unused parameter compiler warning
-    (void)parser;
-
-    Node *node = node_new(NODE_STMT_CNT);
-    return node;
-}
-
-// ret foo
-Node *parse_stmt_ret(Parser *parser)
-{
-    Node *node = node_new(NODE_STMT_RET);
-
-    if (parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        return node;
-    }
-
-    Node *value = parse_expr(parser);
-    if (!value)
-    {
-        node_free(node);
-        return NULL;
-    }
-
-    node->data.stmt_ret.value = value;
-
-    return node;
-}
-
-// def foo: bar
-Node *parse_stmt_decl_type(Parser *parser)
-{
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
-    {
-        return NULL;
-    }
+    Node *node = node_new(NODE_STMT_VAL, parser->last);
+    node->parent = parent;
+    node->stmt_val.identifier = parse_identifier(parser, node);
 
     if (!parser_consume(parser, TOKEN_COLON))
     {
-        parser_add_error(parser, parser->curr, "expected ':'");
-        node_free(identifier);
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "expected ':'");
     }
 
-    Node *type = parse_type(parser);
-    if (!type)
-    {
-        node_free(identifier);
-        return NULL;
-    }
-
-    Node *node = node_new(NODE_STMT_DECL_TYPE);
-    node->data.stmt_decl_type.identifier = identifier;
-    node->data.stmt_decl_type.type = type;
-
-    return node;
-}
-
-// val foo: bar = baz
-Node *parse_stmt_decl_val(Parser *parser)
-{
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
-    {
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_COLON))
-    {
-        parser_add_error(parser, parser->curr, "expected ':'");
-        node_free(identifier);
-        return NULL;
-    }
-
-    Node *type = parse_type(parser);
-    if (!type)
-    {
-        node_free(identifier);
-        return NULL;
-    }
+    node->stmt_val.type = parse_type(parser, node);
 
     if (!parser_consume(parser, TOKEN_EQUAL))
     {
-        parser_add_error(parser, parser->curr, "expected '='");
-        node_free(identifier);
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "expected '='");
     }
 
-    Node *initializer = parse_expr(parser);
-    if (!initializer)
+    node->stmt_val.initializer = parse_expr(parser, node);
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
     {
-        node_free(identifier);
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "expected ';'");
     }
-
-    Node *node = node_new(NODE_STMT_DECL_VAL);
-    node->data.stmt_decl_val.identifier = identifier;
-    node->data.stmt_decl_val.type = type;
-    node->data.stmt_decl_val.initializer = initializer;
 
     return node;
 }
 
-// var foo: bar = baz
-Node *parse_stmt_decl_var(Parser *parser)
+Node *parse_stmt_var(Parser *parser, Node *parent)
 {
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
+    if (parser->opt_verbose)
     {
-        return NULL;
+        printf("[ PRSE ] parse_stmt_var\n");
     }
+
+    if (!parser_consume(parser, TOKEN_KW_VAR))
+    {
+        return parser_error(parser->curr, "expected 'var'");
+    }
+
+    Node *node = node_new(NODE_STMT_VAR, parser->last);
+    node->parent = parent;
+    node->stmt_var.identifier = parse_identifier(parser, node);
 
     if (!parser_consume(parser, TOKEN_COLON))
     {
-        parser_add_error(parser, parser->curr, "expected ':'");
-        node_free(identifier);
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "expected ':'");
     }
 
-    Node *type = parse_type(parser);
-    if (!type)
-    {
-        node_free(identifier);
-        return NULL;
-    }
+    node->stmt_var.type = parse_type(parser, node);
 
-    Node *initializer = NULL;
     if (parser_consume(parser, TOKEN_EQUAL))
     {
-        initializer = parse_expr(parser);
-        if (!initializer)
-        {
-            node_free(identifier);
-            return NULL;
-        }
+        node->stmt_var.initializer = parse_expr(parser, node);
     }
 
-    Node *node = node_new(NODE_STMT_DECL_VAR);
-    node->data.stmt_decl_var.identifier = identifier;
-    node->data.stmt_decl_var.type = type;
-    node->data.stmt_decl_var.initializer = initializer;
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ';'");
+    }
 
     return node;
 }
 
-// foo(...): bar { ... }
-Node *parse_stmt_decl_fun(Parser *parser)
+Node *parse_stmt_def(Parser *parser, Node *parent)
 {
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
+    if (parser->opt_verbose)
     {
-        return NULL;
+        printf("[ PRSE ] parse_stmt_def\n");
     }
 
-    if (!parser_consume(parser, TOKEN_LEFT_PAREN))
+    if (!parser_consume(parser, TOKEN_KW_DEF))
     {
-        parser_add_error(parser, parser->curr, "expected '('");
-        node_free(identifier);
-        return NULL;
+        return parser_error(parser->curr, "expected 'def'");
     }
 
-    Node *node = node_new(NODE_STMT_DECL_FUN);
-
-    while (!parser_match(parser, TOKEN_RIGHT_PAREN) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *parameter = parse_field(parser);
-        if (!parameter)
-        {
-            node_free(identifier);
-            return NULL;
-        }
-
-        node_list_append(&node->data.stmt_decl_fun.parameters, parameter);
-
-        parser_consume(parser, TOKEN_COMMA);
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_PAREN))
-    {
-        parser_add_error(parser, parser->curr, "expected ')'");
-        node_free(identifier);
-        return NULL;
-    }
+    Node *node = node_new(NODE_STMT_DEF, parser->last);
+    node->parent = parent;
+    node->stmt_def.identifier = parse_identifier(parser, node);
 
     if (!parser_consume(parser, TOKEN_COLON))
     {
-        parser_add_error(parser, parser->curr, "expected ':'");
-        node_free(identifier);
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "expected ':'");
     }
 
-    node->data.stmt_decl_fun.identifier = identifier;
+    node->stmt_def.type = parse_type(parser, node);
 
-    Node *return_type = parse_type(parser);
-    if (!return_type)
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
     {
-        node_free(identifier);
-        return NULL;
+        node_free(node);
+        return parser_error(parser->curr, "expected ';'");
     }
-
-    node->data.stmt_decl_fun.return_type = return_type;
-
-    Node *body = parse_block(parser);
-    if (!body)
-    {
-        node_free(identifier);
-        return NULL;
-    }
-
-    node->data.stmt_decl_fun.body = body;
 
     return node;
 }
 
-// foo {
-//   bar: baz;
-//   ...
-// }
-Node *parse_stmt_decl_str(Parser *parser)
+Node *parse_stmt_use(Parser *parser, Node *parent)
 {
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
+    if (parser->opt_verbose)
     {
-        return NULL;
+        printf("[ PRSE ] parse_stmt_use\n");
     }
 
-    Node *node = node_new(NODE_STMT_DECL_STR);
-    node->data.stmt_decl_str.identifier = identifier;
-
-    if (!parser_consume(parser, TOKEN_LEFT_BRACE))
+    if (!parser_consume(parser, TOKEN_KW_USE))
     {
-        parser_add_error(parser, parser->curr, "expected '{'");
+        return parser_error(parser->curr, "expected 'use'");
+    }
+
+    Node *node = node_new(NODE_STMT_USE, parser->last);
+    node->parent = parent;
+    node->stmt_use.path = parse_lit_string(parser, node);
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
         node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "expected ';'");
     }
 
-    while (!parser_match(parser, TOKEN_RIGHT_BRACE) && !parser_match(parser, TOKEN_EOF))
+    return node;
+}
+
+Node *parse_stmt_fun(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
     {
-        Node *field = parse_field(parser);
-        if (!field)
+        printf("[ PRSE ] parse_stmt_fun\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_FUN))
+    {
+        return parser_error(parser->curr, "expected 'fun'");
+    }
+
+    Node *node = node_new(NODE_STMT_FUN, parser->last);
+    node->parent = parent;
+    node->stmt_fun.identifier = parse_identifier(parser, node);
+
+    if (!parser_consume(parser, TOKEN_L_PAREN))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected '('");
+    }
+
+    while (!parser_match(parser, TOKEN_R_PAREN) && !parser_match(parser, TOKEN_EOF))
+    {
+        Node *param = parse_field(parser, node);
+        node->stmt_fun.parameters = node_list_add(node->stmt_fun.parameters, param);
+
+        if (!parser_consume(parser, TOKEN_COMMA))
+        {
+            if (!parser_match(parser, TOKEN_R_PAREN))
+            {
+                node_free(node);
+                return parser_error(parser->curr, "expected ',' or ')'");
+            }
+        }
+    }
+
+    if (parser->last->kind == TOKEN_COMMA)
+    {
+        node_free(node);
+        return parser_error(parser->last, "unexpected ','");
+    }
+
+    if (!parser_consume(parser, TOKEN_R_PAREN))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ')'");
+    }
+
+    if (parser_consume(parser, TOKEN_COLON))
+    {
+        node->stmt_fun.return_type = parse_type(parser, node);
+    }
+
+    node->stmt_fun.body = parse_stmt_block(parser, node);
+
+    return node;
+}
+
+Node *parse_stmt_ext(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_stmt_ext\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_EXT))
+    {
+        return parser_error(parser->curr, "expected 'ext'");
+    }
+
+    Node *node = node_new(NODE_STMT_EXT, parser->last);
+    node->parent = parent;
+    node->stmt_ext.identifier = parse_identifier(parser, node);
+
+    if (!parser_consume(parser, TOKEN_COLON))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ':'");
+    }
+
+    node->stmt_ext.type = node_list_add(node->stmt_ext.type, parse_type(parser, node));
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_if(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_stmt_if\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_IF))
+    {
+        return parser_error(parser->curr, "expected 'if'");
+    }
+
+    Node *node = node_new(NODE_STMT_IF, parser->last);
+    node->parent = parent;
+
+    if (!parser_consume(parser, TOKEN_L_PAREN))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected '('");
+    }
+
+    node->stmt_if.condition = parse_expr(parser, node);
+
+    if (!parser_consume(parser, TOKEN_R_PAREN))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ')'");
+    }
+
+    node->stmt_if.body = parse_stmt_block(parser, node);
+
+    return node;
+}
+
+Node *parse_stmt_or(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_stmt_or\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_OR))
+    {
+        return parser_error(parser->curr, "expected 'or'");
+    }
+
+    Node *node = node_new(NODE_STMT_OR, parser->last);
+    node->parent = parent;
+
+    if (parser_consume(parser, TOKEN_L_PAREN))
+    {
+        node->stmt_or.condition = parse_expr(parser, node);
+
+        if (!parser_consume(parser, TOKEN_R_PAREN))
         {
             node_free(node);
-            return NULL;
+            return parser_error(parser->curr, "expected ')'");
         }
+    }
 
-        node_list_append(&node->data.stmt_decl_str.fields, field);
+    node->stmt_or.body = parse_stmt_block(parser, node);
+
+    return node;
+}
+
+Node *parse_stmt_for(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_stmt_for\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_FOR))
+    {
+        return parser_error(parser->curr, "expected 'for'");
+    }
+
+    Node *node = node_new(NODE_STMT_FOR, parser->last);
+    node->parent = parent;
+
+    if (parser_consume(parser, TOKEN_L_PAREN))
+    {
+        node->stmt_for.condition = parse_expr(parser, node);
+
+        if (!parser_consume(parser, TOKEN_R_PAREN))
+        {
+            node_free(node);
+            return parser_error(parser->curr, "expected ')'");
+        }
+    }
+
+    node->stmt_for.body = parse_stmt_block(parser, node);
+
+    return node;
+}
+
+Node *parse_stmt_brk(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_stmt_brk\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_BRK))
+    {
+        return parser_error(parser->curr, "expected 'brk'");
+    }
+
+    Node *node = node_new(NODE_STMT_BRK, parser->last);
+    node->parent = parent;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_cnt(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_stmt_cnt\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_CNT))
+    {
+        return parser_error(parser->curr, "expected 'cnt'");
+    }
+
+    Node *node = node_new(NODE_STMT_CNT, parser->last);
+    node->parent = parent;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_ret(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_stmt_ret\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_KW_RET))
+    {
+        return parser_error(parser->curr, "expected 'ret'");
+    }
+
+    Node *node = node_new(NODE_STMT_RET, parser->last);
+    node->parent = parent;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node->stmt_ret.value = parse_expr(parser, node);
 
         if (!parser_consume(parser, TOKEN_SEMICOLON))
         {
-            parser_add_error(parser, parser->curr, "expected ';'");
             node_free(node);
-            return NULL;
+            return parser_error(parser->curr, "expected ';'");
         }
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACE))
-    {
-        parser_add_error(parser, parser->curr, "expected '}'");
-        node_free(node);
-        return NULL;
     }
 
     return node;
 }
 
-// foo {
-//   bar: baz;
-//   ...
-// }
-Node *parse_stmt_decl_uni(Parser *parser)
+Node *parse_stmt_asm(Parser *parser, Node *parent)
 {
-    Node *identifier = parse_identifier(parser);
-    if (!identifier)
+    if (parser->opt_verbose)
     {
-        return NULL;
+        printf("[ PRSE ] parse_stmt_asm\n");
     }
 
-    Node *node = node_new(NODE_STMT_DECL_UNI);
-    node->data.stmt_decl_uni.identifier = identifier;
-
-    if (!parser_consume(parser, TOKEN_LEFT_BRACE))
+    if (!parser_consume(parser, TOKEN_KW_ASM))
     {
-        parser_add_error(parser, parser->curr, "expected '{'");
+        return parser_error(parser->curr, "expected 'asm'");
+    }
+
+    Node *node = node_new(NODE_STMT_ASM, parser->last);
+    node->parent = parent;
+    node->stmt_asm.code = parse_lit_string(parser, node);
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
         node_free(node);
-        return NULL;
-    }
-
-    while (!parser_match(parser, TOKEN_RIGHT_BRACE) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *field = parse_field(parser);
-        if (!field)
-        {
-            node_free(node);
-            return NULL;
-        }
-
-        node_list_append(&node->data.stmt_decl_uni.fields, field);
-
-        if (!parser_consume(parser, TOKEN_SEMICOLON))
-        {
-            parser_add_error(parser, parser->curr, "expected ';'");
-            node_free(node);
-            return NULL;
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_RIGHT_BRACE))
-    {
-        parser_add_error(parser, parser->curr, "expected '}'");
-        node_free(node);
-        return NULL;
+        return parser_error(parser->curr, "expected ';'");
     }
 
     return node;
 }
 
-// foo;
-// foo();
-// 1 + 1;
-// ...
-Node *parse_stmt_expr(Parser *parser)
+Node *parse_stmt_block(Parser *parser, Node *parent)
 {
-    Node *node = parse_expr(parser);
-    if (!node)
+    if (parser->opt_verbose)
     {
-        return NULL;
+        printf("[ PRSE ] parse_stmt_block\n");
     }
 
-    Node *stmt = node_new(NODE_STMT_EXPR);
-    stmt->data.stmt_expr.expression = node;
+    if (!parser_consume(parser, TOKEN_L_BRACE))
+    {
+        return parser_error(parser->curr, "expected '{'");
+    }
 
-    return stmt;
+    Node *node = node_new(NODE_STMT_BLOCK, parser->last);
+    node->parent = parent;
+
+    while (!parser_match(parser, TOKEN_R_BRACE) && !parser_match(parser, TOKEN_EOF))
+    {
+        Node *stmt = parse_stmt(parser, node);
+        node->stmt_block.statements = node_list_add(node->stmt_block.statements, stmt);
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected '}'");
+    }
+
+    return node;
 }
 
-Node *parse_stmt(Parser *parser)
+Node *parse_stmt_expr(Parser *parser, Node *parent)
 {
-    KeywordType keyword = keyword_token_ident_type(parser->curr);
-    Node *(*parse_function)(Parser *);
-
-    bool semicolon_terminated = true;
-
-    switch (keyword)
+    if (parser->opt_verbose)
     {
-    case KW_USE:
-        parse_function = parse_stmt_use;
-        semicolon_terminated = true;
+        printf("[ PRSE ] parse_stmt_expr\n");
+    }
+
+    Node *node = parse_expr(parser, parent);
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_expr_postfix(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_expr_postfix\n");
+    }
+
+    Node *node = parse_expr_unary(parser, parent);
+
+    while (true)
+    {
+        switch (parser->curr->kind)
+        {
+        case TOKEN_DOT:
+            node = parse_expr_member(parser, parent, node);
+            break;
+        case TOKEN_L_PAREN:
+            node = parse_expr_call(parser, parent, node);
+            break;
+        case TOKEN_L_BRACKET:
+            node = parse_expr_index(parser, parent, node);
+            break;
+        case TOKEN_COLON_COLON:
+            node = parse_expr_cast(parser, parent, node);
+            break;
+        default:
+            return node;
+        }
+    }
+}
+
+Node *parse_expr_grouping(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_expr_grouping\n");
+    }
+
+    if (!parser_consume(parser, TOKEN_L_PAREN))
+    {
+        return parser_error(parser->curr, "expected '('");
+    }
+
+    Node *node = parse_expr(parser, parent);
+
+    if (!parser_consume(parser, TOKEN_R_PAREN))
+    {
+        node_free(node);
+        return parser_error(parser->curr, "expected ')'");
+    }
+
+    return node;
+}
+
+Node *parse_expr_primary(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_expr_primary\n");
+    }
+
+    switch (parser->curr->kind)
+    {
+    case TOKEN_IDENTIFIER:
+        return parse_identifier(parser, parent);
+    case TOKEN_CHARACTER:
+        return parse_lit_char(parser, parent);
+    case TOKEN_INT:
+        return parse_lit_int(parser, parent);
+    case TOKEN_FLOAT:
+        return parse_lit_float(parser, parent);
+    case TOKEN_STRING:
+        return parse_lit_string(parser, parent);
+    case TOKEN_KW_NEW:
+        return parse_expr_new(parser, parent);
+    case TOKEN_L_PAREN:
+        return parse_expr_grouping(parser, parent);
+    default:
+        return parser_error(parser->curr, "expected primary expression");
+    }
+}
+
+Node *parse_expr(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_expr\n");
+    }
+
+    return parse_expr_binary(parser, parent, 0);
+}
+
+Node *parse_type(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_type\n");
+    }
+
+    switch (parser->curr->kind)
+    {
+    case TOKEN_IDENTIFIER:
+        return parse_identifier(parser, parent);
+    case TOKEN_L_BRACKET:
+        return parse_type_array(parser, parent);
+    case TOKEN_STAR:
+        return parse_type_pointer(parser, parent);
+    case TOKEN_KW_FUN:
+        return parse_type_fun(parser, parent);
+    case TOKEN_KW_STR:
+        return parse_type_str(parser, parent);
+    case TOKEN_KW_UNI:
+        return parse_type_uni(parser, parent);
+    default:
+        return parser_error(parser->curr, "expected type");
+    }
+}
+
+Node *parse_stmt(Parser *parser, Node *parent)
+{
+    if (parser->opt_verbose)
+    {
+        printf("[ PRSE ] parse_stmt\n");
+    }
+
+    Node *node;
+
+    switch (parser->curr->kind)
+    {
+    case TOKEN_KW_VAL:
+        node = parse_stmt_val(parser, parent);
         break;
-    case KW_IF:
-        parse_function = parse_stmt_if;
-        semicolon_terminated = false;
+    case TOKEN_KW_VAR:
+        node = parse_stmt_var(parser, parent);
         break;
-    case KW_OR:
-        parse_function = parse_stmt_or;
-        semicolon_terminated = false;
+    case TOKEN_KW_DEF:
+        node = parse_stmt_def(parser, parent);
         break;
-    case KW_FOR:
-        parse_function = parse_stmt_for;
-        semicolon_terminated = false;
+    case TOKEN_KW_USE:
+        node = parse_stmt_use(parser, parent);
         break;
-    case KW_BRK:
-        parse_function = parse_stmt_brk;
-        semicolon_terminated = true;
+    case TOKEN_KW_FUN:
+        node = parse_stmt_fun(parser, parent);
         break;
-    case KW_CNT:
-        parse_function = parse_stmt_cnt;
-        semicolon_terminated = true;
+    case TOKEN_KW_EXT:
+        node = parse_stmt_ext(parser, parent);
         break;
-    case KW_RET:
-        parse_function = parse_stmt_ret;
-        semicolon_terminated = true;
+    case TOKEN_KW_IF:
+        node = parse_stmt_if(parser, parent);
         break;
-    case KW_DEF:
-        parse_function = parse_stmt_decl_type;
-        semicolon_terminated = true;
+    case TOKEN_KW_OR:
+        node = parse_stmt_or(parser, parent);
         break;
-    case KW_VAL:
-        parse_function = parse_stmt_decl_val;
-        semicolon_terminated = true;
+    case TOKEN_KW_FOR:
+        node = parse_stmt_for(parser, parent);
         break;
-    case KW_VAR:
-        parse_function = parse_stmt_decl_var;
-        semicolon_terminated = true;
+    case TOKEN_KW_BRK:
+        node = parse_stmt_brk(parser, parent);
         break;
-    case KW_FUN:
-        parse_function = parse_stmt_decl_fun;
-        semicolon_terminated = false;
+    case TOKEN_KW_CNT:
+        node = parse_stmt_cnt(parser, parent);
         break;
-    case KW_STR:
-        parse_function = parse_stmt_decl_str;
-        semicolon_terminated = false;
+    case TOKEN_KW_RET:
+        node = parse_stmt_ret(parser, parent);
         break;
-    case KW_UNI:
-        parse_function = parse_stmt_decl_uni;
-        semicolon_terminated = false;
+    case TOKEN_KW_ASM:
+        node = parse_stmt_asm(parser, parent);
+        break;
+    case TOKEN_L_BRACE:
+        node = parse_stmt_block(parser, parent);
         break;
     default:
-        parse_function = parse_stmt_expr;
-        semicolon_terminated = true;
+        node = parse_stmt_expr(parser, parent);
         break;
-    }
-
-    // consume keyword if it was matched
-    // NOTE: none of the above statement functions prepended with a keyword
-    //   expect to parse their own keyword.
-    if (keyword != KW_UNK)
-    {
-        if (!parser_consume(parser, TOKEN_IDENTIFIER))
-        {
-            parser_add_error(parser, parser->curr, "expected identifier");
-            return NULL;
-        }
-    }
-
-    Node *node = parse_function(parser);
-    if (!node)
-    {
-        return NULL;
-    }
-
-    if (semicolon_terminated && !parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        parser_add_error(parser, parser->curr, "expected ';'");
-        node_free(node);
-        return NULL;
     }
 
     if (parser->opt_verbose)
     {
-        printf("[ PRSE ] [ STMT ] %s\n", node_type_string(node->type));
+        printf("[ PRSE ] [ STMT ] %s\n", node_kind_string(node->kind));
+    }
+
+    if (node->kind == NODE_ERROR)
+    {
+        parser_advance(parser);
     }
 
     return node;
@@ -1592,23 +1335,7 @@ Node *parse_stmt(Parser *parser)
 
 Node *parser_parse(Parser *parser)
 {
-    // prime the parser (assume just initialized)
-    parser_advance(parser);
     parser_advance(parser);
 
-    Node *node = node_new(NODE_BLOCK);
-
-    while (!parser_match(parser, TOKEN_EOF))
-    {
-        Node *stmt = parse_stmt(parser);
-        if (!stmt)
-        {
-            node_free(node);
-            return NULL;
-        }
-
-        node_list_append(&node->data.node_block.statements, stmt);
-    }
-
-    return node;
+    return parse_program(parser);
 }

@@ -1,4 +1,4 @@
-#define DEBUG_PARSER_PRINT
+#define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
 #include <ctype.h>
@@ -7,39 +7,15 @@
 
 #include "compiler.h"
 
-// define default mach installation path by platform:
-// - windows: C:\Program Files\mach
-// - linux: /usr/local/mach
-// - macos: /usr/local/mach
-// - other: /usr/local/mach
-#if defined(_WIN32)
-#define DEFAULT_MACH_PATH "C:\\Program Files\\mach"
-#elif defined(__linux__) || defined(__APPLE__)
-#define DEFAULT_MACH_PATH "/usr/local/mach"
-#else
-#define DEFAULT_MACH_PATH "/usr/local/mach"
-#endif
-
 int main(int argc, char *argv[])
 {
-    const char *env_mach_path = getenv("MACH_PATH");
 
-    Options *options = malloc(sizeof(Options));
-    options->mach_installation = env_mach_path ? env_mach_path : DEFAULT_MACH_PATH;
-
-    options_default(options);
+    Options *options = options_new();
     options_from_args(options, argc, argv);
 
-    Compiler *compiler = malloc(sizeof(Compiler));
-    compiler_init(compiler, options);
+    Compiler *compiler = compiler_new(options);
     compiler_compile(compiler);
-    if (compiler_has_errors(compiler))
-    {
-        compiler_print_errors(compiler);
-    }
-    
-    // pain
-    // compiler_free(compiler);
+    compiler_free(compiler);
 
     return 0;
 }

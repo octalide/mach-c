@@ -11,7 +11,7 @@ typedef enum DependancyType
 typedef struct dependancy_type_name
 {
     DependancyType type;
-    const char *name;
+    char *name;
 } dependancy_type_name;
 
 static const dependancy_type_name DEPENDANCY_NAMES[] = {
@@ -25,7 +25,7 @@ typedef struct Dependancy
     char *path;
 } Dependancy;
 
-DependancyType dependancy_type_from_string(const char *str);
+DependancyType dependancy_type_from_string(char *str);
 bool dependancy_type_valid(DependancyType type);
 
 #endif // DEPENDANCY_H

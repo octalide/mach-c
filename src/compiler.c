@@ -10,20 +10,20 @@
 #include "visitor.h"
 #include "compiler.h"
 
-void compiler_init(Compiler *compiler, Options *options)
+Compiler *compiler_new(Options *options)
 {
+    Compiler *compiler = calloc(1, sizeof(Compiler));
     compiler->options = options;
-
-    compiler->analyzer = malloc(sizeof(Analyzer));
-    analyzer_init(compiler->analyzer);
 
     compiler->source_files = calloc(1, sizeof(SourceFile *));
     compiler->source_files[0] = NULL;
 
     compiler->program = NULL;
+    compiler->analyzer = NULL;
 
-    compiler->errors = calloc(1, sizeof(CompilerError *));
-    compiler->errors[0] = NULL;
+    compiler->should_abort = false;
+
+    return compiler;
 }
 
 void compiler_free(Compiler *compiler)
@@ -33,83 +33,31 @@ void compiler_free(Compiler *compiler)
         return;
     }
 
-    if (compiler->options != NULL)
+    for (int i = 0; compiler->source_files[i] != NULL; i++)
     {
-        free(compiler->options);
+        source_file_free(compiler->source_files[i]);
+        compiler->source_files[i] = NULL;
     }
 
-    if (compiler->analyzer != NULL)
-    {
-        analyzer_free(compiler->analyzer);
-        free(compiler->analyzer);
-    }
+    free(compiler->source_files);
+    compiler->source_files = NULL;
 
-    if (compiler->source_files != NULL)
-    {
-        for (int i = 0; compiler->source_files[i] != NULL; i++)
-        {
-            source_file_free(compiler->source_files[i]);
-        }
+    // NOTE:
+    // The compiler "program" is an AST that is made up of all the ASTs from
+    //   the source files, which have all just been freed. Attempting to use
+    //   `node_free(compiler->program)` will result in a double free as the
+    //   AST does not own a single pointer used in its makeup. Just free head.
+    free(compiler->program);
+    compiler->program = NULL;
 
-        free(compiler->source_files);
-    }
+    analyzer_free(compiler->analyzer);
+    compiler->analyzer = NULL;
 
-    if (compiler->program != NULL)
-    {
-        node_free(compiler->program);
-        free(compiler->program);
-    }
-
-    if (compiler->errors != NULL)
-    {
-        for (int i = 0; compiler->errors[i] != NULL; i++)
-        {
-            free(compiler->errors[i]);
-        }
-
-        free(compiler->errors);
-    }
+    free(compiler);
+    compiler = NULL;
 }
 
-void compiler_add_error(Compiler *compiler, const char *message)
-{
-    int i = 0;
-    while (compiler->errors[i] != NULL)
-    {
-        i++;
-    }
-
-    compiler->errors = realloc(compiler->errors, (i + 2) * sizeof(CompilerError *));
-    compiler->errors[i] = malloc(sizeof(CompilerError));
-    compiler->errors[i]->message = strdup(message);
-    compiler->errors[i + 1] = NULL;
-}
-
-void compiler_add_errorf(Compiler *compiler, const char *format, ...)
-{
-    va_list args;
-    va_start(args, format);
-
-    char buffer[1024];
-    vsnprintf(buffer, 1024, format, args);
-
-    compiler_add_error(compiler, buffer);
-}
-
-bool compiler_has_errors(Compiler *compiler)
-{
-    return compiler->errors[0] != NULL;
-}
-
-void compiler_print_errors(Compiler *compiler)
-{
-    for (int i = 0; compiler->errors[i] != NULL; i++)
-    {
-        printf("[ COMP ] error: %s\n", compiler->errors[i]->message);
-    }
-}
-
-void compiler_add_source_file(Compiler *compiler, const char *path)
+void compiler_source_file_add(Compiler *compiler, char *path)
 {
     // check if source file has already been added (avoids self and circular
     //   imports that would lead to infinite recursion)
@@ -125,7 +73,7 @@ void compiler_add_source_file(Compiler *compiler, const char *path)
     FILE *file = fopen(path, "r");
     if (!file)
     {
-        compiler_add_errorf(compiler, "failed to open file: %s", path);
+        printf("[ COMP ] could not open source file: %s\n", path);
         return;
     }
 
@@ -138,10 +86,8 @@ void compiler_add_source_file(Compiler *compiler, const char *path)
     source[length] = '\0';
     fclose(file);
 
-    SourceFile *source_file = malloc(sizeof(SourceFile));
-    source_file_init(source_file, path, source);
+    SourceFile *source_file = source_file_new(path, source);
     source_file->parser->opt_verbose = compiler->options->verbose_parse;
-    source_file->analyzer->opt_verbose = compiler->options->verbose_analysis;
 
     int i = 0;
     while (compiler->source_files[i] != NULL)
@@ -154,53 +100,67 @@ void compiler_add_source_file(Compiler *compiler, const char *path)
     compiler->source_files[i + 1] = NULL;
 }
 
-// compiler_prepare performs the following tasks:
+// compiler_stage_prepare performs the following tasks:
 // 1. checks options for errors
 // 2. checks that dependencies are installed
 // 3. checks that the program entrypoint file exists and adds it to the list of source files
-void compiler_prepare(Compiler *compiler)
+void compiler_stage_prepare(Compiler *compiler)
 {
-    if (compiler->options->verbose_compiler)
+    if (compiler->options->verbose_compile)
     {
         printf("[ COMP ] preparing compiler...\n");
     }
 
     if (compiler->options->mach_installation == NULL)
     {
-        compiler_add_error(compiler, "mach installation path not set");
+        printf("[ COMP ] | mach installation path not set\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (compiler->options->path_project == NULL)
     {
-        compiler_add_error(compiler, "project path not set");
+        printf("[ COMP ] | project path not set\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (compiler->options->path_src == NULL)
     {
-        compiler_add_error(compiler, "source path not set");
+        printf("[ COMP ] | source path not set\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (compiler->options->path_dep == NULL)
     {
-        compiler_add_error(compiler, "dependancy path not set");
+        printf("[ COMP ] | dependancy path not set\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (compiler->options->path_out == NULL)
     {
-        compiler_add_error(compiler, "output path not set");
+        printf("[ COMP ] | output path not set\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (compiler->options->path_entry == NULL)
     {
-        compiler_add_error(compiler, "program entrypoint not set");
-    }
-
-    if (compiler_has_errors(compiler))
-    {
+        printf("[ COMP ] | program entrypoint not set\n");
+        compiler->should_abort = true;
         return;
     }
 
-    if (compiler->options->verbose_compiler)
+    if (compiler->options->target_count == 0)
+    {
+        printf("[ COMP ] | no targets set\n");
+        compiler->should_abort = true;
+        return;
+    }
+
+    if (compiler->options->verbose_compile)
     {
         printf("[ COMP ] | - mach installation:  %s\n", compiler->options->mach_installation);
         printf("[ COMP ] | - path_project:       %s\n", compiler->options->path_project);
@@ -208,74 +168,72 @@ void compiler_prepare(Compiler *compiler)
         printf("[ COMP ] | - path_dep:           %s\n", compiler->options->path_dep);
         printf("[ COMP ] | - path_out:           %s\n", compiler->options->path_out);
         printf("[ COMP ] | - path_entry:         %s\n", compiler->options->path_entry);
+        printf("[ COMP ] | - targets:\n");
+
+        for (int i = 0; i < compiler->options->target_count; i++)
+        {
+            printf("[ COMP ] | | - %s\n", target_to_string(compiler->options->targets[i]));
+        }
     }
 
     if (compiler->options->path_entry == NULL)
     {
-        compiler_add_error(compiler, "program entrypoint not set");
+        printf("[ COMP ] | program entrypoint not set\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (!path_is_absolute(compiler->options->path_project))
     {
-        compiler_add_error(compiler, "project path is not absolute");
+        printf("[ COMP ] | project path is not absolute\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (!path_is_absolute(compiler->options->path_src))
     {
-        compiler_add_error(compiler, "source path is not absolute");
+        printf("[ COMP ] | source path is not absolute\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (!path_is_absolute(compiler->options->path_dep))
     {
-        compiler_add_error(compiler, "dependancy path is not absolute");
+        printf("[ COMP ] | dependancy path is not absolute\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (!path_is_absolute(compiler->options->path_out))
     {
-        compiler_add_error(compiler, "output path is not absolute");
+        printf("[ COMP ] | output path is not absolute\n");
+        compiler->should_abort = true;
+        return;
     }
 
     if (!path_is_absolute(compiler->options->path_entry))
     {
-        compiler_add_error(compiler, "entrypoint path is not absolute");
-    }
-
-    if (compiler_has_errors(compiler))
-    {
+        printf("[ COMP ] | entrypoint path is not absolute\n");
+        compiler->should_abort = true;
         return;
     }
 
     if (!file_exists(compiler->options->path_entry))
     {
-        compiler_add_errorf(compiler, "program entrypoint does not exist: %s", compiler->options->path_entry);
-    }
-
-    if (compiler_has_errors(compiler))
-    {
+        printf("[ COMP ] | program entrypoint does not exist: %s\n", compiler->options->path_entry);
+        compiler->should_abort = true;
         return;
     }
 
-    compiler_add_source_file(compiler, compiler->options->path_entry);
+    compiler_source_file_add(compiler, compiler->options->path_entry);
 }
 
-// this function performs the actions in accordance with the documentation for
-//   `compiler_pass_initial()` below.
-// Specifically, this is a visitor callback that is called for each `use`
-//   statement in a source file. The use statement path is extracted and turned
-//   into two filesystem paths:
-// - one relative to the current file with ".mach" appended
-// - one relative to `options->path_dep` with ".mach" appended as a fallback
-// If the file does not exist at either path, a compiler error is created.
-// If no errors are encountered, the file is added to the list of source files.
-//
-// A pointer to the Compiler in use is stored in `visitor->data_one` and the
-//   current SourceFile is stored in `visitor->data_two`.
-bool compiler_cb_visit_stmt_use(void *context, Node *node)
+void compiler_visit_use(void *context, Node *node)
 {
     if (context == NULL)
     {
-        printf("[ COMP ] fatal: visitor context not set\n");
-        exit(1);
+        printf("[ COMP ] error: visitor context not set\n");
+        return;
     }
 
     Compiler *compiler = ((CompilerVisitorContext *)context)->compiler;
@@ -283,30 +241,25 @@ bool compiler_cb_visit_stmt_use(void *context, Node *node)
 
     if (compiler == NULL)
     {
-        printf("[ COMP ] fatal: visitor context compiler not set\n");
-        exit(1);
+        printf("[ COMP ] error: visitor context compiler not set\n");
+        return;
     }
 
     if (source_file == NULL)
     {
-        printf("[ COMP ] fatal: visitor context source file not set\n");
-        exit(1);
+        printf("[ COMP ] error: visitor context source file not set\n");
+        return;
     }
 
-    Token token = node->data.stmt_use.path->data.expr_lit_string.value;
-    const char *path_file = source_file->path;
-    char *path_use_raw = token_raw(token);
+    char *path_file = source_file->path;
+    char *path_use = strdup(node->stmt_use.path->token->raw);
 
-    // only preserve text between the first quote and the last, noninclusive
-    char *quote = strchr(path_use_raw, '\"');
-    char *path_use = quote + 1;
-    quote = strrchr(path_use, '\"');
-    *quote = '\0';
+    // remove surrounding quotes (included in string literal tokens)
+    path_use++;
+    path_use[strlen(path_use) - 1] = '\0';
 
-    size_t path_use_len = strlen(path_use);
-    char *path_use_with_ext = malloc(path_use_len + 6);
-
-    // copy the original path and append ".mach"
+    // append ".mach"
+    char *path_use_with_ext = malloc(strlen(path_use) + 6);
     strcpy(path_use_with_ext, path_use);
     strcat(path_use_with_ext, ".mach");
 
@@ -317,138 +270,175 @@ bool compiler_cb_visit_stmt_use(void *context, Node *node)
 
     if (file_exists(path_rel))
     {
-        if (compiler->options->verbose_compiler)
+        if (compiler->options->verbose_compile)
         {
             printf("[ COMP ] | | | found source file at: %s\n", path_rel);
         }
 
-        compiler_add_source_file(compiler, path_rel);
+        compiler_source_file_add(compiler, path_rel);
     }
     else if (file_exists(path_dep))
     {
-        if (compiler->options->verbose_compiler)
+        if (compiler->options->verbose_compile)
         {
             printf("[ COMP ] | | | found source file at: %s\n", path_dep);
         }
 
-        compiler_add_source_file(compiler, path_dep);
+        compiler_source_file_add(compiler, path_dep);
     }
     else
     {
         printf("[ COMP ] | | | could not find source file. checked: \n- %s\n- %s\n", path_rel, path_dep);
-        compiler_add_errorf(compiler, "could not find source file. checked: \n- %s\n- %s", path_rel, path_dep);
     }
 
     free(dir_file);
     free(path_rel);
     free(path_dep);
-    free(path_use_with_ext); // Free the allocated buffer
-
-    return true;
+    free(path_use_with_ext);
 }
 
-// The initial pass parses and analyzes each source file individually, starting
-//   with `options->path_entry`.
-// If `use` statements are found in the resulting AST, the statement path is
-//   extracted and parsed into two filesystem paths:
-// - one relative to the current file with ".mach" appended
-// - one relative to `options->path_dep` with ".mach" appended as a fallback
-// A compiler error is created if a file does not exist at either path.
-// The file is then added to the list of source files and the process repeats
-//   until no new files are added.
-// The program AST is seeded with the first file's AST.
-void compiler_pass_initial(Compiler *compiler)
+void compiler_visit_error(void *context, Node *node)
 {
-    if (compiler->options->verbose_compiler)
+    if (context == NULL)
+    {
+        printf("[ COMP ] error: visitor context not set\n");
+        return;
+    }
+
+    Compiler *compiler = ((CompilerVisitorContext *)context)->compiler;
+    SourceFile *source_file = ((CompilerVisitorContext *)context)->source_file;
+
+    if (compiler == NULL)
+    {
+        printf("[ COMP ] error: visitor context compiler not set\n");
+        return;
+    }
+
+    if (source_file == NULL)
+    {
+        printf("[ COMP ] error: visitor context source file not set\n");
+        return;
+    }
+
+    compiler->should_abort = true;
+    parser_print_error(source_file->parser, node, source_file->path);
+}
+
+void compiler_stage_parsing(Compiler *compiler)
+{
+    if (compiler->options->verbose_compile)
     {
         printf("[ COMP ] initial pass...\n");
     }
 
-    Visitor visitor;
-    visitor_init(&visitor);
-    visitor.cb_visit_stmt_use = compiler_cb_visit_stmt_use;
+    Visitor *visitor_use = visitor_new(NODE_STMT_USE);
+    Visitor *visitor_error = visitor_new(NODE_ERROR);
+    visitor_use->callback = compiler_visit_use;
+    visitor_error->callback = compiler_visit_error;
 
-    CompilerVisitorContext context;
-    context.compiler = compiler;
+    CompilerVisitorContext *context = malloc(sizeof(CompilerVisitorContext));
+    context->compiler = compiler;
+    visitor_use->context = context;
+    visitor_error->context = context;
 
     for (int i = 0; compiler->source_files[i] != NULL; i++)
     {
         SourceFile *source_file = compiler->source_files[i];
 
-        if (compiler->options->verbose_compiler)
+        if (compiler->options->verbose_compile)
         {
             printf("[ COMP ] | processing file: %s\n", source_file->path);
             printf("[ COMP ] | | parsing file...\n");
         }
 
         source_file_parse(source_file);
-        if (parser_has_errors(source_file->parser))
-        {
-            if (compiler->options->verbose_compiler)
-            {
-                printf("[ COMP ] | | found errors during parsing:\n");
-            }
-            parser_print_errors(source_file->parser);
 
-            compiler_add_errorf(compiler, "found errors while parsing file: %s", source_file->path);
-        }
-
-        if (compiler->options->verbose_compiler)
-        {
-            printf("[ COMP ] | | analyzing file...\n");
-        }
-
-        source_file_analyze(source_file);
-        if (analyzer_has_errors(source_file->analyzer))
-        {
-            if (compiler->options->verbose_compiler)
-            {
-                printf("[ COMP ] | | found errors during analysis:\n");
-            }
-            analyzer_print_errors(source_file->analyzer);
-
-            compiler_add_errorf(compiler, "found errors while analyzing file: %s", source_file->path);
-        }
-
-        if (compiler->options->verbose_compiler)
+        if (compiler->options->verbose_compile)
         {
             printf("[ COMP ] | | checking for imports...\n");
         }
 
-        // set up context for visitor
-        context.source_file = source_file;
-        visitor.context = &context;
-        visit_node(&visitor, source_file->ast);
+        context->source_file = source_file;
+        visitor_visit(visitor_use, source_file->ast);
     }
 
-    compiler->program = compiler->source_files[0]->ast;
-    if (compiler->program == NULL)
+    if (compiler->options->verbose_compile)
     {
-        compiler_add_error(compiler, "program entrypoint has no AST");
+        printf("[ COMP ] | checking for parse errors...\n");
     }
+
+    for (int i = 0; compiler->source_files[i] != NULL; i++)
+    {
+
+        context->source_file = compiler->source_files[i];
+        visitor_visit(visitor_error, compiler->source_files[i]->ast);
+    }
+
+    visitor_free(visitor_use);
+    visitor_free(visitor_error);
+    free(context);
 }
 
-// compiler_compile performs the following tasks:
-// 1. prepares the compiler
-// 2. parses each file, starting with the program entrypoint (set during prep)
-//   1. initial parse
-//   2. initial semantic analysis, which leaves out unknown identifiers
-//   3. processes `use` statements and adds the target to the list of source files
-//   4. recurses until no files have unresolved imports
-// 3. combines each file's AST into a single program AST
-// 4. performs semantic analysis on the entire program AST
+void compiler_stage_analysis(Compiler *compiler)
+{
+    if (compiler->options->verbose_compile)
+    {
+        printf("[ COMP ] merging ASTs for analysis...\n");
+    }
+
+    compiler->program = node_new(NODE_PROGRAM, NULL);
+
+    for (int i = 0; compiler->source_files[i] != NULL; i++)
+    {
+        Node *ast = compiler->source_files[i]->ast;
+        if (ast == NULL)
+        {
+            continue;
+        }
+
+        if (compiler->program->program.statements == NULL)
+        {
+            compiler->program->program.statements = ast->program.statements;
+        }
+        else
+        {
+            compiler->program->program.statements->next = ast->program.statements;
+        }
+    }
+
+    for (int i = 0; i < compiler->options->target_count; i++)
+    {
+        Target target = compiler->options->targets[i];
+        if (compiler->options->verbose_compile)
+        {
+            printf("[ COMP ] analyzing program for target: %s\n", target_to_string(target));
+        }
+
+        compiler->analyzer = analyzer_new(target);
+
+        compiler->analyzer->resolve_all = true;
+        compiler->analyzer->opt_verbose = compiler->options->verbose_analysis;
+
+        analyzer_analyze(compiler->analyzer, compiler->program);
+    }
+
+    analyzer_free(compiler->analyzer);
+}
+
 void compiler_compile(Compiler *compiler)
 {
     clock_t
         c_total,
         c_prepare,
-        c_pass_initial;
+        c_parse,
+        c_analysis;
     double
-        s_total,
+        ms_total,
         ms_prepare,
-        ms_pass_initial;
+        ms_parse,
+        ms_analysis;
 
-    if (compiler->options->verbose_compiler)
+    if (compiler->options->verbose_compile)
     {
         printf("[ COMP ] beginning compilation...\n");
     }
@@ -456,27 +446,39 @@ void compiler_compile(Compiler *compiler)
     c_total = clock();
 
     c_prepare = clock();
-    compiler_prepare(compiler);
+    compiler_stage_prepare(compiler);
     ms_prepare = (double)(clock() - c_prepare) * 1000 / CLOCKS_PER_SEC;
-    if (compiler_has_errors(compiler))
+    if (compiler->should_abort)
     {
+        printf("[ COMP ] compilation aborted during preparation stage\n");
         return;
     }
 
-    c_pass_initial = clock();
-    compiler_pass_initial(compiler);
-    ms_pass_initial = (double)(clock() - c_pass_initial) * 1000 / CLOCKS_PER_SEC;
-    if (compiler_has_errors(compiler))
+    c_parse = clock();
+    compiler_stage_parsing(compiler);
+    ms_parse = (double)(clock() - c_parse) * 1000 / CLOCKS_PER_SEC;
+    if (compiler->should_abort)
     {
+        printf("[ COMP ] compilation aborted during parsing stage\n");
         return;
     }
 
-    s_total = (double)(clock() - c_total) / CLOCKS_PER_SEC;
-
-    if (compiler->options->verbose_compiler)
+    c_analysis = clock();
+    compiler_stage_analysis(compiler);
+    ms_analysis = (double)(clock() - c_analysis) * 1000 / CLOCKS_PER_SEC;
+    if (compiler->should_abort)
     {
-        printf("[ COMP ] compiled in %.2f seconds:\n", s_total);
-        printf("[ COMP ] - preparation:  %.2f ms\n", ms_prepare);
-        printf("[ COMP ] - initial pass: %.2f ms\n", ms_pass_initial);
+        printf("[ COMP ] compilation aborted during analysis stage\n");
+        return;
+    }
+
+    ms_total = (double)(clock() - c_total) * 1000 / CLOCKS_PER_SEC;
+
+    if (compiler->options->verbose_compile)
+    {
+        printf("[ COMP ] compiled in %.2f seconds:\n", ms_total / 1000);
+        printf("[ COMP ] - preparation:  (%%%2.0f) %5.2f ms\n", (ms_prepare / ms_total) * 100, ms_prepare);
+        printf("[ COMP ] - parse:        (%%%2.0f) %5.2f ms\n", (ms_parse / ms_total) * 100, ms_parse);
+        printf("[ COMP ] - analysis:     (%%%2.0f) %5.2f ms\n", (ms_analysis / ms_total) * 100, ms_analysis);
     }
 }

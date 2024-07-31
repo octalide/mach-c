@@ -10,7 +10,7 @@ typedef enum CompilationType
 typedef struct compilation_type_name
 {
     CompilationType type;
-    const char *name;
+    char *name;
 } compilation_type_name;
 
 static const compilation_type_name COMPILATION_TYPE_NAMES[] = {

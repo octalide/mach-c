@@ -3,14 +3,22 @@
 #include <stdio.h>
 #include <stdarg.h>
 
+#include "builtin.h"
 #include "analyzer.h"
-#include "visitor.h"
 
-void analyzer_init(Analyzer *analyzer)
+Analyzer *analyzer_new(Target target)
 {
-    analyzer->symbol_table = symbol_table_new(256);
+    Analyzer *analyzer = calloc(1, sizeof(Analyzer));
+    analyzer->target = target;
+    analyzer->scope = NULL;
+
     analyzer->errors = calloc(1, sizeof(AnalyzerError *));
     analyzer->errors[0] = NULL;
+
+    analyzer->resolve_all = true;
+    analyzer->opt_verbose = false;
+
+    return analyzer;
 }
 
 void analyzer_free(Analyzer *analyzer)
@@ -20,24 +28,77 @@ void analyzer_free(Analyzer *analyzer)
         return;
     }
 
-    if (analyzer->symbol_table != NULL)
+    scope_free(analyzer->scope);
+    analyzer->scope = NULL;
+
+    for (int i = 0; analyzer->errors[i] != NULL; i++)
     {
-        symbol_table_free(analyzer->symbol_table);
-        free(analyzer->symbol_table);
+        free(analyzer->errors[i]);
+        analyzer->errors[i] = NULL;
     }
 
-    if (analyzer->errors != NULL)
+    free(analyzer->errors);
+    analyzer->errors = NULL;
+
+    free(analyzer);
+}
+
+void analyzer_scope_down(Analyzer *analyzer)
+{
+    if (analyzer->scope == NULL)
     {
-        for (int i = 0; analyzer->errors[i] != NULL; i++)
+        return;
+    }
+
+    analyzer->scope = scope_down(analyzer->scope);
+}
+
+void analyzer_scope_up(Analyzer *analyzer)
+{
+    if (analyzer->scope == NULL)
+    {
+        return;
+    }
+
+    analyzer->scope = scope_up(analyzer->scope);
+}
+
+void analyzer_scope_add_symbol(Analyzer *analyzer, Symbol *symbol)
+{
+    if (analyzer->scope == NULL)
+    {
+        return;
+    }
+
+    scope_add_symbol(analyzer->scope, symbol);
+}
+
+// add builtin symbols into current scope
+void analyzer_add_builtins(Analyzer *analyzer)
+{
+    for (int i = 0; i < BI_UNKNOWN; i++)
+    {
+        Type *type = builtin_type(BUILTIN_INFO_MAP[i].type, analyzer->target);
+        if (type == NULL)
         {
-            free(analyzer->errors[i]);
+            fprintf(stderr, "fatal: failed to create builtin type '%d'\n", BUILTIN_INFO_MAP[i].type);
+            exit(1);
         }
 
-        free(analyzer->errors);
+        Symbol *symbol = malloc(sizeof(Symbol));
+        if (symbol == NULL)
+        {
+            fprintf(stderr, "fatal: failed to add builtin symbol '%s'\n", BUILTIN_INFO_MAP[i].name);
+            exit(1);
+        }
+
+        symbol_init(symbol);
+        symbol->name = strdup(BUILTIN_INFO_MAP[i].name);
+        symbol->type = type;
     }
 }
 
-void analyzer_add_error(Analyzer *analyzer, Node *node, const char *message)
+void analyzer_add_error(Analyzer *analyzer, Node *node, char *message)
 {
     AnalyzerError *error = (AnalyzerError *)malloc(sizeof(AnalyzerError));
     error->message = strdup(message);
@@ -54,7 +115,7 @@ void analyzer_add_error(Analyzer *analyzer, Node *node, const char *message)
     analyzer->errors[i + 1] = NULL;
 }
 
-void analyzer_add_errorf(Analyzer *analyzer, Node *node, const char *fmt, ...)
+void analyzer_add_errorf(Analyzer *analyzer, Node *node, char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
@@ -82,15 +143,6 @@ void analyzer_print_errors(Analyzer *analyzer)
     }
 }
 
-// bool analyzer_cb_visit_node_identifier(void *context, Node *node);
-// bool analyzer_cb_visit_node_identifier(void *context, Node *node);
-
-void analyzer_cb_visit_expr_identifier(void *context, Node *node)
-{
-    AnalyzerVisitorContext *ctx = (AnalyzerVisitorContext *)context;
-    Analyzer *analyzer = ctx->analyzer;
-}
-
 void analyzer_analyze(Analyzer *analyzer, Node *ast)
 {
     if (ast == NULL)
@@ -98,49 +150,5 @@ void analyzer_analyze(Analyzer *analyzer, Node *ast)
         return;
     }
 
-    Visitor visitor;
-    visitor_init(&visitor);
-
-    visitor.cb_visit_node_block = NULL;
-
-    AnalyzerVisitorContext context;
-    context.analyzer = analyzer;
-
-    // NOTE: commented functions are unused portions of the visitor pattern
-    // visitor.cb_visit_node_block = analyzer_cb_visit_node_block;
-    // visitor.cb_visit_node_identifier = analyzer_cb_visit_node_identifier;
-    visitor.cb_visit_expr_identifier = analyzer_cb_visit_expr_identifier;
-    visitor.cb_visit_expr_member = analyzer_cb_visit_expr_member;
-    visitor.cb_visit_expr_lit_char = analyzer_cb_visit_expr_lit_char;
-    visitor.cb_visit_expr_lit_number = analyzer_cb_visit_expr_lit_number;
-    visitor.cb_visit_expr_lit_string = analyzer_cb_visit_expr_lit_string;
-    visitor.cb_visit_expr_call = analyzer_cb_visit_expr_call;
-    visitor.cb_visit_expr_index = analyzer_cb_visit_expr_index;
-    visitor.cb_visit_expr_def_str = analyzer_cb_visit_expr_def_str;
-    visitor.cb_visit_expr_def_uni = analyzer_cb_visit_expr_def_uni;
-    visitor.cb_visit_expr_def_array = analyzer_cb_visit_expr_def_array;
-    visitor.cb_visit_expr_unary = analyzer_cb_visit_expr_unary;
-    visitor.cb_visit_expr_binary = analyzer_cb_visit_expr_binary;
-    visitor.cb_visit_type_array = analyzer_cb_visit_type_array;
-    visitor.cb_visit_type_ref = analyzer_cb_visit_type_ref;
-    visitor.cb_visit_type_fun = analyzer_cb_visit_type_fun;
-    visitor.cb_visit_type_str = analyzer_cb_visit_type_str;
-    visitor.cb_visit_type_uni = analyzer_cb_visit_type_uni;
-    visitor.cb_visit_node_field = analyzer_cb_visit_node_field;
-    visitor.cb_visit_stmt_use = analyzer_cb_visit_stmt_use;
-    visitor.cb_visit_stmt_if = analyzer_cb_visit_stmt_if;
-    visitor.cb_visit_stmt_or = analyzer_cb_visit_stmt_or;
-    visitor.cb_visit_stmt_for = analyzer_cb_visit_stmt_for;
-    visitor.cb_visit_stmt_ret = analyzer_cb_visit_stmt_ret;
-    visitor.cb_visit_stmt_decl_type = analyzer_cb_visit_stmt_decl_type;
-    visitor.cb_visit_stmt_decl_val = analyzer_cb_visit_stmt_decl_val;
-    visitor.cb_visit_stmt_decl_var = analyzer_cb_visit_stmt_decl_var;
-    visitor.cb_visit_stmt_decl_fun = analyzer_cb_visit_stmt_decl_fun;
-    visitor.cb_visit_stmt_decl_str = analyzer_cb_visit_stmt_decl_str;
-    visitor.cb_visit_stmt_decl_uni = analyzer_cb_visit_stmt_decl_uni;
-    visitor.cb_visit_stmt_expr = analyzer_cb_visit_stmt_expr;
-    visitor.cb_visit_node_stmt = analyzer_cb_visit_node_stmt;
-    visitor.cb_visit_node = analyzer_cb_visit_node;
-
-    visit_node(&visitor, ast);
+    (void)analyzer;
 }

@@ -40,7 +40,7 @@ void lexer_free(Lexer *lexer)
 
 bool lexer_at_end(Lexer *lexer)
 {
-    return lexer->pos >= (int)strlen(lexer->source);
+    return lexer_current(lexer) == '\0';
 }
 
 char lexer_current(Lexer *lexer)
@@ -517,11 +517,6 @@ int lexer_next(Lexer *lexer)
 {
     lexer_skip_whitespace(lexer);
 
-    if (lexer_at_end(lexer))
-    {
-        return TOKEN_ERROR;
-    }
-
     Token token;
     switch (lexer_current(lexer))
     {
@@ -678,6 +673,9 @@ int lexer_next(Lexer *lexer)
         break;
     case '\\':
         token = lexer_emit(lexer, TOKEN_BACKSLASH, 1);
+        break;
+    case '\0':
+        token = lexer_emit(lexer, TOKEN_EOF, 1);
         break;
     default:
         token = lexer_emit(lexer, TOKEN_UNKNOWN, 1);

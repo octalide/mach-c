@@ -1,5 +1,7 @@
 #include "context.h"
 
+#include <stdlib.h>
+
 Context *context_new()
 {
     Context *context = calloc(1, sizeof(Context));

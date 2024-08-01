@@ -79,9 +79,8 @@ TokenList *token_list_new();
 void token_list_free(TokenList *token_list);
 
 int token_list_add(TokenList *token_list, Token token);
-Token token_list_get_token(TokenList *token_list, int index);
-TokenKind token_list_get_kind(TokenList *token_list, int index);
+Token token_list_get(TokenList *token_list, int index);
 
-const char *token_kind_to_string(TokenKind kind);
+char *token_kind_to_string(TokenKind kind);
 
 #endif

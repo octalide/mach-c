@@ -15,14 +15,16 @@ Token token_new(TokenKind kind, int pos, int len)
 TokenList *token_list_new()
 {
     TokenList *token_list = calloc(1, sizeof(TokenList));
-    if (token_list != NULL)
+    if (token_list == NULL)
     {
-        token_list->tokens = calloc(TOKEN_LIST_INC_SIZE, sizeof(Token));
-        if (token_list->tokens == NULL)
-        {
-            free(token_list);
-            token_list = NULL;
-        }
+        return NULL;
+    }
+    
+    token_list->tokens = calloc(TOKEN_LIST_INC_SIZE, sizeof(Token));
+    if (token_list->tokens == NULL)
+    {
+        free(token_list);
+        token_list = NULL;
     }
 
     return token_list;
@@ -65,7 +67,7 @@ int token_list_add(TokenList *token_list, Token token)
     return token_list->size - 1;
 }
 
-Token token_list_get_token(TokenList *token_list, int index)
+Token token_list_get(TokenList *token_list, int index)
 {
     if (token_list == NULL || index < 0 || index >= token_list->size)
     {
@@ -80,17 +82,7 @@ Token token_list_get_token(TokenList *token_list, int index)
     return token_list->tokens[index];
 }
 
-TokenKind token_list_get_kind(TokenList *token_list, int index)
-{
-    if (token_list == NULL || index < 0 || index >= token_list->size)
-    {
-        return TOKEN_LIST_ERROR;
-    }
-
-    return token_list->tokens[index].kind;
-}
-
-const char *token_kind_to_string(TokenKind kind)
+char *token_kind_to_string(TokenKind kind)
 {
     switch (kind)
     {
@@ -104,6 +96,8 @@ const char *token_kind_to_string(TokenKind kind)
         return "EOF";
     case TOKEN_COMMENT:
         return "COMMENT";
+    case TOKEN_IDENTIFIER:
+        return "IDENTIFIER";
     case TOKEN_LIT_INT:
         return "LIT_INT";
     case TOKEN_LIT_FLOAT:
@@ -182,5 +176,7 @@ const char *token_kind_to_string(TokenKind kind)
         return "PIPE_PIPE";
     case TOKEN_COLON_COLON:
         return "COLON_COLON";
+    default:
+        return "INVALID";
     }
 }

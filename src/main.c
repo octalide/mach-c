@@ -69,6 +69,11 @@ int main(int argc, char *argv[])
     {
         int index = lexer_next(lexer);
 
+        if (context->verbosity < VERBOSITY_HIGH)
+        {
+            continue;
+        }
+
         Token token = token_list_get(lexer->token_list, index);
         printf("kind: %20s lexeme: `", token_kind_to_string(token.kind));
 

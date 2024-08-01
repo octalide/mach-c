@@ -31,13 +31,13 @@ int main(int argc, char *argv[])
     case VERBOSITY_NONE:
         break;
     case VERBOSITY_LOW:
-        printf("verbosity set to low");
+        printf("verbosity set to low\n");
         break;
     case VERBOSITY_MEDIUM:
-        printf("verbosity set to medium");
+        printf("verbosity set to medium\n");
         break;
     case VERBOSITY_HIGH:
-        printf("verbosity set to high");
+        printf("verbosity set to high\n");
         break;
     }
 

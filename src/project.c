@@ -215,8 +215,6 @@ void project_add_module(Project *project, Module *module)
 //   create it.
 void project_add_file(Project *project, File *file)
 {
-    printf("adding file: %s\n", file->path);
-
     char *path_rel = path_relative(project->path_project, file->path);
     if (path_rel == NULL)
     {
@@ -253,11 +251,9 @@ void project_add_file(Project *project, File *file)
         module->files = NULL;
         module->symbols = symbol_table_new();
 
-        printf("creating new module: %s\n", module_name);
         project_add_module(project, module);
     }
 
-    printf("adding file to module: %s\n", module_name);
     module_add_file(module, file);
 }
 
@@ -283,7 +279,6 @@ void project_discover_files(Project *project)
             continue;
         }
 
-        printf("reading file: %s\n", path_join(project->path_src, files[i]));
         File *file = file_read(path_join(project->path_src, files[i]));
         if (file == NULL)
         {
@@ -294,7 +289,7 @@ void project_discover_files(Project *project)
         // check if file is empty
         if (file->source == NULL || strlen(file->source) == 0)
         {
-            printf("error: file is empty: %s\n", files[i]);
+            printf("warning: file is empty: %s\n", files[i]);
             file_free(file);
             continue;
         }
@@ -341,7 +336,7 @@ int project_print_parse_errors(Project *project)
 {
     if (project->modules == NULL)
     {
-        return;
+        return 0;
     }
 
     int count_errors = 0;
@@ -370,12 +365,14 @@ int project_print_parse_errors(Project *project)
     return count_errors;
 }
 
-void project_analysis(Project *project)
+int project_analysis(Project *project)
 {
     if (project->modules == NULL)
     {
-        return;
+        return 0;
     }
+
+    int count_errors = 0;
 
     for (size_t i = 0; project->modules[i] != NULL; i++)
     {
@@ -389,9 +386,6 @@ void project_analysis(Project *project)
             // analysis
         }
     }
-}
 
-int project_print_analysis_errors(Project *project)
-{
-    return 0;
+    return count_errors;
 }

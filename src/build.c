@@ -30,8 +30,7 @@ int build_project_exe(Context *context, Project *project)
         printf("No parse errors.\n");
     }
 
-    project_analysis(project);
-    int count_analysis_errors = project_print_analysis_errors(project);
+    int count_analysis_errors = project_analysis(project);
     if (count_analysis_errors == 0)
     {
         printf("No analysis errors.\n");

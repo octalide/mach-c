@@ -75,7 +75,6 @@ void project_discover_files(Project *project);
 void project_parse_all(Project *project);
 int project_print_parse_errors(Project *project);
 
-void project_analysis(Project *project);
-int project_print_analysis_errors(Project *project);
+int project_analysis(Project *project);
 
 #endif // PROJECT_H

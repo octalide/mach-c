@@ -2,6 +2,7 @@
 #define BUILD_H
 
 #include "context.h"
+#include "project.h"
 
 int build_project_lib(Context *context, Project *project);
 int build_project_exe(Context *context, Project *project);

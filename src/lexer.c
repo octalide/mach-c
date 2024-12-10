@@ -12,28 +12,15 @@ Lexer *lexer_new(char *source)
         return NULL;
     }
 
-    lexer->source = source;
+    lexer->source = strdup(source);
     lexer->pos = 0;
-
-    lexer->token_list = token_list_new();
-    if (lexer->token_list == NULL)
-    {
-        lexer_free(lexer);
-        return NULL;
-    }
 
     return lexer;
 }
 
 void lexer_free(Lexer *lexer)
 {
-    if (lexer == NULL)
-    {
-        return;
-    }
-
-    token_list_free(lexer->token_list);
-    lexer->token_list = NULL;
+    lexer->source = NULL;
 
     free(lexer);
 }
@@ -70,7 +57,7 @@ char lexer_advance(Lexer *lexer)
 
 int lexer_get_pos_line(Lexer *lexer, int pos)
 {
-    int line = 1;
+    int line = 0;
     for (int i = 0; i < pos; i++)
     {
         if (lexer->source[i] == '\n')
@@ -85,11 +72,11 @@ int lexer_get_pos_line(Lexer *lexer, int pos)
 int lexer_get_pos_line_offset(Lexer *lexer, int pos)
 {
     int offset = 0;
-    for (int i = pos; i >= 0; i--)
+    for (int i = 0; i < pos; i++)
     {
         if (lexer->source[i] == '\n')
         {
-            break;
+            offset = 0;
         }
 
         offset++;
@@ -101,27 +88,32 @@ int lexer_get_pos_line_offset(Lexer *lexer, int pos)
 char *lexer_get_line_text(Lexer *lexer, int line)
 {
     int line_start = 0;
-    for (int i = 0; i < line; i++)
+    int current_line = 0;
+
+    while (current_line < line && lexer->source[line_start] != '\0')
     {
-        line_start++;
-        for (int j = line_start; lexer->source[j] != '\n'; j++)
+        if (lexer->source[line_start] == '\n')
         {
-            line_start++;
+            current_line++;
         }
+        line_start++;
+    }
+
+    if (lexer->source[line_start] == '\0')
+    {
+        return strdup("");
     }
 
     int line_end = line_start;
-    for (int i = line_end; lexer->source[i] != '\n'; i++)
+    while (lexer->source[line_end] != '\n' && lexer->source[line_end] != '\0')
     {
         line_end++;
     }
 
     int line_len = line_end - line_start;
+
     char *line_text = calloc(line_len + 1, sizeof(char));
-    for (int i = 0; i < line_len; i++)
-    {
-        line_text[i] = lexer->source[line_start + i];
-    }
+    strncpy(line_text, lexer->source + line_start, line_len);
 
     return line_text;
 }
@@ -136,7 +128,7 @@ void lexer_skip_whitespace(Lexer *lexer)
 
 // identifier formatting rules:
 // - only alphanumeric characters and underscores are acceptable
-Token lexer_parse_identifier(Lexer *lexer)
+Token *lexer_parse_identifier(Lexer *lexer)
 {
     int start = lexer->pos;
 
@@ -160,7 +152,7 @@ Token lexer_parse_identifier(Lexer *lexer)
 // - numbers with a prefix cannot be floats
 // returns TOKEN_LIT_INT and TOKEN_LIT_FLOAT depending on what number kind is
 //   found.
-Token lexer_parse_lit_number(Lexer *lexer)
+Token *lexer_parse_lit_number(Lexer *lexer)
 {
     int start = lexer->pos;
 
@@ -247,7 +239,7 @@ Token lexer_parse_lit_number(Lexer *lexer)
 // - `\t` for tab
 // - `\r` for carriage return
 // - `\0` for null
-Token lexer_parse_lit_char(Lexer *lexer)
+Token *lexer_parse_lit_char(Lexer *lexer)
 {
     int start = lexer->pos;
 
@@ -308,7 +300,7 @@ Token lexer_parse_lit_char(Lexer *lexer)
 // - `\t` for tab
 // - `\r` for carriage return
 // - `\0` for null
-Token lexer_parse_lit_string(Lexer *lexer)
+Token *lexer_parse_lit_string(Lexer *lexer)
 {
     int start = lexer->pos;
 
@@ -356,15 +348,15 @@ Token lexer_parse_lit_string(Lexer *lexer)
     return token_new(TOKEN_LIT_STRING, start, lexer->pos - start);
 }
 
-unsigned long long lexer_eval_lit_int(Lexer *lexer, Token token)
+unsigned long long lexer_eval_lit_int(Lexer *lexer, Token *token)
 {
     int base = 10;
     int skip = 0;
     char *end = NULL;
 
-    if (lexer->source[token.pos] == '0')
+    if (lexer->source[token->pos] == '0')
     {
-        switch (lexer->source[token.pos + 1])
+        switch (lexer->source[token->pos + 1])
         {
         case 'x':
         case 'X':
@@ -387,13 +379,13 @@ unsigned long long lexer_eval_lit_int(Lexer *lexer, Token token)
         }
     }
 
-    char *cleaned = malloc(token.len + 1);
+    char *cleaned = malloc(token->len + 1);
     int j = 0;
-    for (int i = 0; i < token.len; i++)
+    for (int i = 0; i < token->len; i++)
     {
-        if (lexer->source[token.pos + i] != '_')
+        if (lexer->source[token->pos + i] != '_')
         {
-            cleaned[j++] = lexer->source[token.pos + i];
+            cleaned[j++] = lexer->source[token->pos + i];
         }
     }
     cleaned[j] = '\0';
@@ -404,17 +396,17 @@ unsigned long long lexer_eval_lit_int(Lexer *lexer, Token token)
     return value;
 }
 
-double lexer_eval_lit_float(Lexer *lexer, Token token)
+double lexer_eval_lit_float(Lexer *lexer, Token *token)
 {
     char *end = NULL;
 
-    char *cleaned = malloc(token.len + 1);
+    char *cleaned = malloc(token->len + 1);
     int j = 0;
-    for (int i = 0; i < token.len; i++)
+    for (int i = 0; i < token->len; i++)
     {
-        if (lexer->source[token.pos + i] != '_')
+        if (lexer->source[token->pos + i] != '_')
         {
-            cleaned[j++] = lexer->source[token.pos + i];
+            cleaned[j++] = lexer->source[token->pos + i];
         }
     }
     cleaned[j] = '\0';
@@ -425,13 +417,13 @@ double lexer_eval_lit_float(Lexer *lexer, Token token)
     return value;
 }
 
-char lexer_eval_lit_char(Lexer *lexer, Token token)
+char lexer_eval_lit_char(Lexer *lexer, Token *token)
 {
-    char value = lexer->source[token.pos + 1];
+    char value = lexer->source[token->pos + 1];
 
-    if (lexer->source[token.pos + 1] == '\\')
+    if (lexer->source[token->pos + 1] == '\\')
     {
-        switch (lexer->source[token.pos + 2])
+        switch (lexer->source[token->pos + 2])
         {
         case '\'':
             value = '\'';
@@ -460,15 +452,15 @@ char lexer_eval_lit_char(Lexer *lexer, Token token)
     return value;
 }
 
-char *lexer_eval_lit_string(Lexer *lexer, Token token)
+char *lexer_eval_lit_string(Lexer *lexer, Token *token)
 {
-    char *value = calloc(token.len - 1, sizeof(char));
+    char *value = calloc(token->len - 1, sizeof(char));
 
-    for (int i = 0; i < token.len - 2; i++)
+    for (int i = 0; i < token->len - 2; i++)
     {
-        if (lexer->source[token.pos + i + 1] == '\\')
+        if (lexer->source[token->pos + i + 1] == '\\')
         {
-            switch (lexer->source[token.pos + i + 2])
+            switch (lexer->source[token->pos + i + 2])
             {
             case '\'':
                 value[i] = '\'';
@@ -495,16 +487,27 @@ char *lexer_eval_lit_string(Lexer *lexer, Token token)
         }
         else
         {
-            value[i] = lexer->source[token.pos + i + 1];
+            value[i] = lexer->source[token->pos + i + 1];
         }
     }
 
     return value;
 }
 
-Token lexer_emit(Lexer *lexer, TokenKind kind, int len)
+char *lexer_raw_value(Lexer *lexer, Token *token)
 {
-    Token token = token_new(kind, lexer->pos, len);
+    char *value = calloc(token->len + 1, sizeof(char));
+    for (int i = 0; i < token->len; i++)
+    {
+        value[i] = lexer->source[token->pos + i];
+    }
+
+    return value;
+}
+
+Token *lexer_emit(Lexer *lexer, TokenKind kind, int len)
+{
+    Token *token = token_new(kind, lexer->pos, len);
     for (int i = 0; i < len; i++)
     {
         lexer_advance(lexer);
@@ -513,11 +516,10 @@ Token lexer_emit(Lexer *lexer, TokenKind kind, int len)
     return token;
 }
 
-int lexer_next(Lexer *lexer)
+Token *lexer_next(Lexer *lexer)
 {
     lexer_skip_whitespace(lexer);
 
-    Token token;
     switch (lexer_current(lexer))
     {
     case '#':
@@ -526,161 +528,125 @@ int lexer_next(Lexer *lexer)
         {
             lexer_advance(lexer);
         }
-        token = token_new(TOKEN_COMMENT, start, lexer->pos - start);
-        break;
+        return token_new(TOKEN_COMMENT, start, lexer->pos - start);
     case 'a' ... 'z':
     case 'A' ... 'Z':
     case '_':
-        token = lexer_parse_identifier(lexer);
-        break;
+        return lexer_parse_identifier(lexer);
     case '0' ... '9':
-        token = lexer_parse_lit_number(lexer);
-        break;
+        return lexer_parse_lit_number(lexer);
     case '\'':
-        token = lexer_parse_lit_char(lexer);
-        break;
+        return lexer_parse_lit_char(lexer);
     case '\"':
-        token = lexer_parse_lit_string(lexer);
-        break;
+        return lexer_parse_lit_string(lexer);
     case '(':
-        token = lexer_emit(lexer, TOKEN_L_PAREN, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_L_PAREN, 1);
     case ')':
-        token = lexer_emit(lexer, TOKEN_R_PAREN, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_R_PAREN, 1);
     case '[':
-        token = lexer_emit(lexer, TOKEN_L_BRACKET, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_L_BRACKET, 1);
     case ']':
-        token = lexer_emit(lexer, TOKEN_R_BRACKET, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_R_BRACKET, 1);
     case '{':
-        token = lexer_emit(lexer, TOKEN_L_BRACE, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_L_BRACE, 1);
     case '}':
-        token = lexer_emit(lexer, TOKEN_R_BRACE, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_R_BRACE, 1);
     case ':':
-        token = lexer_emit(lexer, TOKEN_COLON, 1);
+        switch (lexer_peek(lexer, 1))
+        {
+        case ':':
+            return lexer_emit(lexer, TOKEN_COLON_COLON, 2);
+        default:
+            return lexer_emit(lexer, TOKEN_COLON, 1);
+        }
         break;
     case ';':
-        token = lexer_emit(lexer, TOKEN_SEMICOLON, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_SEMICOLON, 1);
     case '?':
-        token = lexer_emit(lexer, TOKEN_QUESTION, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_QUESTION, 1);
     case '@':
-        token = lexer_emit(lexer, TOKEN_AT, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_AT, 1);
     case '.':
-        token = lexer_emit(lexer, TOKEN_DOT, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_DOT, 1);
     case ',':
-        token = lexer_emit(lexer, TOKEN_COMMA, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_COMMA, 1);
     case '+':
-        token = lexer_emit(lexer, TOKEN_PLUS, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_PLUS, 1);
     case '-':
-        token = lexer_emit(lexer, TOKEN_MINUS, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_MINUS, 1);
     case '*':
-        token = lexer_emit(lexer, TOKEN_STAR, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_STAR, 1);
     case '%':
-        token = lexer_emit(lexer, TOKEN_PERCENT, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_PERCENT, 1);
     case '^':
-        token = lexer_emit(lexer, TOKEN_CARET, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_CARET, 1);
     case '&':
         switch (lexer_peek(lexer, 1))
         {
         case '&':
-            token = lexer_emit(lexer, TOKEN_AMPERSAND_AMPERSAND, 2);
-            break;
+            return lexer_emit(lexer, TOKEN_AMPERSAND_AMPERSAND, 2);
         default:
-            token = lexer_emit(lexer, TOKEN_AMPERSAND, 1);
-            break;
+            return lexer_emit(lexer, TOKEN_AMPERSAND, 1);
         }
         break;
     case '|':
         switch (lexer_peek(lexer, 1))
         {
         case '|':
-            token = lexer_emit(lexer, TOKEN_PIPE_PIPE, 2);
-            break;
+            return lexer_emit(lexer, TOKEN_PIPE_PIPE, 2);
         default:
-            token = lexer_emit(lexer, TOKEN_PIPE, 1);
-            break;
+            return lexer_emit(lexer, TOKEN_PIPE, 1);
         }
         break;
     case '~':
-        token = lexer_emit(lexer, TOKEN_TILDE, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_TILDE, 1);
     case '<':
         switch (lexer_peek(lexer, 1))
         {
         case '<':
-            token = lexer_emit(lexer, TOKEN_LESS_LESS, 2);
-            break;
+            return lexer_emit(lexer, TOKEN_LESS_LESS, 2);
         case '=':
-            token = lexer_emit(lexer, TOKEN_LESS_EQUAL, 2);
-            break;
+            return lexer_emit(lexer, TOKEN_LESS_EQUAL, 2);
         default:
-            token = lexer_emit(lexer, TOKEN_LESS, 1);
-            break;
+            return lexer_emit(lexer, TOKEN_LESS, 1);
         }
         break;
     case '>':
         switch (lexer_peek(lexer, 1))
         {
         case '>':
-            token = lexer_emit(lexer, TOKEN_GREATER_GREATER, 2);
-            break;
+            return lexer_emit(lexer, TOKEN_GREATER_GREATER, 2);
         case '=':
-            token = lexer_emit(lexer, TOKEN_GREATER_EQUAL, 2);
-            break;
+            return lexer_emit(lexer, TOKEN_GREATER_EQUAL, 2);
         default:
-            token = lexer_emit(lexer, TOKEN_GREATER, 1);
-            break;
+            return lexer_emit(lexer, TOKEN_GREATER, 1);
         }
         break;
     case '=':
         switch (lexer_peek(lexer, 1))
         {
         case '=':
-            token = lexer_emit(lexer, TOKEN_EQUAL_EQUAL, 2);
-            break;
+            return lexer_emit(lexer, TOKEN_EQUAL_EQUAL, 2);
         default:
-            token = lexer_emit(lexer, TOKEN_EQUAL, 1);
-            break;
+            return lexer_emit(lexer, TOKEN_EQUAL, 1);
         }
         break;
     case '!':
         switch (lexer_peek(lexer, 1))
         {
         case '=':
-            token = lexer_emit(lexer, TOKEN_BANG_EQUAL, 2);
-            break;
+            return lexer_emit(lexer, TOKEN_BANG_EQUAL, 2);
         default:
-            token = lexer_emit(lexer, TOKEN_BANG, 1);
-            break;
+            return lexer_emit(lexer, TOKEN_BANG, 1);
         }
         break;
     case '/':
-        token = lexer_emit(lexer, TOKEN_SLASH, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_SLASH, 1);
     case '\\':
-        token = lexer_emit(lexer, TOKEN_BACKSLASH, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_BACKSLASH, 1);
     case '\0':
-        token = lexer_emit(lexer, TOKEN_EOF, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_EOF, 1);
     default:
-        token = lexer_emit(lexer, TOKEN_UNKNOWN, 1);
-        break;
+        return lexer_emit(lexer, TOKEN_ERROR, 1);
     }
-
-    return token_list_add(lexer->token_list, token);
 }

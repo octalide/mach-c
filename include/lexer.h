@@ -5,13 +5,10 @@
 
 #include <stdbool.h>
 
-struct Lexer;
-
 typedef struct Lexer
 {
-    TokenList *token_list;
-    char *source;
     int pos;
+    char *source;
 } Lexer;
 
 Lexer *lexer_new(char *source);
@@ -28,18 +25,19 @@ char *lexer_get_line_text(Lexer *lexer, int line);
 
 void lexer_skip_whitespace(Lexer *lexer);
 
-Token lexer_parse_identifier(Lexer *lexer);
-Token lexer_parse_lit_number(Lexer *lexer);
-Token lexer_parse_lit_char(Lexer *lexer);
-Token lexer_parse_lit_string(Lexer *lexer);
+Token *lexer_parse_identifier(Lexer *lexer);
+Token *lexer_parse_lit_number(Lexer *lexer);
+Token *lexer_parse_lit_char(Lexer *lexer);
+Token *lexer_parse_lit_string(Lexer *lexer);
 
-unsigned long long lexer_eval_lit_int(Lexer *lexer, Token token);
-double lexer_eval_lit_float(Lexer *lexer, Token token);
-char lexer_eval_lit_char(Lexer *lexer, Token token);
-char *lexer_eval_lit_string(Lexer *lexer, Token token);
+unsigned long long lexer_eval_lit_int(Lexer *lexer, Token *token);
+double lexer_eval_lit_float(Lexer *lexer, Token *token);
+char lexer_eval_lit_char(Lexer *lexer, Token *token);
+char *lexer_eval_lit_string(Lexer *lexer, Token *token);
+char *lexer_raw_value(Lexer *lexer, Token *token);
 
-Token lexer_emit(Lexer *lexer, TokenKind kind, int len);
+Token *lexer_emit(Lexer *lexer, TokenKind kind, int len);
 
-int lexer_next(Lexer *lexer);
+Token *lexer_next(Lexer *lexer);
 
 #endif

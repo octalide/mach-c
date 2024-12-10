@@ -1,35 +1,15 @@
 #include "context.h"
-#include "file.h"
-#include "lexer.h"
+#include "ioutil.h"
+#include "build.h"
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
-int main(int argc, char *argv[])
+int cmd_build(Context *context, int argc, char **argv)
 {
-    int verbosity = VERBOSITY_LOW;
-    for (int i = 1; i < argc; i++)
-    {
-        // set verbosity based on -v argument where verbosity is set from 0-3 based
-        //   on the number of 'v's in the flag
-        // NOTE: using just `-v` silences any non-error output
-        if (argv[i][0] == '-' && argv[i][1] == 'v')
-        {
-            verbosity = VERBOSITY_NONE;
-            for (int j = 2; argv[i][j] == 'v'; j++)
-            {
-                if (verbosity >= VERBOSITY_HIGH)
-                {
-                    break;
-                }
-
-                verbosity++;
-            }
-        }
-    }
-
     char *path_target = NULL;
-    for (int i = 1; i < argc; i++)
+    for (int i = 0; i < argc; i++)
     {
         if (argv[i][0] != '-')
         {
@@ -38,84 +18,79 @@ int main(int argc, char *argv[])
         }
     }
 
-    switch (verbosity)
+    if (!file_exists(path_target))
     {
-    case VERBOSITY_NONE:
-        break;
-    case VERBOSITY_LOW:
-        printf("verbosity set to low\n");
-        break;
-    case VERBOSITY_MEDIUM:
-        printf("verbosity set to medium\n");
-        break;
-    case VERBOSITY_HIGH:
-        printf("verbosity set to high\n");
-        break;
-    }
-
-    Context *context = context_new();
-    context->verbosity = verbosity;
-
-    File *file = file_new(path_target);
-    if (file == NULL)
-    {
-        fprintf(stderr, "error: failed to read file\n");
-        context_free(context);
+        fprintf(stderr, "error: target path does not exist: `%s`\n", path_target);
         return 1;
     }
 
-    Lexer *lexer = lexer_new(file->source);
-    while (!lexer_at_end(lexer))
+    if (is_directory(path_target))
     {
-        int index = lexer_next(lexer);
-
-        if (context->verbosity < VERBOSITY_HIGH)
-        {
-            continue;
-        }
-
-        Token token = token_list_get(lexer->token_list, index);
-        printf("kind: %20s lexeme: `", token_kind_to_string(token.kind));
-
-        for (int i = 0; i < token.len; i++)
-        {
-            printf("%c", lexer->source[token.pos + i]);
-        }
-
-        printf("`");
-
-        switch (token.kind)
-        {
-        case TOKEN_LIT_INT:
-            int ival = lexer_eval_lit_int(lexer, token);
-            printf(" value: `%d`", ival);
-            break;
-        case TOKEN_LIT_FLOAT:
-            float fval = lexer_eval_lit_float(lexer, token);
-            printf(" value: `%f`", fval);
-            break;
-        case TOKEN_LIT_CHAR:
-            char cval = lexer_eval_lit_char(lexer, token);
-            printf(" value: `%c`", cval);
-            break;
-        case TOKEN_LIT_STRING:
-            char *sval = lexer_eval_lit_string(lexer, token);
-            printf(" value: `%s`", sval);
-            free(sval);
-            break;
-        default:
-            break;
-        }
-
-        printf("\n");
+        fprintf(stderr, "error: target path cannot be a directory\n");
+        return 1;
     }
 
-    lexer_free(lexer);
-    lexer = NULL;
-    file_free(file);
-    file = NULL;
-    context_free(context);
-    context = NULL;
+    // determine whether the target is a `.mach` source file, or a `.json`
+    //   project configuration file
+    char *ext = path_get_extension(path_target);
+    if (strcmp(ext, "mach") == 0)
+    {
+        printf("building target file: %s\n", path_target);
+        return build_target_file(context, path_target);
+    }
 
+    if (strcmp(ext, "json") == 0)
+    {
+        printf("building target project: %s\n", path_target);
+        return build_target_project(context, path_target);
+    }
+
+    printf("error: target path must be a source or project file\n");
+    return 1;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s [options] <command>\n", argv[0]);
+        return 1;
+    }
+
+    Context *context = context_new();
+    context->verbosity = VERBOSITY_LOW;
+
+    // set from the environment variable `MACH_PATH`
+    context->path_mach_std = getenv("MACH_PATH");
+
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            if (argv[i][1] == 'v') {
+                context->verbosity = VERBOSITY_NONE;
+                for (int j = 1; argv[i][j] == 'v'; j++) {
+                    if (context->verbosity < VERBOSITY_HIGH) {
+                        context->verbosity++;
+                    }
+                }
+            } else {
+                fprintf(stderr, "Unknown option: %s\n", argv[i]);
+                context_free(context);
+                return 1;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if (argc > 1) {
+        char *first_arg = argv[1];
+        if (strcmp(first_arg, "build") == 0) {
+            return cmd_build(context, argc - 2, argv + 2);
+        } else {
+            fprintf(stderr, "Unknown command: %s\n", first_arg);
+            context_free(context);
+            return 1;
+        }
+    }
+
+    context_free(context);
     return 0;
 }

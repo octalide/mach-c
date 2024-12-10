@@ -1,8 +1,6 @@
 #ifndef CONTEXT_H
 #define CONTEXT_H
 
-struct Context;
-
 typedef enum Verbosity
 {
     VERBOSITY_NONE,
@@ -14,6 +12,8 @@ typedef enum Verbosity
 typedef struct Context
 {
     Verbosity verbosity;
+
+    char *path_mach_std;
 } Context;
 
 Context *context_new();

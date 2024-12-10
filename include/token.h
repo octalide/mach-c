@@ -1,19 +1,12 @@
 #ifndef TOKEN_H
 #define TOKEN_H
 
-static const int TOKEN_LIST_INC_SIZE = 16;
-
-enum TokenKind;
-struct Token;
-struct TokenList;
-
 typedef enum TokenKind
 {
-    TOKEN_LIST_ERROR = -3,
+    TOKEN_LIST_ERROR = -2,
     TOKEN_ERROR,
 
     TOKEN_EOF,
-    TOKEN_UNKNOWN,
     TOKEN_COMMENT,
 
     TOKEN_IDENTIFIER,
@@ -68,18 +61,10 @@ typedef struct Token
     int len;
 } Token;
 
-typedef struct TokenList
-{
-    Token *tokens;
-    int size;
-} TokenList;
+Token *token_new(TokenKind kind, int pos, int len);
+void token_free(Token *token);
 
-Token token_new(TokenKind kind, int pos, int len);
-TokenList *token_list_new();
-void token_list_free(TokenList *token_list);
-
-int token_list_add(TokenList *token_list, Token token);
-Token token_list_get(TokenList *token_list, int index);
+Token *token_copy(Token *token);
 
 char *token_kind_to_string(TokenKind kind);
 

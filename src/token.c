@@ -2,84 +2,24 @@
 
 #include <stdlib.h>
 
-Token token_new(TokenKind kind, int pos, int len)
+Token *token_new(TokenKind kind, int pos, int len)
 {
-    Token token;
-    token.kind = kind;
-    token.pos = pos;
-    token.len = len;
+    Token *token = calloc(1, sizeof(Token));
+    token->kind = kind;
+    token->pos = pos;
+    token->len = len;
 
     return token;
 }
 
-TokenList *token_list_new()
+void token_free(Token *token)
 {
-    TokenList *token_list = calloc(1, sizeof(TokenList));
-    if (token_list == NULL)
-    {
-        return NULL;
-    }
-    
-    token_list->tokens = calloc(TOKEN_LIST_INC_SIZE, sizeof(Token));
-    if (token_list->tokens == NULL)
-    {
-        free(token_list);
-        token_list = NULL;
-    }
-
-    return token_list;
+    free(token);
 }
 
-void token_list_free(TokenList *token_list)
+Token *token_copy(Token *token)
 {
-    if (token_list == NULL)
-    {
-        return;
-    }
-
-    free(token_list->tokens);
-    token_list->tokens = NULL;
-
-    free(token_list);
-}
-
-int token_list_add(TokenList *token_list, Token token)
-{
-    if (token_list == NULL)
-    {
-        return TOKEN_LIST_ERROR;
-    }
-
-    if (token_list->size % TOKEN_LIST_INC_SIZE == 0)
-    {
-        Token *new_tokens = realloc(token_list->tokens, (token_list->size + TOKEN_LIST_INC_SIZE) * sizeof(Token));
-        if (new_tokens == NULL)
-        {
-            return TOKEN_LIST_ERROR;
-        }
-
-        token_list->tokens = new_tokens;
-    }
-
-    token_list->tokens[token_list->size] = token;
-    token_list->size++;
-
-    return token_list->size - 1;
-}
-
-Token token_list_get(TokenList *token_list, int index)
-{
-    if (token_list == NULL || index < 0 || index >= token_list->size)
-    {
-        Token token;
-        token.kind = TOKEN_LIST_ERROR;
-        token.pos = -1;
-        token.len = -1;
-
-        return token;
-    }
-
-    return token_list->tokens[index];
+    return token_new(token->kind, token->pos, token->len);
 }
 
 char *token_kind_to_string(TokenKind kind)
@@ -90,8 +30,6 @@ char *token_kind_to_string(TokenKind kind)
         return "LIST_ERROR";
     case TOKEN_ERROR:
         return "ERROR";
-    case TOKEN_UNKNOWN:
-        return "UNKNOWN";
     case TOKEN_EOF:
         return "EOF";
     case TOKEN_COMMENT:

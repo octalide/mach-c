@@ -170,6 +170,71 @@ void module_add_symbol(Module *module, Symbol *symbol)
     symbol_table_add(module->symbols, symbol);
 }
 
+char *str_replace(char *orig, char *rep, char *with)
+{
+    if (!orig || !rep || strlen(rep) == 0)
+    {
+        return NULL;
+    }
+
+    if (!with)
+    {
+        with = "";
+    }
+
+    int len_rep = strlen(rep);
+    int len_with = strlen(with);
+    int count = 0;
+
+    char *ins = orig;
+    while ((ins = strstr(ins, rep)))
+    {
+        count++;
+        ins += len_rep;
+    }
+
+    char *result = malloc(strlen(orig) + (len_with - len_rep) * count + 1);
+    if (!result)
+        return NULL;
+
+    char *tmp = result;
+    while (count--)
+    {
+        ins = strstr(orig, rep);
+        int len_front = ins - orig;
+        tmp = strncpy(tmp, orig, len_front) + len_front;
+        tmp = strcpy(tmp, with) + len_with;
+        orig += len_front + len_rep;
+    }
+
+    strcpy(tmp, orig);
+
+    return result;
+}
+
+// resolve macros in paths. macros available are:
+// - {path_project} -> project->path_project
+// - {path_src}     -> project->path_src
+// - {path_out}     -> project->path_out
+// - {path_dep}     -> project->path_dep
+// - {path_lib}     -> project->path_lib
+char *project_resolve_macros(Project *project, char *str)
+{
+    char *path_project = project->path_project;
+    char *path_src = project->path_src;
+    char *path_out = project->path_out;
+    char *path_dep = project->path_dep;
+    char *path_lib = project->path_lib;
+
+    char *str_resolved = str_replace(str, "{path_project}", path_project);
+    str_resolved = str_replace(str_resolved, "{path_src}", path_src);
+    str_resolved = str_replace(str_resolved, "{path_out}", path_out);
+    str_resolved = str_replace(str_resolved, "{path_dep}", path_dep);
+    str_resolved = str_replace(str_resolved, "{path_lib}", path_lib);
+
+    return str_resolved;
+}
+
 Module *project_find_module(Project *project, char *name)
 {
     if (project->modules == NULL)
@@ -240,7 +305,7 @@ void project_add_file(Project *project, File *file)
     // if module name is ".", change to "src"
     if (strcmp(module_name, ".") == 0)
     {
-        module_name = "src";
+        module_name = project->name;
     }
 
     Module *module = project_find_module(project, module_name);
@@ -294,6 +359,7 @@ void project_discover_files(Project *project)
             continue;
         }
 
+        printf("  found file: %s\n", files[i]);
         project_add_file(project, file);
     }
 }
@@ -309,6 +375,7 @@ void project_parse_all(Project *project)
     {
         for (size_t j = 0; project->modules[i]->files[j] != NULL; j++)
         {
+            printf("  parsing file: %s\n", project->modules[i]->files[j]->path);
             file_parse(project->modules[i]->files[j]);
         }
     }
@@ -380,10 +447,9 @@ int project_analysis(Project *project)
         {
             if (project->modules[i]->files[j]->ast == NULL)
             {
+                printf("warning: file ast is NULL: %s\n", project->modules[i]->files[j]->path);
                 continue;
             }
-
-            // analysis
         }
     }
 

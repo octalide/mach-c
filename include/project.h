@@ -5,8 +5,22 @@
 #include "parser.h"
 #include "type.h"
 #include "symbols.h"
+#include "target.h"
 
 #include <stdbool.h>
+
+// define default mach installation path by platform:
+// - windows: C:\Program Files\mach
+// - linux: /usr/local/mach
+// - macos: /usr/local/mach
+// - other: /usr/local/mach
+#if defined(_WIN32)
+#define DEFAULT_MACH_PATH "C:\\Program Files\\mach"
+#elif defined(__linux__) || defined(__APPLE__)
+#define DEFAULT_MACH_PATH "/usr/local/mach"
+#else
+#define DEFAULT_MACH_PATH "/usr/local/mach"
+#endif
 
 typedef struct File
 {
@@ -37,7 +51,8 @@ typedef enum ProjectType
 typedef struct Project
 {
     ProjectType type;
-
+    
+    char *path_mach_root;
     char *path_project;
 
     char *name;
@@ -46,6 +61,9 @@ typedef struct Project
     char *path_lib;
     char *path_out;
     char *path_src;
+    char *entrypoint;
+    Target *targets;
+    int target_count;
 
     Module **modules;
     SymbolTable *symbols;
@@ -65,6 +83,8 @@ void file_parse(File *file);
 void module_add_file(Module *module, File *file);
 void module_add_symbol(Module *module, Symbol *symbol);
 
+char *project_resolve_macros(Project *project, char *str);
+
 Module *project_find_module(Project *project, char *name);
 void project_add_module(Project *project, Module *module);
 void project_add_file(Project *project, File *file);
@@ -77,4 +97,4 @@ int project_print_parse_errors(Project *project);
 
 int project_analysis(Project *project);
 
-#endif // PROJECT_H
+#endif

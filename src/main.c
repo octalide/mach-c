@@ -1,4 +1,3 @@
-#include "context.h"
 #include "ioutil.h"
 #include "build.h"
 
@@ -6,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-int cmd_build(Context *context, int argc, char **argv)
+int cmd_build(int argc, char **argv)
 {
     char *path_target = NULL;
     for (int i = 0; i < argc; i++)
@@ -14,6 +13,13 @@ int cmd_build(Context *context, int argc, char **argv)
         if (argv[i][0] != '-')
         {
             path_target = argv[i];
+
+            // remove this arg after selection
+            for (int j = i; j < argc - 1; j++)
+            {
+                argv[j] = argv[j + 1];
+            }
+
             break;
         }
     }
@@ -36,13 +42,13 @@ int cmd_build(Context *context, int argc, char **argv)
     if (strcmp(ext, "mach") == 0)
     {
         printf("building target file: %s\n", path_target);
-        return build_target_file(context, path_target);
+        return build_target_file(path_target, argc, argv);
     }
 
     if (strcmp(ext, "json") == 0)
     {
         printf("building target project: %s\n", path_target);
-        return build_target_project(context, path_target);
+        return build_target_project(path_target, argc, argv);
     }
 
     printf("error: target path must be a source or project file\n");
@@ -51,46 +57,19 @@ int cmd_build(Context *context, int argc, char **argv)
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s [options] <command>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <command> [options]\n", argv[0]);
         return 1;
-    }
-
-    Context *context = context_new();
-    context->verbosity = VERBOSITY_LOW;
-
-    // set from the environment variable `MACH_PATH`
-    context->path_mach_std = getenv("MACH_PATH");
-
-    for (int i = 1; i < argc; i++) {
-        if (argv[i][0] == '-') {
-            if (argv[i][1] == 'v') {
-                context->verbosity = VERBOSITY_NONE;
-                for (int j = 1; argv[i][j] == 'v'; j++) {
-                    if (context->verbosity < VERBOSITY_HIGH) {
-                        context->verbosity++;
-                    }
-                }
-            } else {
-                fprintf(stderr, "Unknown option: %s\n", argv[i]);
-                context_free(context);
-                return 1;
-            }
-        } else {
-            break;
-        }
     }
 
     if (argc > 1) {
         char *first_arg = argv[1];
         if (strcmp(first_arg, "build") == 0) {
-            return cmd_build(context, argc - 2, argv + 2);
+            return cmd_build(argc - 2, argv + 2);
         } else {
             fprintf(stderr, "Unknown command: %s\n", first_arg);
-            context_free(context);
             return 1;
         }
     }
 
-    context_free(context);
     return 0;
 }

@@ -286,7 +286,7 @@ char **list_files(char *path)
 char **list_files_recursive(char *path, char **file_list, int count)
 {
 #ifdef _WIN32
-    WIN32_FIND_DATA find_file_data;
+    WIN32_FIND_DATAA find_file_data;
     HANDLE h_find = NULL;
     char search_path[MAX_PATH];
 

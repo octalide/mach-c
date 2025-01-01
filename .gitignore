@@ -1,3 +1,4 @@
 .vscode
-/build
-cmach.exe
+.cache
+build
+machc.exe

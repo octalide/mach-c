@@ -1,32 +1,14 @@
 #include "lexer.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
-#include <limits.h>
-
-#define MAX_NUMBER_LITERAL_LENGTH 1024
 
 Lexer *lexer_new(char *source)
 {
     Lexer *lexer = calloc(1, sizeof(Lexer));
-    if (lexer == NULL)
-    {
-        fprintf(stderr, "error: failed to allocate memory for lexer\n");
-        exit(1);
-    }
-
     lexer->source = strdup(source);
-    if (lexer->source == NULL)
-    {
-        fprintf(stderr, "error: failed to allocate memory for lexer source\n");
-        free(lexer);
-        exit(1);
-    }
-
-    lexer->start = 0;
-    lexer->current = 0;
+    lexer->pos = 0;
 
     return lexer;
 }
@@ -44,572 +26,628 @@ void lexer_free(Lexer *lexer)
     free(lexer);
 }
 
-char *lexer_get_line(Lexer *lexer, int line)
-{
-    char *start = lexer->source;
-    while (line > 1 && *start != '\0')
-    {
-        if (*start == '\n')
-        {
-            line--;
-        }
-        start++;
-    }
-
-    char *end = start;
-    while (*end != '\n' && *end != '\0')
-    {
-        end++;
-    }
-
-    int length = (int)(end - start);
-    char *line_buffer = malloc(length + 1);
-    if (line_buffer == NULL)
-    {
-        fprintf(stderr, "error: failed to allocate memory for line buffer\n");
-        return NULL;
-    }
-
-    strncpy(line_buffer, start, length);
-    line_buffer[length] = '\0';
-
-    return line_buffer;
-}
-
-int lexer_token_line(Lexer *lexer, Token *token)
-{
-    char *start = lexer->source;
-    char *end = lexer->source + token->pos;
-
-    int line = 1;
-    while (start < end)
-    {
-        if (*start == '\n')
-        {
-            line++;
-        }
-        start++;
-    }
-
-    return line;
-}
-
-int lexer_token_line_char_offset(Lexer *lexer, Token *token)
-{
-    char *start = lexer->source;
-    char *end = lexer->source + token->pos;
-
-    int offset = 0;
-    while (start < end)
-    {
-        if (*start == '\n')
-        {
-            offset = 0;
-        }
-        else
-        {
-            offset++;
-        }
-        start++;
-    }
-
-    return offset;
-}
-
-Token *lexer_error(Lexer *lexer, int pos, char *message)
-{
-    Token *token = lexer_emit(lexer, TOKEN_ERROR, pos, 1);
-    if (token != NULL)
-    {
-        token->value.error = strdup(message);
-    }
-    return token;
-}
-
-char lexer_advance(Lexer *lexer)
-{
-    return lexer->source[lexer->current++];
-}
-
-char lexer_current(Lexer *lexer)
-{
-    return lexer->source[lexer->current];
-}
-
-char lexer_peek(Lexer *lexer)
-{
-    return lexer->source[lexer->current + 1];
-}
-
 bool lexer_at_end(Lexer *lexer)
 {
     return lexer_current(lexer) == '\0';
 }
 
-void lexer_skip_whitespace(Lexer *lexer)
+char lexer_current(Lexer *lexer)
 {
-    while (isspace(lexer_current(lexer)) && !lexer_at_end(lexer))
-    {
-        lexer_advance(lexer);
-    }
+    return lexer->source[lexer->pos];
 }
 
-Token *lexer_emit(Lexer *lexer, TokenKind kind, int pos, int len)
+char lexer_peek(Lexer *lexer, int offset)
 {
-    char *raw = malloc(len + 1);
-    if (raw == NULL)
+    if (lexer->pos + offset >= (int)strlen(lexer->source))
     {
-        printf("error: failed to allocate memory for token raw\n");
+        return '\0';
     }
 
-    strncpy(raw, lexer->source + pos, len);
-    raw[len] = '\0';
-
-    return token_new(kind, pos, raw);
+    return lexer->source[lexer->pos + offset];
 }
 
-Token *lexer_emit_identifier(Lexer *lexer)
+char lexer_advance(Lexer *lexer)
 {
-    int start_pos = lexer->current;
-   
-    while (isalnum(lexer_current(lexer)) || lexer_current(lexer) == '_')
+    if (!lexer_at_end(lexer))
     {
-        lexer_advance(lexer);
+        lexer->pos++;
     }
 
-    Token *token = lexer_emit(lexer, TOKEN_IDENTIFIER, start_pos, lexer->current - start_pos);
-    if (token == NULL)
-    {
-        return NULL;
-    }
+    return lexer_current(lexer);
+}
 
-    for (int i = 0; i < __KW_END__ - __KW_BEG__ - 1; i++)
+int lexer_get_pos_line(Lexer *lexer, int pos)
+{
+    int line = 0;
+    for (int i = 0; i < pos; i++)
     {
-        if (strcmp(token->raw, token_keyword_map[i].keyword) == 0)
+        if (lexer->source[i] == '\n')
         {
-            token->kind = token_keyword_map[i].kind;
-            break;
+            line++;
         }
     }
 
-    return token;
+    return line;
 }
 
-Token *lexer_emit_number(Lexer *lexer)
+int lexer_get_pos_line_offset(Lexer *lexer, int pos)
 {
-    int start_pos = lexer->current;
-    int base = 10;
+    int offset = 0;
+    for (int i = 0; i < pos; i++)
+    {
+        if (lexer->source[i] == '\n')
+        {
+            offset = 0;
+        }
+
+        offset++;
+    }
+
+    return offset;
+}
+
+char *lexer_get_line_text(Lexer *lexer, int line)
+{
+    int line_start = 0;
+    int current_line = 0;
+
+    while (current_line < line && lexer->source[line_start] != '\0')
+    {
+        if (lexer->source[line_start] == '\n')
+        {
+            current_line++;
+        }
+        line_start++;
+    }
+
+    if (lexer->source[line_start] == '\0')
+    {
+        return strdup("");
+    }
+
+    int line_end = line_start;
+    while (lexer->source[line_end] != '\n' && lexer->source[line_end] != '\0')
+    {
+        line_end++;
+    }
+
+    int line_len = line_end - line_start;
+
+    char *line_text = calloc(line_len + 1, sizeof(char));
+    strncpy(line_text, lexer->source + line_start, line_len);
+
+    return line_text;
+}
+
+void lexer_skip_whitespace(Lexer *lexer)
+{
+    while (!lexer_at_end(lexer) && isspace(lexer_current(lexer)))
+    {
+        lexer_advance(lexer);
+    }
+}
+
+// identifier formatting rules:
+// - only alphanumeric characters and underscores are acceptable
+Token *lexer_parse_identifier(Lexer *lexer)
+{
+    int start = lexer->pos;
+
+    while (!lexer_at_end(lexer) && (isalnum(lexer_current(lexer)) || lexer_current(lexer) == '_'))
+    {
+        lexer_advance(lexer);
+    }
+
+    return token_new(TOKEN_IDENTIFIER, start, lexer->pos - start);
+}
+
+// integer formatting rules:
+// - only digits and underscores are available
+// floating point formatting rules:
+// - only digits, underscores, and a single period are available
+// integer prefix rules:
+// - `0x` or `0X` for hexadecimal
+// - `0b` or `0B` for binary
+// - `0o` or `0O` for octal
+// - integers following a prefix must be within the range of the prefix
+// - numbers with a prefix cannot be floats
+// returns TOKEN_LIT_INT and TOKEN_LIT_FLOAT depending on what number kind is
+//   found.
+Token *lexer_parse_lit_number(Lexer *lexer)
+{
+    int start = lexer->pos;
 
     if (lexer_current(lexer) == '0')
     {
-        lexer_advance(lexer);
-        char next = lexer_current(lexer);
-        if (next == 'b' || next == 'B')
+        int base = 10;
+
+        switch (lexer_peek(lexer, 1))
         {
-            base = 2;
-            lexer_advance(lexer);
-        }
-        else if (next == 'o' || next == 'O')
-        {
-            base = 8;
-            lexer_advance(lexer);
-        }
-        else if (next == 'x' || next == 'X')
-        {
+        case 'x':
+        case 'X':
             base = 16;
             lexer_advance(lexer);
-        }
-        else
-        {
-            lexer->current = start_pos; // Reset if not a valid base prefix
-        }
-    }
-
-    bool is_float = false;
-    char buffer[MAX_NUMBER_LITERAL_LENGTH] = {0};
-    int buffer_pos = 0;
-
-    while (!lexer_at_end(lexer))
-    {
-        char c = lexer_current(lexer);
-        if (c == '_')
-        {
             lexer_advance(lexer);
-            continue;
-        }
-
-        if (c == '.' && base == 10 && !is_float)
-        {
-            is_float = true;
-            buffer[buffer_pos++] = c;
+            break;
+        case 'b':
+        case 'B':
+            base = 2;
             lexer_advance(lexer);
-            continue;
-        }
-
-        if ((c >= '0' && c <= '9') ||
-            (base == 16 && ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))))
-        {
-            buffer[buffer_pos++] = c;
             lexer_advance(lexer);
-        }
-        else
-        {
+            break;
+        case 'o':
+        case 'O':
+            base = 8;
+            lexer_advance(lexer);
+            lexer_advance(lexer);
             break;
         }
 
-        if (buffer_pos >= MAX_NUMBER_LITERAL_LENGTH)
+        switch (base)
         {
-            return lexer_error(lexer, start_pos, "number literal too long");
+        case 2:
+            while (!lexer_at_end(lexer) && ((lexer_current(lexer) == '0' || lexer_current(lexer) == '1') || lexer_current(lexer) == '_'))
+            {
+                lexer_advance(lexer);
+            }
+            return token_new(TOKEN_LIT_INT, start, lexer->pos - start);
+        case 8:
+            while (!lexer_at_end(lexer) && ((lexer_current(lexer) >= '0' && lexer_current(lexer) <= '7') || lexer_current(lexer) == '_'))
+            {
+                lexer_advance(lexer);
+            }
+            return token_new(TOKEN_LIT_INT, start, lexer->pos - start);
+        case 16:
+            while (!lexer_at_end(lexer) && (isxdigit(lexer_current(lexer)) || lexer_current(lexer) == '_'))
+            {
+                lexer_advance(lexer);
+            }
+            return token_new(TOKEN_LIT_INT, start, lexer->pos - start);
+        default:
+            lexer_advance(lexer);
+            break;
         }
     }
 
-    buffer[buffer_pos] = '\0';
-
-    if (buffer_pos == 0)
+    while (!lexer_at_end(lexer) && (isdigit(lexer_current(lexer)) || lexer_current(lexer) == '_'))
     {
-        return lexer_error(lexer, start_pos, "invalid number literal");
+        lexer_advance(lexer);
     }
 
-    char *endptr;
-
-    if (is_float)
+    if (lexer_current(lexer) == '.')
     {
-        double value = strtod(buffer, &endptr);
-        if (*endptr != '\0')
-        {
-            return lexer_error(lexer, start_pos, "invalid float literal");
-        }
+        lexer_advance(lexer);
 
-        Token *token = lexer_emit(lexer, TOKEN_FLOAT, start_pos, lexer->current - start_pos);
-        if (token != NULL)
-        {
-            token->value.f = value;
-        }
-
-        return token;
-    }
-
-    long long value = strtoll(buffer, &endptr, base);
-    if (*endptr != '\0')
-    {
-        return lexer_error(lexer, start_pos, "invalid integer literal");
-    }
-
-    if (value > LLONG_MAX || value < LLONG_MIN)
-    {
-        return lexer_error(lexer, start_pos, "integer literal out of range");
-    }
-
-    Token *token = lexer_emit(lexer, TOKEN_INT, start_pos, lexer->current - start_pos);
-    if (token != NULL)
-    {
-        token->value.i = value;
-    }
-
-    return token;
-}
-
-Token *lexer_emit_lit_string(Lexer *lexer)
-{
-    int start_pos = lexer->current;
-    lexer_advance(lexer);
-
-    while (!lexer_at_end(lexer) && lexer_current(lexer) != '"')
-    {
-        char c = lexer_current(lexer);
-        if (c == '\\')
+        while (!lexer_at_end(lexer) && (isdigit(lexer_current(lexer)) || lexer_current(lexer) == '_'))
         {
             lexer_advance(lexer);
-            c = lexer_current(lexer);
-
-            switch (c)
-            {
-            case 'n': c = '\n'; break;
-            case 't': c = '\t'; break;
-            case 'r': c = '\r'; break;
-            case '0': c = '\0'; break;
-            case '\\': c = '\\'; break;
-            case '"': c = '"'; break;
-            default:
-                return lexer_error(lexer, lexer->current, "invalid escape sequence");
-            }
         }
 
-        lexer_advance(lexer);
+        return token_new(TOKEN_LIT_FLOAT, start, lexer->pos - start);
     }
 
-    if (lexer_at_end(lexer))
-    {
-        return lexer_error(lexer, start_pos, "unterminated string literal");
-    }
-
-    lexer_advance(lexer);
-
-    return lexer_emit(lexer, TOKEN_STRING, start_pos, lexer->current - start_pos);
+    return token_new(TOKEN_LIT_INT, start, lexer->pos - start);
 }
 
-Token *lexer_emit_lit_char(Lexer *lexer)
+// char formatting rules:
+// - must be surrounded by single quotes
+// - only one character is allowed
+// the following escape sequences are allowed:
+// - `\'` for single quote
+// - `\"` for double quote
+// - `\\` for backslash
+// - `\n` for newline
+// - `\t` for tab
+// - `\r` for carriage return
+// - `\0` for null
+Token *lexer_parse_lit_char(Lexer *lexer)
 {
-    int start_pos = lexer->current;
-    lexer_advance(lexer);
-
-    char c = lexer_current(lexer);
-    if (c == '\\')
-    {
-        lexer_advance(lexer);
-        c = lexer_current(lexer);
-
-        switch (c)
-        {
-        case 'n': c = '\n'; break;
-        case 't': c = '\t'; break;
-        case 'r': c = '\r'; break;
-        case '0': c = '\0'; break;
-        case '\\': c = '\\'; break;
-        case '\'': c = '\''; break;
-        default:
-            return lexer_error(lexer, lexer->current, "invalid escape sequence");
-        }
-    }
-
-    lexer_advance(lexer);
+    int start = lexer->pos;
 
     if (lexer_current(lexer) != '\'')
     {
-        return lexer_error(lexer, lexer->current, "unterminated char literal");
+        return token_new(TOKEN_ERROR, start, 1);
     }
 
     lexer_advance(lexer);
 
-    return lexer_emit(lexer, TOKEN_CHARACTER, start_pos, lexer->current - start_pos);
+    if (lexer_at_end(lexer))
+    {
+        return token_new(TOKEN_ERROR, start, 1);
+    }
+
+    if (lexer_current(lexer) == '\\')
+    {
+        lexer_advance(lexer);
+
+        switch (lexer_current(lexer))
+        {
+        case '\'':
+        case '\"':
+        case '\\':
+        case 'n':
+        case 't':
+        case 'r':
+        case '0':
+            lexer_advance(lexer);
+            break;
+        default:
+            return token_new(TOKEN_ERROR, start, lexer->pos - start);
+        }
+    }
+    else
+    {
+        lexer_advance(lexer);
+    }
+
+    if (lexer_at_end(lexer) || lexer_current(lexer) != '\'')
+    {
+        return token_new(TOKEN_ERROR, start, lexer->pos - start);
+    }
+
+    lexer_advance(lexer);
+
+    return token_new(TOKEN_LIT_CHAR, start, lexer->pos - start);
+}
+
+// string formatting rules:
+// - must be surrounded by double quotes
+// - any character is allowed
+// the following escape sequences are allowed:
+// - `\'` for single quote
+// - `\"` for double quote
+// - `\\` for backslash
+// - `\n` for newline
+// - `\t` for tab
+// - `\r` for carriage return
+// - `\0` for null
+Token *lexer_parse_lit_string(Lexer *lexer)
+{
+    int start = lexer->pos;
+
+    if (lexer_current(lexer) != '\"')
+    {
+        return token_new(TOKEN_ERROR, start, 1);
+    }
+
+    lexer_advance(lexer);
+
+    while (!lexer_at_end(lexer) && lexer_current(lexer) != '\"')
+    {
+        if (lexer_current(lexer) == '\\')
+        {
+            lexer_advance(lexer);
+
+            switch (lexer_current(lexer))
+            {
+            case '\'':
+            case '\"':
+            case '\\':
+            case 'n':
+            case 't':
+            case 'r':
+            case '0':
+                lexer_advance(lexer);
+                break;
+            default:
+                return token_new(TOKEN_ERROR, start, lexer->pos - start);
+            }
+        }
+        else
+        {
+            lexer_advance(lexer);
+        }
+    }
+
+    if (lexer_at_end(lexer) || lexer_current(lexer) != '\"')
+    {
+        return token_new(TOKEN_ERROR, start, lexer->pos - start);
+    }
+
+    lexer_advance(lexer);
+
+    return token_new(TOKEN_LIT_STRING, start, lexer->pos - start);
+}
+
+unsigned long long lexer_eval_lit_int(Lexer *lexer, Token *token)
+{
+    int base = 10;
+    int skip = 0;
+    char *end = NULL;
+
+    if (lexer->source[token->pos] == '0')
+    {
+        switch (lexer->source[token->pos + 1])
+        {
+        case 'x':
+        case 'X':
+            base = 16;
+            skip = 2;
+            break;
+        case 'b':
+        case 'B':
+            base = 2;
+            skip = 2;
+            break;
+        case 'o':
+        case 'O':
+            base = 8;
+            skip = 2;
+            break;
+        default:
+            base = 10;
+            break;
+        }
+    }
+
+    char *cleaned = malloc(token->len + 1);
+    int j = 0;
+    for (int i = 0; i < token->len; i++)
+    {
+        if (lexer->source[token->pos + i] != '_')
+        {
+            cleaned[j++] = lexer->source[token->pos + i];
+        }
+    }
+    cleaned[j] = '\0';
+
+    long long value = strtoull(cleaned + skip, &end, base);
+    free(cleaned);
+
+    return value;
+}
+
+double lexer_eval_lit_float(Lexer *lexer, Token *token)
+{
+    char *end = NULL;
+
+    char *cleaned = malloc(token->len + 1);
+    int j = 0;
+    for (int i = 0; i < token->len; i++)
+    {
+        if (lexer->source[token->pos + i] != '_')
+        {
+            cleaned[j++] = lexer->source[token->pos + i];
+        }
+    }
+    cleaned[j] = '\0';
+
+    double value = strtod(cleaned, &end);
+    free(cleaned);
+
+    return value;
+}
+
+char lexer_eval_lit_char(Lexer *lexer, Token *token)
+{
+    char value = lexer->source[token->pos + 1];
+
+    if (lexer->source[token->pos + 1] == '\\')
+    {
+        switch (lexer->source[token->pos + 2])
+        {
+        case '\'':
+            value = '\'';
+            break;
+        case '\"':
+            value = '\"';
+            break;
+        case '\\':
+            value = '\\';
+            break;
+        case 'n':
+            value = '\n';
+            break;
+        case 't':
+            value = '\t';
+            break;
+        case 'r':
+            value = '\r';
+            break;
+        case '0':
+            value = '\0';
+            break;
+        }
+    }
+
+    return value;
+}
+
+char *lexer_eval_lit_string(Lexer *lexer, Token *token)
+{
+    char *value = calloc(token->len - 1, sizeof(char));
+
+    for (int i = 0; i < token->len - 2; i++)
+    {
+        if (lexer->source[token->pos + i + 1] == '\\')
+        {
+            switch (lexer->source[token->pos + i + 2])
+            {
+            case '\'':
+                value[i] = '\'';
+                break;
+            case '\"':
+                value[i] = '\"';
+                break;
+            case '\\':
+                value[i] = '\\';
+                break;
+            case 'n':
+                value[i] = '\n';
+                break;
+            case 't':
+                value[i] = '\t';
+                break;
+            case 'r':
+                value[i] = '\r';
+                break;
+            case '0':
+                value[i] = '\0';
+                break;
+            }
+        }
+        else
+        {
+            value[i] = lexer->source[token->pos + i + 1];
+        }
+    }
+
+    return value;
+}
+
+char *lexer_raw_value(Lexer *lexer, Token *token)
+{
+    char *value = calloc(token->len + 1, sizeof(char));
+    for (int i = 0; i < token->len; i++)
+    {
+        value[i] = lexer->source[token->pos + i];
+    }
+
+    return value;
+}
+
+Token *lexer_emit(Lexer *lexer, TokenKind kind, int len)
+{
+    Token *token = token_new(kind, lexer->pos, len);
+    for (int i = 0; i < len; i++)
+    {
+        lexer_advance(lexer);
+    }
+
+    return token;
 }
 
 Token *lexer_next(Lexer *lexer)
 {
     lexer_skip_whitespace(lexer);
-    lexer->start = lexer->current;
 
-    if (lexer_at_end(lexer))
+    switch (lexer_current(lexer))
     {
-        return lexer_emit(lexer, TOKEN_EOF, lexer->current, 0);
-    }
-
-    char c = lexer_current(lexer);
-
-    if (isalpha(c) || c == '_')
-    {
-        return lexer_emit_identifier(lexer);
-    }
-
-    if (isdigit(c))
-    {
-        return lexer_emit_number(lexer);
-    }
-
-    int beg = lexer->start;
-    int len = 1;
-    TokenKind kind = TOKEN_ERROR;
-
-    switch (c)
-    {
-    case '#':
-        while (lexer_current(lexer) != '\n' && !lexer_at_end(lexer))
+    case '#':;
+        int start = lexer->pos;
+        while (!lexer_at_end(lexer) && lexer_current(lexer) != '\n')
         {
             lexer_advance(lexer);
         }
-        if (!lexer_at_end(lexer))
-        {
-            lexer_advance(lexer);
-        }
-        int pos = (lexer->current - lexer->start) - 1; // ignore '\n'
-        return lexer_emit(lexer, TOKEN_COMMENT, lexer->start, pos);
+        return token_new(TOKEN_COMMENT, start, lexer->pos - start);
+    case 'a' ... 'z':
+    case 'A' ... 'Z':
+    case '_':
+        return lexer_parse_identifier(lexer);
+    case '0' ... '9':
+        return lexer_parse_lit_number(lexer);
     case '\'':
-        return lexer_emit_lit_char(lexer);
-    case '"':
-        return lexer_emit_lit_string(lexer);
+        return lexer_parse_lit_char(lexer);
+    case '\"':
+        return lexer_parse_lit_string(lexer);
     case '(':
-        kind = TOKEN_L_PAREN;
-        break;
+        return lexer_emit(lexer, TOKEN_L_PAREN, 1);
     case ')':
-        kind = TOKEN_R_PAREN;
-        break;
+        return lexer_emit(lexer, TOKEN_R_PAREN, 1);
     case '[':
-        kind = TOKEN_L_BRACKET;
-        break;
+        return lexer_emit(lexer, TOKEN_L_BRACKET, 1);
     case ']':
-        kind = TOKEN_R_BRACKET;
-        break;
+        return lexer_emit(lexer, TOKEN_R_BRACKET, 1);
     case '{':
-        kind = TOKEN_L_BRACE;
-        break;
+        return lexer_emit(lexer, TOKEN_L_BRACE, 1);
     case '}':
-        kind = TOKEN_R_BRACE;
-        break;
+        return lexer_emit(lexer, TOKEN_R_BRACE, 1);
     case ':':
-        switch (lexer_peek(lexer))
+        switch (lexer_peek(lexer, 1))
         {
         case ':':
-            lexer_advance(lexer);
-            kind = TOKEN_COLON_COLON;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_COLON_COLON, 2);
         default:
-            kind = TOKEN_COLON;
-            break;
+            return lexer_emit(lexer, TOKEN_COLON, 1);
         }
         break;
     case ';':
-        kind = TOKEN_SEMICOLON;
-        break;
+        return lexer_emit(lexer, TOKEN_SEMICOLON, 1);
     case '?':
-        kind = TOKEN_QUESTION;
-        break;
+        return lexer_emit(lexer, TOKEN_QUESTION, 1);
     case '@':
-        kind = TOKEN_AT;
-        break;
+        return lexer_emit(lexer, TOKEN_AT, 1);
     case '.':
-        kind = TOKEN_DOT;
-        break;
+        return lexer_emit(lexer, TOKEN_DOT, 1);
     case ',':
-        kind = TOKEN_COMMA;
-        break;
+        return lexer_emit(lexer, TOKEN_COMMA, 1);
     case '+':
-        kind = TOKEN_PLUS;
-        break;
+        return lexer_emit(lexer, TOKEN_PLUS, 1);
     case '-':
-        kind = TOKEN_MINUS;
-        break;
+        return lexer_emit(lexer, TOKEN_MINUS, 1);
     case '*':
-        kind = TOKEN_STAR;
-        break;
+        return lexer_emit(lexer, TOKEN_STAR, 1);
     case '%':
-        kind = TOKEN_PERCENT;
-        break;
+        return lexer_emit(lexer, TOKEN_PERCENT, 1);
     case '^':
-        kind = TOKEN_CARET;
-        break;
+        return lexer_emit(lexer, TOKEN_CARET, 1);
     case '&':
-        switch (lexer_peek(lexer))
+        switch (lexer_peek(lexer, 1))
         {
         case '&':
-            lexer_advance(lexer);
-            kind = TOKEN_AMPERSAND_AMPERSAND;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_AMPERSAND_AMPERSAND, 2);
         default:
-            kind = TOKEN_AMPERSAND;
-            break;
+            return lexer_emit(lexer, TOKEN_AMPERSAND, 1);
         }
         break;
     case '|':
-        switch (lexer_peek(lexer))
+        switch (lexer_peek(lexer, 1))
         {
         case '|':
-            lexer_advance(lexer);
-            kind = TOKEN_PIPE_PIPE;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_PIPE_PIPE, 2);
         default:
-            kind = TOKEN_PIPE;
-            break;
+            return lexer_emit(lexer, TOKEN_PIPE, 1);
         }
         break;
     case '~':
-        kind = TOKEN_TILDE;
-        break;
+        return lexer_emit(lexer, TOKEN_TILDE, 1);
     case '<':
-        switch (lexer_peek(lexer))
+        switch (lexer_peek(lexer, 1))
         {
         case '<':
-            lexer_advance(lexer);
-            kind = TOKEN_LESS_LESS;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_LESS_LESS, 2);
         case '=':
-            lexer_advance(lexer);
-            kind = TOKEN_LESS_EQUAL;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_LESS_EQUAL, 2);
         default:
-            kind = TOKEN_LESS;
-            break;
+            return lexer_emit(lexer, TOKEN_LESS, 1);
         }
         break;
     case '>':
-        switch (lexer_peek(lexer))
+        switch (lexer_peek(lexer, 1))
         {
         case '>':
-            lexer_advance(lexer);
-            kind = TOKEN_GREATER_GREATER;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_GREATER_GREATER, 2);
         case '=':
-            lexer_advance(lexer);
-            kind = TOKEN_GREATER_EQUAL;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_GREATER_EQUAL, 2);
         default:
-            kind = TOKEN_GREATER;
-            break;
+            return lexer_emit(lexer, TOKEN_GREATER, 1);
         }
         break;
     case '=':
-        switch (lexer_peek(lexer))
+        switch (lexer_peek(lexer, 1))
         {
         case '=':
-            lexer_advance(lexer);
-            kind = TOKEN_EQUAL_EQUAL;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_EQUAL_EQUAL, 2);
         default:
-            kind = TOKEN_EQUAL;
-            break;
+            return lexer_emit(lexer, TOKEN_EQUAL, 1);
         }
         break;
     case '!':
-        switch (lexer_peek(lexer))
+        switch (lexer_peek(lexer, 1))
         {
         case '=':
-            lexer_advance(lexer);
-            kind = TOKEN_BANG_EQUAL;
-            len = 2;
-            break;
+            return lexer_emit(lexer, TOKEN_BANG_EQUAL, 2);
         default:
-            kind = TOKEN_BANG;
-            break;
+            return lexer_emit(lexer, TOKEN_BANG, 1);
         }
         break;
     case '/':
-        kind = TOKEN_SLASH;
-        break;
+        return lexer_emit(lexer, TOKEN_SLASH, 1);
     case '\\':
-        kind = TOKEN_BACKSLASH;
-        break;
+        return lexer_emit(lexer, TOKEN_BACKSLASH, 1);
+    case '\0':
+        return lexer_emit(lexer, TOKEN_EOF, 1);
     default:
-        kind = TOKEN_ERROR;
-        break;
+        return lexer_emit(lexer, TOKEN_ERROR, 1);
     }
-
-    Token *token;
-
-    if (kind == TOKEN_ERROR)
-    {
-        char *message = calloc(1, 26);
-        if (message == NULL)
-        {
-            fprintf(stderr, "error: failed to allocate memory for error message\n");
-            exit(1);
-        }
-
-        snprintf(message, 26, "unexpected character '%c'", c);
-        token = lexer_error(lexer, beg, message);
-        free(message);
-    }
-    else {
-        token = lexer_emit(lexer, kind, beg, len);
-    }
-
-    lexer_advance(lexer);
-
-    return token;
 }

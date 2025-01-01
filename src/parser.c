@@ -1,19 +1,20 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include "op.h"
 #include "parser.h"
+#include "lexer.h"
+#include "operator.h"
 
-Parser *parser_new(char *source)
+#include <stdio.h>
+
+Parser *parser_new(Lexer *lexer)
 {
     Parser *parser = calloc(1, sizeof(Parser));
-    parser->lexer = lexer_new(source);
+    parser->comments = calloc(1, sizeof(Token *));
+    parser->comments[0] = NULL;
+
     parser->last = NULL;
     parser->curr = NULL;
     parser->next = NULL;
-    parser->comments = calloc(1, sizeof(Token *));
-    parser->comments[0] = NULL;
+
+    parser->lexer = lexer;
 
     return parser;
 }
@@ -25,99 +26,124 @@ void parser_free(Parser *parser)
         return;
     }
 
-    lexer_free(parser->lexer);
-    parser->lexer = NULL;
-
-    parser->last = NULL;
+    token_free(parser->curr);
     parser->curr = NULL;
+
+    token_free(parser->next);
     parser->next = NULL;
 
-    for (int i = 0; parser->comments[i] != NULL; i++)
+    if (parser->comments != NULL)
     {
-        token_free(parser->comments[i]);
-        parser->comments[i] = NULL;
+        for (size_t i = 0; parser->comments[i] != NULL; i++)
+        {
+            token_free(parser->comments[i]);
+            parser->comments[i] = NULL;
+        }
+        free(parser->comments);
+        parser->comments = NULL;
     }
 
-    free(parser->comments);
-    parser->comments = NULL;
+    lexer_free(parser->lexer);
+    parser->lexer = NULL;
 
     free(parser);
 }
 
-void parser_print_error(Parser *parser, Node *node, char *path)
+void parser_print_error(Parser *parser, Node *node)
 {
     if (node->kind != NODE_ERROR)
     {
         return;
     }
 
-    int offset = lexer_token_line_char_offset(parser->lexer, node->token);
-    int line_num = lexer_token_line(parser->lexer, node->token);
-    char *line = lexer_get_line(parser->lexer, line_num);
-    if (line == NULL)
+    if (node->token == NULL)
     {
-        line = strdup("FAILED TO GET LINE TEXT");
+        printf("error: %s\n", node->data.error->message);
+        printf("! location unknown\n");
     }
 
-    printf("error: %s\n", node->error.message);
-    printf("%s:%d:%d:\n", path, line_num, offset);
-    printf("%4d | %s\n", line_num, line);
-    printf("     | %*s^\n", offset, "");
+    int line_num = lexer_get_pos_line(parser->lexer, node->token->pos);
+    int offset = lexer_get_pos_line_offset(parser->lexer, node->token->pos);
+    char *line = lexer_get_line_text(parser->lexer, line_num);
+    if (line == NULL)
+    {
+        printf("error: %s\n", node->data.error->message);
+        printf("! location unknown\n");
+        return;
+    }
+
+    // find containing NODE_FILE
+    // NOTE:
+    //   This only works because the parser can safely assume that any parsed
+    //   code is at some level contained inside a NODE_FILE. Breaking this
+    //   convention for any reason would be silly and is not advised.
+    //   It stands to reason then, that if an error is ever reported with
+    //   "UNKNOWN_FILE_PATH", that something has been very borked.
+    char *path = "UNKNOWN_FILE_PATH";
+    Node *file = node_find_parent(node, NODE_FILE);
+    if (file != NULL)
+    {
+        path = file->data.file->path;
+    }
+
+    printf("error: %s\n", node->data.error->message);
+    printf("%s:%d:%d\n", path, line_num + 1, offset);
+    printf("%5d | %s\n", line_num + 1, line);
+    printf("      | %*s^\n", offset - 1, "");
 
     free(line);
 }
 
 void parser_add_comment(Parser *parser, Token *token)
 {
-    int i = 0;
-    while (parser->comments[i] != NULL)
+    int count = 0;
+    while (parser->comments[count] != NULL)
     {
-        i++;
+        count++;
     }
 
-    parser->comments = realloc(parser->comments, sizeof(Token *) * (i + 2));
-    parser->comments[i] = token;
-    parser->comments[i + 1] = NULL;
-}
-
-bool parser_has_comments(Parser *parser)
-{
-    return parser->comments[0] != NULL;
+    parser->comments = realloc(parser->comments, (count + 2) * sizeof(Token *));
+    parser->comments[count] = token;
+    parser->comments[count + 1] = NULL;
 }
 
 void parser_advance(Parser *parser)
 {
     Token *next = lexer_next(parser->lexer);
+    while (next->kind == TOKEN_COMMENT)
+    {
+        parser_add_comment(parser, next);
+        next = lexer_next(parser->lexer);
+    }
+
+    token_free(parser->last);
 
     parser->last = parser->curr;
     parser->curr = parser->next;
     parser->next = next;
 
-    if (parser->opt_verbose)
+    // NOTE:
+    //   Almost eclusively useful at the start of a parsing operation to
+    //   pre-populate tokens.
+    if (parser->curr == NULL && parser->next != NULL)
     {
-        printf("[ PRSE ] [ TOKN ] %-20s `%s`\n", token_kind_string(parser->next->kind), parser->next->raw);
-    }
-
-    if (parser->curr == NULL)
-    {
-        parser_advance(parser);
-    }
-
-    if (parser->curr->kind == TOKEN_COMMENT)
-    {
-        parser_add_comment(parser, parser->curr);
         parser_advance(parser);
     }
 }
 
-bool parser_match(Parser *parser, TokenKind kind)
+bool parser_peek(Parser *parser, TokenKind type)
 {
-    return parser->curr->kind == kind;
+    return parser->next->kind == type;
 }
 
-bool parser_consume(Parser *parser, TokenKind kind)
+bool parser_match(Parser *parser, TokenKind type)
 {
-    if (parser_match(parser, kind))
+    return parser->curr->kind == type;
+}
+
+bool parser_consume(Parser *parser, TokenKind type)
+{
+    if (parser_match(parser, type))
     {
         parser_advance(parser);
         return true;
@@ -126,1048 +152,369 @@ bool parser_consume(Parser *parser, TokenKind kind)
     return false;
 }
 
-// Utility function for creating an error node.
-//
-// The parser itself does not keep track of error nodes directly. They are
-//   inserted into the tree by the function that creates the error and must be
-//   found by crawling the tree. This is to preserve the partially parsed state
-//   of a tree with errors as well as allowing for multiple errors to be
-//   collected in one pass.
-Node *parser_error(Token *token, char *message)
+Node *parser_new_error(Token *token, char *message)
 {
-    Node *node = node_new(NODE_ERROR, token);
-    node->error.message = strdup(message);
+    Node *node = node_new(NODE_ERROR);
+    node->token = token_copy(token);
+    node->data.error->message = strdup(message);
 
     return node;
 }
 
-Node *parse_program(Parser *parser)
+Node *parse_file(Parser *parser, char *path)
 {
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_program\n");
-    }
-
-    Node *node = node_new(NODE_PROGRAM, NULL);
+    Node *node = node_new(NODE_FILE);
+    node->token = token_copy(parser->curr);
+    node->data.file->path = strdup(path);
+    node->data.file->parser = parser;
+    node->data.file->statements = node_list_new();
 
     while (!parser_match(parser, TOKEN_EOF))
     {
-        Node *stmt = parse_stmt(parser, node);
-        node->program.statements = node_list_add(node->program.statements, stmt);
+        Node *stmt = parse_stmt(parser);
+        stmt->parent = node;
+
+        node_list_add(&node->data.file->statements, stmt);
     }
 
     return node;
 }
 
-Node *parse_identifier(Parser *parser, Node *parent)
+Node *parse_identifier(Parser *parser)
 {
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_identifier\n");
-    }
-
     if (!parser_consume(parser, TOKEN_IDENTIFIER))
     {
-        return parser_error(parser->curr, "expected identifier");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
     }
 
-    Node *node = node_new(NODE_IDENTIFIER, parser->last);
-    node->parent = parent;
+    Node *node = node_new(NODE_IDENTIFIER);
+    node->token = token_copy(parser->last);
+    node->data.identifier->name = lexer_raw_value(parser->lexer, parser->last);
 
     return node;
 }
 
-Node *parse_lit_char(Parser *parser, Node *parent)
+Node *parse_module_path(Parser *parser)
 {
-    if (parser->opt_verbose)
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
     {
-        printf("[ PRSE ] parse_lit_char\n");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected module path");
     }
 
-    if (!parser_consume(parser, TOKEN_CHARACTER))
-    {
-        return parser_error(parser->curr, "expected character literal");
-    }
+    Node *node = node_new(NODE_MODULE_PATH);
+    node->token = token_copy(parser->last);
+    node->data.module_path->parts = realloc(node->data.module_path->parts, 2 * sizeof(char *));
+    node->data.module_path->parts[0] = lexer_raw_value(parser->lexer, parser->last);
+    node->data.module_path->parts[1] = NULL;
 
-    Node *node = node_new(NODE_LIT_CHAR, parser->last);
-    node->parent = parent;
+    while (parser_consume(parser, TOKEN_DOT))
+    {
+        if (!parser_consume(parser, TOKEN_IDENTIFIER))
+        {
+            parser_advance(parser);
+            free(node);
+            return parser_new_error(parser->last, "expected module path part");
+        }
+
+        int count = 0;
+        while (node->data.module_path->parts[count] != NULL)
+        {
+            count++;
+        }
+
+        node->data.module_path->parts = realloc(node->data.module_path->parts, (count + 2) * sizeof(char *));
+        node->data.module_path->parts[count] = lexer_raw_value(parser->lexer, parser->last);
+        node->data.module_path->parts[count + 1] = NULL;
+    }
 
     return node;
 }
 
-Node *parse_lit_int(Parser *parser, Node *parent)
+Node *parse_lit_int(Parser *parser)
 {
-    if (parser->opt_verbose)
+    if (!parser_consume(parser, TOKEN_LIT_INT))
     {
-        printf("[ PRSE ] parse_lit_int\n");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected integer literal");
     }
 
-    if (!parser_consume(parser, TOKEN_INT))
-    {
-        return parser_error(parser->curr, "expected integer literal");
-    }
-
-    Node *node = node_new(NODE_LIT_INT, parser->last);
-    node->parent = parent;
+    Node *node = node_new(NODE_LIT_INT);
+    node->token = token_copy(parser->last);
+    node->data.lit_int->value = lexer_eval_lit_int(parser->lexer, parser->last);
 
     return node;
 }
 
-Node *parse_lit_float(Parser *parser, Node *parent)
+Node *parse_lit_float(Parser *parser)
 {
-    if (parser->opt_verbose)
+    if (!parser_consume(parser, TOKEN_LIT_FLOAT))
     {
-        printf("[ PRSE ] parse_lit_float\n");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected float literal");
     }
 
-    if (!parser_consume(parser, TOKEN_FLOAT))
-    {
-        return parser_error(parser->curr, "expected float literal");
-    }
-
-    Node *node = node_new(NODE_LIT_FLOAT, parser->last);
-    node->parent = parent;
+    Node *node = node_new(NODE_LIT_FLOAT);
+    node->token = token_copy(parser->last);
+    node->data.lit_float->value = lexer_eval_lit_float(parser->lexer, parser->last);
 
     return node;
 }
 
-Node *parse_lit_string(Parser *parser, Node *parent)
+Node *parse_lit_char(Parser *parser)
 {
-    if (parser->opt_verbose)
+    if (!parser_consume(parser, TOKEN_LIT_CHAR))
     {
-        printf("[ PRSE ] parse_lit_string\n");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected character literal");
     }
 
-    if (!parser_consume(parser, TOKEN_STRING))
-    {
-        return parser_error(parser->curr, "expected string literal");
-    }
-
-    Node *node = node_new(NODE_LIT_STRING, parser->last);
-    node->parent = parent;
+    Node *node = node_new(NODE_LIT_CHAR);
+    node->token = token_copy(parser->last);
+    node->data.lit_char->value = lexer_eval_lit_char(parser->lexer, parser->last);
 
     return node;
 }
 
-Node *parse_expr_member(Parser *parser, Node *parent, Node *target)
+Node *parse_lit_string(Parser *parser)
 {
-    if (parser->opt_verbose)
+    if (!parser_consume(parser, TOKEN_LIT_STRING))
     {
-        printf("[ PRSE ] parse_expr_member\n");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected string literal");
     }
 
+    Node *node = node_new(NODE_LIT_STRING);
+    node->token = token_copy(parser->last);
+    node->data.lit_string->value = lexer_raw_value(parser->lexer, parser->last);
+
+    return node;
+}
+
+Node *parse_expr_member(Parser *parser, Node *target)
+{
     if (!parser_consume(parser, TOKEN_DOT))
     {
-        return parser_error(parser->curr, "expected '.'");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '.'");
     }
 
-    Node *node = node_new(NODE_EXPR_MEMBER, parser->last);
-    node->parent = parent;
-    node->expr_member.target = target;
-    node->expr_member.identifier = parse_identifier(parser, node);
+    Node *member = parse_identifier(parser);
+
+    Node *node = node_new(NODE_EXPR_MEMBER);
+    node->token = token_copy(parser->last);
+
+    node->data.expr_member->target = target;
+    node->data.expr_member->member = member;
+
+    target->parent = node;
+    member->parent = node;
 
     return node;
 }
 
-Node *parse_expr_call(Parser *parser, Node *parent, Node *target)
+Node *parse_expr_call(Parser *parser, Node *target)
 {
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr_call\n");
-    }
-
     if (!parser_consume(parser, TOKEN_L_PAREN))
     {
-        return parser_error(parser->curr, "expected '('");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '('");
     }
 
-    Node *node = node_new(NODE_EXPR_CALL, parser->last);
-    node->parent = parent;
-    node->expr_call.target = target;
+    Node *node = node_new(NODE_EXPR_CALL);
+    node->token = token_copy(parser->last);
+    node->data.expr_call->arguments = node_list_new();
+    node->data.expr_call->target = target;
 
-    while (!parser_match(parser, TOKEN_R_PAREN) && !parser_match(parser, TOKEN_EOF))
+    target->parent = node;
+
+    while (!parser_match(parser, TOKEN_R_PAREN))
     {
-        Node *argument = parse_expr(parser, node);
-        node->expr_call.arguments = node_list_add(node->expr_call.arguments, argument);
+        Node *argument = parse_expr(parser);
+        if (argument->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return argument;
+        }
+        argument->parent = node;
+        node_list_add(&node->data.expr_call->arguments, argument);
 
         if (!parser_consume(parser, TOKEN_COMMA))
         {
-            if (!parser_match(parser, TOKEN_R_PAREN))
-            {
-                node_free(node);
-                return parser_error(parser->curr, "expected ',' or ')'");
-            }
+            break;
         }
-    }
-
-    if (parser->last->kind == TOKEN_COMMA)
-    {
-        node_free(node);
-        return parser_error(parser->curr, "unexpected ','");
     }
 
     if (!parser_consume(parser, TOKEN_R_PAREN))
     {
+        parser_advance(parser);
+
+        Node *error = parser_new_error(parser->last, "expected ')'");
         node_free(node);
-        return parser_error(parser->curr, "expected ')'");
+        return error;
     }
 
     return node;
 }
 
-Node *parse_expr_index(Parser *parser, Node *parent, Node *target)
+Node *parse_expr_index(Parser *parser, Node *target)
 {
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr_index\n");
-    }
-
     if (!parser_consume(parser, TOKEN_L_BRACKET))
     {
-        return parser_error(parser->curr, "expected '['");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '['");
     }
 
-    Node *node = node_new(NODE_EXPR_INDEX, parser->last);
-    node->parent = parent;
-    node->expr_index.target = target;
-    node->expr_index.index = parse_expr(parser, node);
+    Node *node = node_new(NODE_EXPR_INDEX);
+    node->token = token_copy(parser->last);
+
+    target->parent = node;
+    node->data.expr_index->target = target;
+
+    Node *node_expr = parse_expr(parser);
+    if (node_expr->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected expression");
+    }
+    node_expr->parent = node;    
+    node->data.expr_index->index = node_expr;
 
     if (!parser_consume(parser, TOKEN_R_BRACKET))
     {
-        node_free(node);
-        return parser_error(parser->curr, "expected ']'");
-    }
-
-    return node;
-}
-
-Node *parse_expr_cast(Parser *parser, Node *parent, Node *target)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr_cast\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_COLON_COLON))
-    {
-        return parser_error(parser->curr, "expected '::'");
-    }
-
-    Node *node = node_new(NODE_EXPR_CAST, parser->last);
-    node->parent = parent;
-    node->expr_cast.target = target;
-    node->expr_cast.type = parse_type(parser, node);
-
-    return node;
-}
-
-Node *parse_expr_new(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr_new\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_NEW))
-    {
-        return parser_error(parser->curr, "expected 'new'");
-    }
-
-    Node *node = node_new(NODE_EXPR_NEW, parser->last);
-    node->parent = parent;
-    node->expr_new.type = parse_type(parser, node);
-
-    if (!parser_consume(parser, TOKEN_L_BRACE))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '{'");
-    }
-
-    while (!parser_match(parser, TOKEN_R_BRACE) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *initializer = parse_expr(parser, node);
-        node->expr_new.initializers = node_list_add(node->expr_new.initializers, initializer);
-
-        if (!parser_consume(parser, TOKEN_SEMICOLON))
-        {
-            node_free(node);
-            return parser_error(parser->curr, "expected ';'");
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_R_BRACE))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '}'");
-    }
-
-    return node;
-}
-
-Node *parse_expr_unary(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr_unary\n");
-    }
-
-    if (op_is_unary(parser->curr->kind))
-    {
-        Token *op = parser->curr;
         parser_advance(parser);
 
-        Node *node = node_new(NODE_EXPR_UNARY, op);
-        node->parent = parent;
-        node->expr_unary.right = parse_expr_unary(parser, node);
+        Node *error = parser_new_error(parser->last, "expected ']'");
+        node_free(node);
+        return error;
+    }
+
+    return node;
+}
+
+Node *parse_expr_cast(Parser *parser, Node *target)
+{
+    if (!parser_consume(parser, TOKEN_COLON_COLON))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '::'");
+    }
+
+    Node *node = node_new(NODE_EXPR_CAST);
+    node->token = token_copy(parser->last);
+
+    target->parent = node;
+    node->data.expr_cast->target = target;
+
+    Node *type = parse_type(parser);
+    if (type->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected type");
+    }
+    type->parent = node;
+    node->data.expr_cast->type = type;
+
+    return node;
+}
+
+Node *parse_expr_unary(Parser *parser)
+{
+    if (op_is_unary(op_from_token_kind(parser->curr->kind)))
+    {
+        Operator op = op_from_token_kind(parser->curr->kind);
+        parser_advance(parser);
+
+        Node *node = node_new(NODE_EXPR_UNARY);
+        node->token = token_copy(parser->last);
+        node->data.expr_unary->op = op;
+
+        Node *node_expr_unary = parse_expr_unary(parser);
+        if (node_expr_unary->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return parser_new_error(parser->last, "expected unary expression");
+        }
+        node_expr_unary->parent = node;
+        node->data.expr_unary->target = node_expr_unary;
 
         return node;
     }
 
-    return parse_expr_primary(parser, parent);
+    return parse_expr_primary(parser);
 }
 
-Node *parse_expr_binary(Parser *parser, Node *parent, int parent_precedence)
+Node *parse_expr_binary(Parser *parser, int parent_precedence)
 {
-    if (parser->opt_verbose)
+    Node *left = parse_expr_postfix(parser);
+    if (left->kind == NODE_ERROR)
     {
-        printf("[ PRSE ] parse_expr_binary\n");
+        return left;
     }
 
-    Node *lhs = parse_expr_postfix(parser, parent);
-
-    while (op_is_binary(parser->curr->kind) && op_get_precedence(parser->curr->kind) >= parent_precedence)
+    while (true)
     {
-        Token *op = parser->curr;
-        parser_advance(parser);
+        Operator op = op_from_token_kind(parser->curr->kind);
+        if (!op_is_binary(op) || (op_precedence(op) < parent_precedence))
+        {
+            break;
+        }
 
-        int precedence = op_get_precedence(op->kind);
-        if (op_is_right_associative(op->kind))
+        int precedence = op_precedence(op);
+        if (op_is_right_associative(op))
         {
             precedence++;
         }
 
-        Node *node = node_new(NODE_EXPR_BINARY, op);
-        node->parent = parent;
-        node->expr_binary.left = lhs;
-        node->expr_binary.right = parse_expr_binary(parser, node, precedence);
+        parser_advance(parser);
 
-        lhs = node;
-    }
-
-    return lhs;
-}
-
-Node *parse_type_array(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_type_array\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_L_BRACKET))
-    {
-        return parser_error(parser->curr, "expected '['");
-    }
-
-    Node *node = node_new(NODE_TYPE_ARRAY, parser->last);
-    node->parent = parent;
-
-    if (!parser_match(parser, TOKEN_R_BRACKET))
-    {
-        node->type_arr.size = parse_expr(parser, node);
-    }
-
-    if (!parser_consume(parser, TOKEN_R_BRACKET))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ']'");
-    }
-
-    node->type_arr.type = parse_type(parser, node);
-
-    return node;
-}
-
-Node *parse_type_pointer(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_type_pointer\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_STAR))
-    {
-        return parser_error(parser->curr, "expected '*'");
-    }
-
-    Node *node = node_new(NODE_TYPE_POINTER, parser->last);
-    node->parent = parent;
-    node->type_ptr.type = parse_type(parser, node);
-
-    return node;
-}
-
-Node *parse_type_fun(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_type_fun\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_FUN))
-    {
-        return parser_error(parser->curr, "expected 'fun'");
-    }
-
-    Node *node = node_new(NODE_TYPE_FUN, parser->last);
-    node->parent = parent;
-
-    if (!parser_consume(parser, TOKEN_L_PAREN))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '('");
-    }
-
-    while (!parser_match(parser, TOKEN_R_PAREN) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *param = parse_field(parser, node);
-        node->type_fun.parameters = node_list_add(node->type_fun.parameters, param);
-
-        if (!parser_consume(parser, TOKEN_COMMA))
+        Node *right = parse_expr_binary(parser, precedence);
+        if (right->kind == NODE_ERROR)
         {
-            if (!parser_match(parser, TOKEN_R_PAREN))
-            {
-                node_free(node);
-                return parser_error(parser->curr, "expected ',' or ')'");
-            }
-        };
-    }
-
-    if (parser->last->kind == TOKEN_COMMA)
-    {
-        node_free(node);
-        return parser_error(parser->curr, "unexpected ','");
-    }
-
-    if (!parser_consume(parser, TOKEN_R_PAREN))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ')'");
-    }
-
-    if (parser_consume(parser, TOKEN_COLON))
-    {
-        node->type_fun.return_type = parse_type(parser, node);
-    }
-
-    return node;
-}
-
-Node *parse_type_str(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_type_str\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_STR))
-    {
-        return parser_error(parser->curr, "expected 'str'");
-    }
-
-    Node *node = node_new(NODE_TYPE_STR, parser->last);
-    node->parent = parent;
-
-    if (!parser_consume(parser, TOKEN_L_BRACE))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '{'");
-    }
-
-    while (!parser_match(parser, TOKEN_R_BRACE) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *field = parse_field(parser, node);
-        node->type_str.fields = node_list_add(node->type_str.fields, field);
-
-        if (!parser_consume(parser, TOKEN_SEMICOLON))
-        {
-            node_free(node);
-            return parser_error(parser->curr, "expected ';'");
+            node_free(left);
+            return right;
         }
+
+        Node *node = node_new(NODE_EXPR_BINARY);
+        node->token = token_copy(parser->last);
+
+        right->parent = node;
+        left->parent = node;
+
+        node->data.expr_binary->op = op;
+        node->data.expr_binary->left = left;
+        node->data.expr_binary->right = right;
+
+        left = node;
     }
 
-    if (!parser_consume(parser, TOKEN_R_BRACE))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '}'");
-    }
-
-    return node;
+    return left;
 }
 
-Node *parse_type_uni(Parser *parser, Node *parent)
+Node *parse_expr_postfix(Parser *parser)
 {
-    if (parser->opt_verbose)
+    Node *node = parse_expr_unary(parser);
+    if (node->kind == NODE_ERROR)
     {
-        printf("[ PRSE ] parse_type_uni\n");
+        return node;
     }
-
-    if (!parser_consume(parser, TOKEN_KW_UNI))
-    {
-        return parser_error(parser->curr, "expected 'uni'");
-    }
-
-    Node *node = node_new(NODE_TYPE_UNI, parser->last);
-    node->parent = parent;
-
-    if (!parser_consume(parser, TOKEN_L_BRACE))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '{'");
-    }
-
-    while (!parser_match(parser, TOKEN_R_BRACE) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *field = parse_field(parser, node);
-        node->type_uni.fields = node_list_add(node->type_uni.fields, field);
-
-        if (!parser_consume(parser, TOKEN_SEMICOLON))
-        {
-            node_free(node);
-            return parser_error(parser->curr, "expected ';'");
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_R_BRACE))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '}'");
-    }
-
-    return node;
-}
-
-Node *parse_field(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_field\n");
-    }
-
-    Node *node = node_new(NODE_FIELD, parser->curr);
-    node->parent = parent;
-    node->field.identifier = parse_identifier(parser, node);
-
-    if (!parser_consume(parser, TOKEN_COLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ':'");
-    }
-
-    node->field.type = parse_type(parser, node);
-
-    return node;
-}
-
-Node *parse_stmt_val(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_val\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_VAL))
-    {
-        return parser_error(parser->curr, "expected 'val'");
-    }
-
-    Node *node = node_new(NODE_STMT_VAL, parser->last);
-    node->parent = parent;
-    node->stmt_val.identifier = parse_identifier(parser, node);
-
-    if (!parser_consume(parser, TOKEN_COLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ':'");
-    }
-
-    node->stmt_val.type = parse_type(parser, node);
-
-    if (!parser_consume(parser, TOKEN_EQUAL))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '='");
-    }
-
-    node->stmt_val.initializer = parse_expr(parser, node);
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_var(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_var\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_VAR))
-    {
-        return parser_error(parser->curr, "expected 'var'");
-    }
-
-    Node *node = node_new(NODE_STMT_VAR, parser->last);
-    node->parent = parent;
-    node->stmt_var.identifier = parse_identifier(parser, node);
-
-    if (!parser_consume(parser, TOKEN_COLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ':'");
-    }
-
-    node->stmt_var.type = parse_type(parser, node);
-
-    if (parser_consume(parser, TOKEN_EQUAL))
-    {
-        node->stmt_var.initializer = parse_expr(parser, node);
-    }
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_def(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_def\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_DEF))
-    {
-        return parser_error(parser->curr, "expected 'def'");
-    }
-
-    Node *node = node_new(NODE_STMT_DEF, parser->last);
-    node->parent = parent;
-    node->stmt_def.identifier = parse_identifier(parser, node);
-
-    if (!parser_consume(parser, TOKEN_COLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ':'");
-    }
-
-    node->stmt_def.type = parse_type(parser, node);
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_use(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_use\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_USE))
-    {
-        return parser_error(parser->curr, "expected 'use'");
-    }
-
-    Node *node = node_new(NODE_STMT_USE, parser->last);
-    node->parent = parent;
-    node->stmt_use.path = parse_lit_string(parser, node);
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_fun(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_fun\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_FUN))
-    {
-        return parser_error(parser->curr, "expected 'fun'");
-    }
-
-    Node *node = node_new(NODE_STMT_FUN, parser->last);
-    node->parent = parent;
-    node->stmt_fun.identifier = parse_identifier(parser, node);
-
-    if (!parser_consume(parser, TOKEN_L_PAREN))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '('");
-    }
-
-    while (!parser_match(parser, TOKEN_R_PAREN) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *param = parse_field(parser, node);
-        node->stmt_fun.parameters = node_list_add(node->stmt_fun.parameters, param);
-
-        if (!parser_consume(parser, TOKEN_COMMA))
-        {
-            if (!parser_match(parser, TOKEN_R_PAREN))
-            {
-                node_free(node);
-                return parser_error(parser->curr, "expected ',' or ')'");
-            }
-        }
-    }
-
-    if (parser->last->kind == TOKEN_COMMA)
-    {
-        node_free(node);
-        return parser_error(parser->last, "unexpected ','");
-    }
-
-    if (!parser_consume(parser, TOKEN_R_PAREN))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ')'");
-    }
-
-    if (parser_consume(parser, TOKEN_COLON))
-    {
-        node->stmt_fun.return_type = parse_type(parser, node);
-    }
-
-    node->stmt_fun.body = parse_stmt_block(parser, node);
-
-    return node;
-}
-
-Node *parse_stmt_ext(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_ext\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_EXT))
-    {
-        return parser_error(parser->curr, "expected 'ext'");
-    }
-
-    Node *node = node_new(NODE_STMT_EXT, parser->last);
-    node->parent = parent;
-    node->stmt_ext.identifier = parse_identifier(parser, node);
-
-    if (!parser_consume(parser, TOKEN_COLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ':'");
-    }
-
-    node->stmt_ext.type = node_list_add(node->stmt_ext.type, parse_type(parser, node));
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_if(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_if\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_IF))
-    {
-        return parser_error(parser->curr, "expected 'if'");
-    }
-
-    Node *node = node_new(NODE_STMT_IF, parser->last);
-    node->parent = parent;
-
-    if (!parser_consume(parser, TOKEN_L_PAREN))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '('");
-    }
-
-    node->stmt_if.condition = parse_expr(parser, node);
-
-    if (!parser_consume(parser, TOKEN_R_PAREN))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ')'");
-    }
-
-    node->stmt_if.body = parse_stmt_block(parser, node);
-
-    return node;
-}
-
-Node *parse_stmt_or(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_or\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_OR))
-    {
-        return parser_error(parser->curr, "expected 'or'");
-    }
-
-    Node *node = node_new(NODE_STMT_OR, parser->last);
-    node->parent = parent;
-
-    if (parser_consume(parser, TOKEN_L_PAREN))
-    {
-        node->stmt_or.condition = parse_expr(parser, node);
-
-        if (!parser_consume(parser, TOKEN_R_PAREN))
-        {
-            node_free(node);
-            return parser_error(parser->curr, "expected ')'");
-        }
-    }
-
-    node->stmt_or.body = parse_stmt_block(parser, node);
-
-    return node;
-}
-
-Node *parse_stmt_for(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_for\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_FOR))
-    {
-        return parser_error(parser->curr, "expected 'for'");
-    }
-
-    Node *node = node_new(NODE_STMT_FOR, parser->last);
-    node->parent = parent;
-
-    if (parser_consume(parser, TOKEN_L_PAREN))
-    {
-        node->stmt_for.condition = parse_expr(parser, node);
-
-        if (!parser_consume(parser, TOKEN_R_PAREN))
-        {
-            node_free(node);
-            return parser_error(parser->curr, "expected ')'");
-        }
-    }
-
-    node->stmt_for.body = parse_stmt_block(parser, node);
-
-    return node;
-}
-
-Node *parse_stmt_brk(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_brk\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_BRK))
-    {
-        return parser_error(parser->curr, "expected 'brk'");
-    }
-
-    Node *node = node_new(NODE_STMT_BRK, parser->last);
-    node->parent = parent;
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_cnt(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_cnt\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_CNT))
-    {
-        return parser_error(parser->curr, "expected 'cnt'");
-    }
-
-    Node *node = node_new(NODE_STMT_CNT, parser->last);
-    node->parent = parent;
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_ret(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_ret\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_RET))
-    {
-        return parser_error(parser->curr, "expected 'ret'");
-    }
-
-    Node *node = node_new(NODE_STMT_RET, parser->last);
-    node->parent = parent;
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node->stmt_ret.value = parse_expr(parser, node);
-
-        if (!parser_consume(parser, TOKEN_SEMICOLON))
-        {
-            node_free(node);
-            return parser_error(parser->curr, "expected ';'");
-        }
-    }
-
-    return node;
-}
-
-Node *parse_stmt_asm(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_asm\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_KW_ASM))
-    {
-        return parser_error(parser->curr, "expected 'asm'");
-    }
-
-    Node *node = node_new(NODE_STMT_ASM, parser->last);
-    node->parent = parent;
-    node->stmt_asm.code = parse_lit_string(parser, node);
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_block(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_block\n");
-    }
-
-    if (!parser_consume(parser, TOKEN_L_BRACE))
-    {
-        return parser_error(parser->curr, "expected '{'");
-    }
-
-    Node *node = node_new(NODE_STMT_BLOCK, parser->last);
-    node->parent = parent;
-
-    while (!parser_match(parser, TOKEN_R_BRACE) && !parser_match(parser, TOKEN_EOF))
-    {
-        Node *stmt = parse_stmt(parser, node);
-        node->stmt_block.statements = node_list_add(node->stmt_block.statements, stmt);
-    }
-
-    if (!parser_consume(parser, TOKEN_R_BRACE))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected '}'");
-    }
-
-    return node;
-}
-
-Node *parse_stmt_expr(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_stmt_expr\n");
-    }
-
-    Node *node = parse_expr(parser, parent);
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON))
-    {
-        node_free(node);
-        return parser_error(parser->curr, "expected ';'");
-    }
-
-    return node;
-}
-
-Node *parse_expr_postfix(Parser *parser, Node *parent)
-{
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr_postfix\n");
-    }
-
-    Node *node = parse_expr_unary(parser, parent);
 
     while (true)
     {
         switch (parser->curr->kind)
         {
         case TOKEN_DOT:
-            node = parse_expr_member(parser, parent, node);
+            node = parse_expr_member(parser, node);
             break;
         case TOKEN_L_PAREN:
-            node = parse_expr_call(parser, parent, node);
+            node = parse_expr_call(parser, node);
             break;
         case TOKEN_L_BRACKET:
-            node = parse_expr_index(parser, parent, node);
+            node = parse_expr_index(parser, node);
             break;
         case TOKEN_COLON_COLON:
-            node = parse_expr_cast(parser, parent, node);
+            node = parse_expr_cast(parser, node);
             break;
         default:
             return node;
@@ -1175,167 +522,1203 @@ Node *parse_expr_postfix(Parser *parser, Node *parent)
     }
 }
 
-Node *parse_expr_grouping(Parser *parser, Node *parent)
+Node *parse_expr_grouping(Parser *parser)
 {
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr_grouping\n");
-    }
-
     if (!parser_consume(parser, TOKEN_L_PAREN))
     {
-        return parser_error(parser->curr, "expected '('");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '('");
     }
 
-    Node *node = parse_expr(parser, parent);
+    Node *node = parse_expr(parser);
+    if (node->kind == NODE_ERROR)
+    {
+        return node;
+    }
 
     if (!parser_consume(parser, TOKEN_R_PAREN))
     {
+        parser_advance(parser);
+
+        Node *error = parser_new_error(parser->last, "expected ')'");
         node_free(node);
-        return parser_error(parser->curr, "expected ')'");
+        return error;
     }
 
     return node;
 }
 
-Node *parse_expr_primary(Parser *parser, Node *parent)
+Node *parse_expr_primary(Parser *parser)
 {
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr_primary\n");
-    }
-
     switch (parser->curr->kind)
     {
     case TOKEN_IDENTIFIER:
-        return parse_identifier(parser, parent);
-    case TOKEN_CHARACTER:
-        return parse_lit_char(parser, parent);
-    case TOKEN_INT:
-        return parse_lit_int(parser, parent);
-    case TOKEN_FLOAT:
-        return parse_lit_float(parser, parent);
-    case TOKEN_STRING:
-        return parse_lit_string(parser, parent);
-    case TOKEN_KW_NEW:
-        return parse_expr_new(parser, parent);
+        return parse_identifier(parser);
+    case TOKEN_LIT_INT:
+        return parse_lit_int(parser);
+    case TOKEN_LIT_FLOAT:
+        return parse_lit_float(parser);
+    case TOKEN_LIT_CHAR:
+        return parse_lit_char(parser);
+    case TOKEN_LIT_STRING:
+        return parse_lit_string(parser);
     case TOKEN_L_PAREN:
-        return parse_expr_grouping(parser, parent);
+        return parse_expr_grouping(parser);
     default:
-        return parser_error(parser->curr, "expected primary expression");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected primary expression");
     }
 }
 
-Node *parse_expr(Parser *parser, Node *parent)
+Node *parse_expr(Parser *parser)
 {
-    if (parser->opt_verbose)
-    {
-        printf("[ PRSE ] parse_expr\n");
-    }
-
-    return parse_expr_binary(parser, parent, 0);
+    return parse_expr_binary(parser, 0);
 }
 
-Node *parse_type(Parser *parser, Node *parent)
+Node *parse_type_array(Parser *parser)
 {
-    if (parser->opt_verbose)
+    if (!parser_consume(parser, TOKEN_L_BRACKET))
     {
-        printf("[ PRSE ] parse_type\n");
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '['");
+    }
+    Node *node = node_new(NODE_TYPE_ARRAY);
+    node->token = token_copy(parser->last);
+
+    if (!parser_match(parser, TOKEN_R_BRACKET))
+    {
+        Node *node_expr = parse_expr(parser);
+        if (node_expr->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return parser_new_error(parser->last, "expected expression");
+        }
+        node_expr->parent = node;
+        node->data.type_array->size = node_expr;
     }
 
+    if (!parser_consume(parser, TOKEN_R_BRACKET))
+    {
+        parser_advance(parser);
+
+        Node *error = parser_new_error(parser->last, "expected ']'");
+        node_free(node);
+        return error;
+    }
+
+    Node *node_type = parse_type(parser);
+    if (node_type->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected type");
+    }
+    node_type->parent = node;
+    node->data.type_array->type = node;
+
+    return node;
+}
+
+Node *parse_type_pointer(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_STAR))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '*'");
+    }
+
+    Node *node = node_new(NODE_TYPE_POINTER);
+    node->token = token_copy(parser->last);
+
+    Node *type = parse_type(parser);
+    if (type->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected type");
+    }
+    type->parent = node;
+    node->data.type_pointer->type = type;
+
+    return node;
+}
+
+Node *parse_type_function(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'fun'");
+    }
+
+    Node *node = node_new(NODE_TYPE_FUN);
+    node->token = token_copy(parser->last);
+
+    if (!parser_consume(parser, TOKEN_L_PAREN))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '('");
+    }
+
+    while (!parser_match(parser, TOKEN_R_PAREN))
+    {
+        Node *parameter = parse_field(parser);
+        if (parameter->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return parameter;
+        }
+        parameter->parent = node;
+        node_list_add(&node->data.type_function->parameters, parameter);
+
+        if (!parser_consume(parser, TOKEN_COMMA))
+        {
+            break;
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_R_PAREN))
+    {
+        parser_advance(parser);
+
+        Node *error = parser_new_error(parser->last, "expected ')'");
+        node_free(node);
+        return error;
+    }
+
+    if (parser_consume(parser, TOKEN_COLON))
+    {
+        Node *node_type = parse_type(parser);
+        if (node_type->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return parser_new_error(parser->last, "expected type");
+        }
+        node_type->parent = node;
+        node->data.type_function->return_type = node_type;
+    }
+
+    return node;
+}
+
+Node *parse_type_struct(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'str'");
+    }
+
+    Node *node = node_new(NODE_TYPE_STR);
+    node->token = token_copy(parser->last);
+
+    if (!parser_consume(parser, TOKEN_L_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '{'");
+    }
+
+    node->data.type_struct->fields = node_list_new();
+
+    while (!parser_match(parser, TOKEN_R_BRACE))
+    {
+        Node *field = parse_field(parser);
+        if (field->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return field;
+        }
+        field->parent = node;
+        node_list_add(&node->data.type_struct->fields, field);
+
+        if (!parser_consume(parser, TOKEN_SEMICOLON))
+        {
+            parser_advance(parser);
+            node_free(node);
+            return parser_new_error(parser->last, "expected ';'");
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '}'");
+    }
+
+    return node;
+}
+
+Node *parse_type_union(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'uni'");
+    }
+
+    Node *node = node_new(NODE_TYPE_UNI);
+    node->token = token_copy(parser->last);
+
+    if (!parser_consume(parser, TOKEN_L_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '{'");
+    }
+
+    node->data.type_union->fields = node_list_new();
+
+    while (!parser_match(parser, TOKEN_R_BRACE))
+    {
+        Node *field = parse_field(parser);
+        if (field->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return field;
+        }
+        field->parent = node;
+        node_list_add(&node->data.type_union->fields, field);
+
+        if (!parser_consume(parser, TOKEN_SEMICOLON))
+        {
+            parser_advance(parser);
+            node_free(node);
+            return parser_new_error(parser->last, "expected ';'");
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '}'");
+    }
+
+    return node;
+}
+
+Node *parse_type(Parser *parser)
+{
     switch (parser->curr->kind)
     {
     case TOKEN_IDENTIFIER:
-        return parse_identifier(parser, parent);
+        char *token = lexer_raw_value(parser->lexer, parser->curr);
+        
+        if (strcmp(token, "fun") == 0)
+            return parse_type_function(parser);
+        if (strcmp(token, "str") == 0)
+            return parse_type_struct(parser);
+        if (strcmp(token, "uni") == 0)
+            return parse_type_union(parser);
+
+        return parse_identifier(parser);
     case TOKEN_L_BRACKET:
-        return parse_type_array(parser, parent);
+        return parse_type_array(parser);
     case TOKEN_STAR:
-        return parse_type_pointer(parser, parent);
-    case TOKEN_KW_FUN:
-        return parse_type_fun(parser, parent);
-    case TOKEN_KW_STR:
-        return parse_type_str(parser, parent);
-    case TOKEN_KW_UNI:
-        return parse_type_uni(parser, parent);
+        return parse_type_pointer(parser);
     default:
-        return parser_error(parser->curr, "expected type");
+        return parser_new_error(parser->curr, "expected type");
     }
 }
 
-Node *parse_stmt(Parser *parser, Node *parent)
+Node *parse_field(Parser *parser)
 {
-    if (parser->opt_verbose)
+    Node *node = node_new(NODE_FIELD);
+    node->token = token_copy(parser->last);
+
+    Node *node_identifier = parse_identifier(parser);
+    if (node_identifier->kind == NODE_ERROR)
     {
-        printf("[ PRSE ] parse_stmt\n");
+        node_free(node);
+        return node_identifier;
+    }
+    node_identifier->parent = node;
+    node->data.field->identifier = node_identifier;
+
+    if (!parser_consume(parser, TOKEN_COLON))
+    {
+        parser_advance(parser);
+
+        Node *error = parser_new_error(parser->last, "expected ':'");
+        node_free(node);
+        return error;
     }
 
-    Node *node;
-
-    switch (parser->curr->kind)
+    Node *node_type = parse_type(parser);
+    if (node_type->kind == NODE_ERROR)
     {
-    case TOKEN_KW_VAL:
-        node = parse_stmt_val(parser, parent);
-        break;
-    case TOKEN_KW_VAR:
-        node = parse_stmt_var(parser, parent);
-        break;
-    case TOKEN_KW_DEF:
-        node = parse_stmt_def(parser, parent);
-        break;
-    case TOKEN_KW_USE:
-        node = parse_stmt_use(parser, parent);
-        break;
-    case TOKEN_KW_FUN:
-        node = parse_stmt_fun(parser, parent);
-        break;
-    case TOKEN_KW_EXT:
-        node = parse_stmt_ext(parser, parent);
-        break;
-    case TOKEN_KW_IF:
-        node = parse_stmt_if(parser, parent);
-        break;
-    case TOKEN_KW_OR:
-        node = parse_stmt_or(parser, parent);
-        break;
-    case TOKEN_KW_FOR:
-        node = parse_stmt_for(parser, parent);
-        break;
-    case TOKEN_KW_BRK:
-        node = parse_stmt_brk(parser, parent);
-        break;
-    case TOKEN_KW_CNT:
-        node = parse_stmt_cnt(parser, parent);
-        break;
-    case TOKEN_KW_RET:
-        node = parse_stmt_ret(parser, parent);
-        break;
-    case TOKEN_KW_ASM:
-        node = parse_stmt_asm(parser, parent);
-        break;
-    case TOKEN_L_BRACE:
-        node = parse_stmt_block(parser, parent);
-        break;
-    default:
-        node = parse_stmt_expr(parser, parent);
-        break;
+        node_free(node);
+        return node_type;
+    }
+    node_type->parent = node;
+    node->data.field->type = node_type;
+
+    return node;
+}
+
+Node *parse_stmt_val(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
     }
 
-    if (parser->opt_verbose)
+    Node *node = node_new(NODE_STMT_VAL);
+    node->token = token_copy(parser->last);
+
+    Node *node_identifier = parse_identifier(parser);
+    if (node_identifier->kind == NODE_ERROR)
     {
-        printf("[ PRSE ] [ STMT ] %s\n", node_kind_string(node->kind));
+        node_free(node);
+        return node_identifier;
+    }
+    node_identifier->parent = node;
+    node->data.stmt_val->identifier = node_identifier;
+
+    if (!parser_consume(parser, TOKEN_COLON))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected ':'");
     }
 
-    if (node->kind == NODE_ERROR)
+    Node *node_type = parse_type(parser);
+    if (node_type->kind == NODE_ERROR)
     {
+        node_free(node);
+        return node_type;
+    }
+    node_type->parent = node;
+    node->data.stmt_val->type = node_type;
+
+    if (!parser_consume(parser, TOKEN_EQUAL))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '='");
+    }
+
+    Node *node_expr = parse_expr(parser);
+    if (node_expr->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_expr;
+    }
+    node_expr->parent = node;
+    node->data.stmt_val->initializer = node_expr;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_var(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_VAR);
+    node->token = token_copy(parser->last);
+
+    Node *node_identifier = parse_identifier(parser);
+    if (node_identifier->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_identifier;
+    }
+    node_identifier->parent = node;
+    node->data.stmt_var->identifier = node_identifier;
+
+    if (!parser_consume(parser, TOKEN_COLON))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected ':'");
+    }
+
+    Node *node_type = parse_type(parser);
+    if (node_type->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_type;
+    }
+    node_type->parent = node;
+    node->data.stmt_var->type = node_type;
+
+    if (parser_consume(parser, TOKEN_EQUAL))
+    {
+        Node *node_expr = parse_expr(parser);
+        if (node_expr->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return node_expr;
+        }
+        node_expr->parent = node;
+        node->data.stmt_var->initializer = node_expr;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_def(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_DEF);
+    node->token = token_copy(parser->last);
+
+    Node *node_identifier = parse_identifier(parser);
+    if (node_identifier->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_identifier;
+    }
+    node_identifier->parent = node;
+    node->data.stmt_def->identifier = node_identifier;
+
+    if (!parser_consume(parser, TOKEN_COLON))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected ':'");
+    }
+
+    Node *node_type = parse_type(parser);
+    if (node_type->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_type;
+    }
+    node_type->parent = node;
+    node->data.stmt_def->type = node_type;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_mod(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_MOD);
+    node->token = token_copy(parser->last);
+
+    Node *node_module_path = parse_module_path(parser);
+    if (node_module_path->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_module_path;
+    }
+    node_module_path->parent = node;
+    node->data.stmt_mod->module_path = node_module_path;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_use(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_USE);
+    node->token = token_copy(parser->last);
+
+    if (parser_peek(parser, TOKEN_COLON))
+    {
+        Node *node_identifier = parse_identifier(parser);
+        if (node_identifier->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return node_identifier;
+        }
+        node_identifier->parent = node;
+        node->data.stmt_use->alias = node_identifier;
+
         parser_advance(parser);
     }
 
+    Node *node_module_path = parse_module_path(parser);
+    if (node_module_path->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_module_path;
+    }
+    node_module_path->parent = node;
+    node->data.stmt_use->module_path = node_module_path;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
     return node;
 }
 
-Node *parser_parse(Parser *parser)
+Node *parse_stmt_str(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_STR);
+    node->token = token_copy(parser->last);
+
+    Node *node_identifier = parse_identifier(parser);
+    if (node_identifier->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_identifier;
+    }
+    node_identifier->parent = node;
+    node->data.stmt_str->identifier = node_identifier;
+
+    if (!parser_consume(parser, TOKEN_L_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '{'");
+    }
+
+    node->data.stmt_str->fields = node_list_new();
+
+    while (!parser_match(parser, TOKEN_R_BRACE))
+    {
+        Node *field = parse_field(parser);
+        if (field->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return field;
+        }
+        field->parent = node;
+        node_list_add(&node->data.stmt_str->fields, field);
+
+        if (!parser_consume(parser, TOKEN_SEMICOLON))
+        {
+            parser_advance(parser);
+            node_free(node);
+            return parser_new_error(parser->last, "expected ';'");
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '}'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_uni(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_UNI);
+    node->token = token_copy(parser->last);
+
+    Node *node_identifier = parse_identifier(parser);
+    if (node_identifier->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_identifier;
+    }
+    node_identifier->parent = node;
+    node->data.stmt_uni->identifier = node_identifier;
+
+    if (!parser_consume(parser, TOKEN_L_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '{'");
+    }
+
+    node->data.stmt_uni->fields = node_list_new();
+
+    while (!parser_match(parser, TOKEN_R_BRACE))
+    {
+        Node *field = parse_field(parser);
+        if (field->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return field;
+        }
+        field->parent = node;
+        node_list_add(&node->data.stmt_uni->fields, field);
+
+        if (!parser_consume(parser, TOKEN_SEMICOLON))
+        {
+            parser_advance(parser);
+            node_free(node);
+            return parser_new_error(parser->last, "expected ';'");
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '}'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_fun(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_FUN);
+    node->token = token_copy(parser->last);
+
+    Node *node_identifier = parse_identifier(parser);
+    if (node_identifier->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_identifier;
+    }
+    node_identifier->parent = node;
+    node->data.stmt_fun->identifier = node_identifier;
+
+    if (!parser_consume(parser, TOKEN_L_PAREN))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '('");
+    }
+
+    while (!parser_match(parser, TOKEN_R_PAREN))
+    {
+        Node *parameter = parse_field(parser);
+        if (parameter->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return parameter;
+        }
+        parameter->parent = node;
+        node_list_add(&node->data.stmt_fun->parameters, parameter);
+
+        if (!parser_consume(parser, TOKEN_COMMA))
+        {
+            break;
+        }
+    }
+
+    if (!parser_consume(parser, TOKEN_R_PAREN))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected ')'");
+    }
+
+    if (!parser_consume(parser, TOKEN_COLON))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected ':'");
+    }
+
+    Node *node_type = parse_type(parser);
+    if (node_type->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_type;
+    }
+    node_type->parent = node;
+    node->data.stmt_fun->return_type = node_type;
+
+    Node *node_body = parse_stmt_block(parser);
+    if (node_body->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_body;
+    }
+    node_body->parent = node;
+    node->data.stmt_fun->body = node_body;
+
+    return node;
+}
+
+Node *parse_stmt_ext(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_EXT);
+    node->token = token_copy(parser->last);
+
+    Node *node_identifier = parse_identifier(parser);
+    if (node_identifier->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_identifier;
+    }
+    node_identifier->parent = node;
+    node->data.stmt_ext->identifier = node_identifier;
+
+    if (!parser_consume(parser, TOKEN_COLON))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected ':'");
+    }
+
+    Node *node_type = parse_type(parser);
+    if (node_type->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_type;
+    }
+    node_type->parent = node;
+    node->data.stmt_ext->type = node_type;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_if(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'if'");
+    }
+
+    Node *node = node_new(NODE_STMT_IF);
+    node->token = token_copy(parser->last);
+
+    if (!parser_consume(parser, TOKEN_L_PAREN))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '('");
+    }
+
+    Node *node_expr = parse_expr(parser);
+    if (node_expr->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_expr;
+    }
+    node_expr->parent = node;
+    node->data.stmt_if->condition = node_expr;
+
+    if (!parser_consume(parser, TOKEN_R_PAREN))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected ')'");
+    }
+
+    Node *node_body = parse_stmt_block(parser);
+    if (node_body->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_body;
+    }
+    node_body->parent = node;
+    node->data.stmt_if->body = node_body;
+
+    return node;
+}
+
+Node *parse_stmt_or(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'or'");
+    }
+
+    Node *node = node_new(NODE_STMT_OR);
+    node->token = token_copy(parser->last);
+
+    if (parser_consume(parser, TOKEN_L_PAREN))
+    {
+        Node *node_expr = parse_expr(parser);
+        if (node_expr->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return node_expr;
+        }
+        node_expr->parent = node;
+        node->data.stmt_or->condition = node_expr;
+
+        if (!parser_consume(parser, TOKEN_R_PAREN))
+        {
+            parser_advance(parser);
+            node_free(node);
+            return parser_new_error(parser->last, "expected ')'");
+        }
+    }
+
+    Node *node_body = parse_stmt_block(parser);
+    if (node_body->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_body;
+    }
+    node_body->parent = node;
+    node->data.stmt_or->body = node_body;
+
+    return node;
+}
+
+Node *parse_stmt_for(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected identifier");
+    }
+
+    Node *node = node_new(NODE_STMT_FOR);
+    node->token = token_copy(parser->last);
+
+    if (parser_consume(parser, TOKEN_L_PAREN))
+    {
+        Node *node_expr = parse_expr(parser);
+        if (node_expr->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return node_expr;
+        }
+        node_expr->parent = node;
+        node->data.stmt_for->condition = node_expr;
+
+        if (!parser_consume(parser, TOKEN_R_PAREN))
+        {
+            parser_advance(parser);
+            node_free(node);
+            return parser_new_error(parser->last, "expected ')'");
+        }
+    }
+
+    Node *node_body = parse_stmt_block(parser);
+    if (node_body->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return node_body;
+    }
+    node_body->parent = node;
+    node->data.stmt_for->body = node_body;
+
+    return node;
+}
+
+Node *parse_stmt_break(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'break'");
+    }
+
+    Node *node = node_new(NODE_STMT_BRK);
+    node->token = token_copy(parser->last);
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_continue(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'continue'");
+    }
+
+    Node *node = node_new(NODE_STMT_CNT);
+    node->token = token_copy(parser->last);
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_return(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'return'");
+    }
+
+    Node *node = node_new(NODE_STMT_RET);
+    node->token = token_copy(parser->last);
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        Node *node_expr = parse_expr(parser);
+        if (node_expr->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return node_expr;
+        }
+        node_expr->parent = node;
+        node->data.stmt_return->value = node_expr;
+
+        if (!parser_consume(parser, TOKEN_SEMICOLON))
+        {
+            parser_advance(parser);
+            node_free(node);
+            return parser_new_error(parser->last, "expected ';'");
+        }
+    }
+
+    return node;
+}
+
+Node *parse_stmt_asm(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_IDENTIFIER))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected 'asm'");
+    }
+
+    Node *node = node_new(NODE_STMT_ASM);
+    node->token = token_copy(parser->last);
+
+    if (!parser_consume(parser, TOKEN_LIT_STRING))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected string literal");
+    }
+
+    Node *code = node_new(NODE_LIT_STRING);
+    code->data.lit_string->value = lexer_raw_value(parser->lexer, parser->last);
+    code->token = token_copy(parser->last);
+
+    node->data.stmt_asm->code = code;
+    node->data.stmt_asm->code->parent = node;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_block(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_L_BRACE))
+    {
+        parser_advance(parser);
+        return parser_new_error(parser->last, "expected '{'");
+    }
+
+    Node *node = node_new(NODE_STMT_BLOCK);
+    node->token = token_copy(parser->last);
+    node->data.stmt_block->statements = node_list_new();
+
+    while (!parser_match(parser, TOKEN_R_BRACE))
+    {
+        Node *stmt = parse_stmt(parser);
+        if (stmt->kind == NODE_ERROR)
+        {
+            node_free(node);
+            return stmt;
+        }
+        stmt->parent = node;
+        node_list_add(&node->data.stmt_block->statements, stmt);
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE))
+    {
+        parser_advance(parser);
+        node_free(node);
+        return parser_new_error(parser->last, "expected '}'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt_expr(Parser *parser)
+{
+    Node *node = node_new(NODE_STMT_EXPR);
+    node->token = token_copy(parser->curr);
+
+    Node *expr = parse_expr(parser);
+    if (expr->kind == NODE_ERROR)
+    {
+        node_free(node);
+        return expr;
+    }
+    expr->parent = node;
+    node->data.stmt_expr->expression = expr;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON))
+    {
+        node_free(node);
+        return parser_new_error(parser->last, "expected ';'");
+    }
+
+    return node;
+}
+
+Node *parse_stmt(Parser *parser)
+{
+    if (parser->curr->kind == TOKEN_IDENTIFIER)
+    {
+        char *raw = lexer_raw_value(parser->lexer, parser->curr);
+
+        if (strcmp(raw, "val") == 0)
+        {
+            free(raw);
+            return parse_stmt_val(parser);
+        }
+        else if (strcmp(raw, "var") == 0)
+        {
+            free(raw);
+            return parse_stmt_var(parser);
+        }
+        else if (strcmp(raw, "def") == 0)
+        {
+            free(raw);
+            return parse_stmt_def(parser);
+        }
+        else if (strcmp(raw, "mod") == 0)
+        {
+            free(raw);
+            return parse_stmt_mod(parser);
+        }
+        else if (strcmp(raw, "use") == 0)
+        {
+            free(raw);
+            return parse_stmt_use(parser);
+        }
+        else if (strcmp(raw, "str") == 0)
+        {
+            free(raw);
+            return parse_stmt_str(parser);
+        }
+        else if (strcmp(raw, "uni") == 0)
+        {
+            free(raw);
+            return parse_stmt_uni(parser);
+        }
+        else if (strcmp(raw, "fun") == 0)
+        {
+            free(raw);
+            return parse_stmt_fun(parser);
+        }
+        else if (strcmp(raw, "ext") == 0)
+        {
+            free(raw);
+            return parse_stmt_ext(parser);
+        }
+        else if (strcmp(raw, "if") == 0)
+        {
+            free(raw);
+            return parse_stmt_if(parser);
+        }
+        else if (strcmp(raw, "or") == 0)
+        {
+            free(raw);
+            return parse_stmt_or(parser);
+        }
+        else if (strcmp(raw, "for") == 0)
+        {
+            free(raw);
+            return parse_stmt_for(parser);
+        }
+        else if (strcmp(raw, "brk") == 0)
+        {
+            free(raw);
+            return parse_stmt_break(parser);
+        }
+        else if (strcmp(raw, "cnt") == 0)
+        {
+            free(raw);
+            return parse_stmt_continue(parser);
+        }
+        else if (strcmp(raw, "ret") == 0)
+        {
+            free(raw);
+            return parse_stmt_return(parser);
+        }
+        else if (strcmp(raw, "asm") == 0)
+        {
+            free(raw);
+            return parse_stmt_asm(parser);
+        }
+    }
+
+    return parse_stmt_expr(parser);
+}
+
+Node *parser_parse(Parser *parser, char *path)
 {
     parser_advance(parser);
 
-    return parse_program(parser);
+    return parse_file(parser, path);
 }

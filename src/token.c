@@ -1,65 +1,49 @@
-#include <stdlib.h>
-#include <string.h>
-
 #include "token.h"
 
-Token *token_new(TokenKind kind, int pos, char *raw)
+#include <stdlib.h>
+
+Token *token_new(TokenKind kind, int pos, int len)
 {
     Token *token = calloc(1, sizeof(Token));
     token->kind = kind;
     token->pos = pos;
-    token->raw = strdup(raw);
-    if (token->raw == NULL)
-    {
-        token->kind = TOKEN_ERROR;
-        token->value.error = strdup("failed to allocate token raw");
-    }
+    token->len = len;
 
     return token;
 }
 
 void token_free(Token *token)
 {
-    if (token == NULL)
-    {
-        return;
-    }
-
-    free(token->raw);
-    token->raw = NULL;
-
-    if (token->kind == TOKEN_ERROR)
-    {
-        free(token->value.error);
-        token->value.error = NULL;
-    }
-
     free(token);
 }
 
-char *token_kind_string(TokenKind kind)
+Token *token_copy(Token *token)
+{
+    return token_new(token->kind, token->pos, token->len);
+}
+
+char *token_kind_to_string(TokenKind kind)
 {
     switch (kind)
     {
+    case TOKEN_LIST_ERROR:
+        return "LIST_ERROR";
     case TOKEN_ERROR:
         return "ERROR";
     case TOKEN_EOF:
         return "EOF";
     case TOKEN_COMMENT:
         return "COMMENT";
-
     case TOKEN_IDENTIFIER:
         return "IDENTIFIER";
-
-    case TOKEN_INT:
-        return "INT";
-    case TOKEN_FLOAT:
-        return "FLOAT";
-    case TOKEN_CHARACTER:
-        return "CHARACTER";
-    case TOKEN_STRING:
-        return "STRING";
-
+    case TOKEN_LIT_INT:
+        return "LIT_INT";
+    case TOKEN_LIT_FLOAT:
+        return "LIT_FLOAT";
+    case TOKEN_LIT_CHAR:
+        return "LIT_CHAR";
+    case TOKEN_LIT_STRING:
+        return "LIT_STRING";
     case TOKEN_L_PAREN:
         return "L_PAREN";
     case TOKEN_R_PAREN:
@@ -130,40 +114,7 @@ char *token_kind_string(TokenKind kind)
         return "PIPE_PIPE";
     case TOKEN_COLON_COLON:
         return "COLON_COLON";
-
-    case TOKEN_KW_VAL:
-        return "KW_VAL";
-    case TOKEN_KW_VAR:
-        return "KW_VAR";
-    case TOKEN_KW_DEF:
-        return "KW_DEF";
-    case TOKEN_KW_USE:
-        return "KW_USE";
-    case TOKEN_KW_FUN:
-        return "KW_FUN";
-    case TOKEN_KW_NEW:
-        return "KW_NEW";
-    case TOKEN_KW_STR:
-        return "KW_STR";
-    case TOKEN_KW_UNI:
-        return "KW_UNI";
-    case TOKEN_KW_IF:
-        return "KW_IF";
-    case TOKEN_KW_OR:
-        return "KW_OR";
-    case TOKEN_KW_FOR:
-        return "KW_FOR";
-    case TOKEN_KW_BRK:
-        return "KW_BRK";
-    case TOKEN_KW_CNT:
-        return "KW_CNT";
-    case TOKEN_KW_RET:
-        return "KW_RET";
-    case TOKEN_KW_EXT:
-        return "KW_EXT";
-    case TOKEN_KW_ASM:
-        return "KW_ASM";
     default:
-        return "UNKNOWN";
+        return "INVALID";
     }
 }

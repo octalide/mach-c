@@ -7,11 +7,6 @@
 Lexer *lexer_new(char *source)
 {
     Lexer *lexer = calloc(1, sizeof(Lexer));
-    if (lexer == NULL)
-    {
-        return NULL;
-    }
-
     lexer->source = strdup(source);
     lexer->pos = 0;
 
@@ -20,6 +15,12 @@ Lexer *lexer_new(char *source)
 
 void lexer_free(Lexer *lexer)
 {
+    if (lexer == NULL)
+    {
+        return;
+    }
+
+    free(lexer->source);
     lexer->source = NULL;
 
     free(lexer);
@@ -522,7 +523,7 @@ Token *lexer_next(Lexer *lexer)
 
     switch (lexer_current(lexer))
     {
-    case '#':
+    case '#':;
         int start = lexer->pos;
         while (!lexer_at_end(lexer) && lexer_current(lexer) != '\n')
         {

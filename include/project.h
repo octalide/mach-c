@@ -27,8 +27,9 @@ typedef struct File
     char *path;
 
     char *source;
-    Lexer *lexer;
     Parser *parser;
+    
+    // file ast represents the node structure of a single file
     Node *ast;
 } File;
 
@@ -36,9 +37,9 @@ typedef struct Module
 {
     char *name;
 
-    File **files;
-
-    SymbolTable *symbols;
+    // module ast strips the program node off of each file ast and combines them
+    //   into one ast for the whole module
+    Node *ast;
 } Module;
 
 typedef enum ProjectType
@@ -65,8 +66,11 @@ typedef struct Project
     Target *targets;
     int target_count;
 
+    File **files;
     Module **modules;
-    SymbolTable *symbols;
+
+    // project symbol table contains all symbols for the entire project
+    SymbolTable *symbol_table;
 } Project;
 
 File *file_read(char *path);
@@ -80,8 +84,8 @@ void project_free(Project *project);
 
 void file_parse(File *file);
 
-void module_add_file(Module *module, File *file);
-void module_add_symbol(Module *module, Symbol *symbol);
+char *module_parts_join(char **parts);
+int module_add_file_ast(Module *module, File *file);
 
 char *project_resolve_macros(Project *project, char *str);
 
@@ -94,7 +98,7 @@ void project_discover_files(Project *project);
 
 void project_parse_all(Project *project);
 int project_print_parse_errors(Project *project);
-
+int project_modularize_files(Project *project);
 int project_analysis(Project *project);
 
 #endif

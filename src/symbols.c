@@ -19,10 +19,14 @@ void symbol_table_free(SymbolTable *table)
         return;
     }
 
-    for (size_t i = 0; table->symbols[i] != NULL; i++)
+    if (table->symbols != NULL)
     {
-        symbol_free(table->symbols[i]);
+        for (size_t i = 0; table->symbols[i] != NULL; i++)
+        {
+            symbol_free(table->symbols[i]);
+        }
     }
+
     free(table->symbols);
     table->symbols = NULL;
 

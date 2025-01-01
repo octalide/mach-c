@@ -8,7 +8,11 @@
 typedef enum NodeKind
 {
     NODE_ERROR,      // error
-    NODE_PROGRAM,    // root node
+    NODE_PROGRAM,    // program root node
+    NODE_MODULE,     // module root node
+    NODE_FILE,       // file root node
+
+    NODE_MODULE_PATH, // module path
 
     NODE_IDENTIFIER, // identifier
 
@@ -23,7 +27,6 @@ typedef enum NodeKind
     NODE_EXPR_CALL,   // postfix function call
     NODE_EXPR_INDEX,  // postfix array index
     NODE_EXPR_CAST,   // postfix type cast
-    NODE_EXPR_NEW,    // object definition (struct, union, array)
     NODE_EXPR_UNARY,  // unary expression
     NODE_EXPR_BINARY, // binary expression
 
@@ -39,7 +42,10 @@ typedef enum NodeKind
     NODE_STMT_VAL, // value declaration
     NODE_STMT_VAR, // variable declaration
     NODE_STMT_DEF, // type definition
+    NODE_STMT_MOD, // module specification
     NODE_STMT_USE, // value declaration
+    NODE_STMT_STR, // struct declaration
+    NODE_STMT_UNI, // union declaration
     NODE_STMT_FUN, // function declaration
     NODE_STMT_EXT, // external type declaration
     NODE_STMT_IF,  // if statement
@@ -61,8 +67,28 @@ typedef struct NodeError
 
 typedef struct NodeProgram
 {
-    struct Node **statements;
+    char *name;
+    struct Node **modules;
 } NodeProgram;
+
+typedef struct NodeModule
+{
+    char *name;
+    struct Node **files;
+} NodeModule;
+
+typedef struct NodeFile
+{
+    char *path;
+    struct Parser *parser;
+
+    struct Node **statements;
+} NodeFile;
+
+typedef struct NodeModulePath
+{
+    char **parts;
+} NodeModulePath;
 
 typedef struct NodeIdentifier
 {
@@ -112,11 +138,6 @@ typedef struct NodeExprCast
     struct Node *target;
     struct Node *type;
 } NodeExprCast;
-
-typedef struct NodeExprNew
-{
-    struct Node **initializers;
-} NodeExprNew;
 
 typedef struct NodeExprUnary
 {
@@ -184,11 +205,28 @@ typedef struct NodeStmtDef
     struct Node *type;
 } NodeStmtDef;
 
+typedef struct NodeStmtMod
+{
+    struct Node *module_path;
+} NodeStmtMod;
+
 typedef struct NodeStmtUse
 {
     struct Node *alias;
-    struct Node **module_parts;
+    struct Node *module_path;
 } NodeStmtUse;
+
+typedef struct NodeStmtStruct
+{
+    struct Node *identifier;
+    struct Node **fields;
+} NodeStmtStruct;
+
+typedef struct NodeStmtUnion
+{
+    struct Node *identifier;
+    struct Node **fields;
+} NodeStmtUnion;
 
 typedef struct NodeStmtFun
 {
@@ -257,10 +295,13 @@ typedef struct Node
 
     struct Node *parent;
 
-    union data
+    union
     {
         NodeError *error;
         NodeProgram *program;
+        NodeModule *module;
+        NodeFile *file;
+        NodeModulePath *module_path;
         NodeIdentifier *identifier;
         NodeLitInt *lit_int;
         NodeLitFloat *lit_float;
@@ -270,7 +311,6 @@ typedef struct Node
         NodeExprCall *expr_call;
         NodeExprIndex *expr_index;
         NodeExprCast *expr_cast;
-        NodeExprNew *expr_new;
         NodeExprUnary *expr_unary;
         NodeExprBinary *expr_binary;
         NodeTypeArray *type_array;
@@ -282,7 +322,10 @@ typedef struct Node
         NodeStmtVal *stmt_val;
         NodeStmtVar *stmt_var;
         NodeStmtDef *stmt_def;
+        NodeStmtMod *stmt_mod;
         NodeStmtUse *stmt_use;
+        NodeStmtStruct *stmt_str;
+        NodeStmtUnion *stmt_uni;
         NodeStmtFun *stmt_fun;
         NodeStmtExt *stmt_ext;
         NodeStmtIf *stmt_if;
@@ -308,5 +351,6 @@ void node_list_add(Node ***list, Node *node);
 void node_list_free(Node **list);
 
 void node_walk(void *context, Node *node, void (*callback)(void *context, Node *node, int depth));
+Node *node_find_parent(Node *node, NodeKind kind);
 
 #endif

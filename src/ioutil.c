@@ -96,7 +96,6 @@ char *path_join(char *a, char *b)
     int len_a = strlen(a);
     int len_b = strlen(b);
     char *joined = malloc(len_a + len_b + 2);
-
     strcpy(joined, a);
 
 #ifdef _WIN32

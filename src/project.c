@@ -7,7 +7,7 @@
 File *file_read(char *path)
 {
     File *file = calloc(sizeof(File), 1);
-    file->path = path;
+    file->path = strdup(path);
 
     file->source = read_file(path);
     if (file->source == NULL)
@@ -16,8 +16,7 @@ File *file_read(char *path)
         return NULL;
     }
 
-    file->lexer = lexer_new(file->source);
-    file->parser = parser_new(file->lexer);
+    file->parser = parser_new(lexer_new(file->source));
     file->ast = NULL;
 
     return file;
@@ -33,12 +32,6 @@ void file_free(File *file)
     free(file->path);
     file->path = NULL;
 
-    free(file->source);
-    file->source = NULL;
-
-    lexer_free(file->lexer);
-    file->lexer = NULL;
-
     parser_free(file->parser);
     file->parser = NULL;
 
@@ -52,8 +45,7 @@ Module *module_new()
 {
     Module *module = calloc(sizeof(Module), 1);
     module->name = NULL;
-    module->files = NULL;
-    module->symbols = NULL;
+    module->ast = NULL;
 
     return module;
 }
@@ -68,15 +60,8 @@ void module_free(Module *module)
     free(module->name);
     module->name = NULL;
 
-    for (size_t i = 0; module->files[i] != NULL; i++)
-    {
-        file_free(module->files[i]);
-    }
-    free(module->files);
-    module->files = NULL;
-
-    symbol_table_free(module->symbols);
-    module->symbols = NULL;
+    node_free(module->ast);
+    module->ast = NULL;
 
     free(module);
 }
@@ -92,8 +77,14 @@ Project *project_new()
     project->path_lib = NULL;
     project->path_out = NULL;
     project->path_src = NULL;
-    project->modules = NULL;
-    project->symbols = NULL;
+
+    project->files = calloc(sizeof(File *), 2);
+    project->files[0] = NULL;
+
+    project->modules = calloc(sizeof(Module *), 2);
+    project->modules[0] = NULL;
+
+    project->symbol_table = symbol_table_new();
 
     return project;
 }
@@ -126,48 +117,37 @@ void project_free(Project *project)
     free(project->path_src);
     project->path_src = NULL;
 
+    free(project->entrypoint);
+    project->entrypoint = NULL;
+
+    free(project->targets);
+    project->targets = NULL;
+
     for (size_t i = 0; project->modules[i] != NULL; i++)
     {
         module_free(project->modules[i]);
+        project->modules[i] = NULL;
     }
     free(project->modules);
     project->modules = NULL;
 
-    symbol_table_free(project->symbols);
-    project->symbols = NULL;
+    for (size_t i = 0; project->files[i] != NULL; i++)
+    {
+        file_free(project->files[i]);
+        project->files[i] = NULL;
+    }
+    free(project->files);
+    project->files = NULL;
+
+    symbol_table_free(project->symbol_table);
+    project->symbol_table = NULL;
 
     free(project);
 }
 
 void file_parse(File *file)
 {
-    file->ast = parser_parse(file->parser);
-}
-
-void module_add_file(Module *module, File *file)
-{
-    if (module->files == NULL)
-    {
-        module->files = calloc(sizeof(File *), 2);
-        module->files[0] = file;
-        module->files[1] = NULL;
-        return;
-    }
-
-    size_t i = 0;
-    while (module->files[i] != NULL)
-    {
-        i++;
-    }
-
-    module->files = realloc(module->files, sizeof(File *) * (i + 2));
-    module->files[i] = file;
-    module->files[i + 1] = NULL;
-}
-
-void module_add_symbol(Module *module, Symbol *symbol)
-{
-    symbol_table_add(module->symbols, symbol);
+    file->ast = parser_parse(file->parser, file->path);
 }
 
 char *str_replace(char *orig, char *rep, char *with)
@@ -210,6 +190,53 @@ char *str_replace(char *orig, char *rep, char *with)
     strcpy(tmp, orig);
 
     return result;
+}
+
+char *module_parts_join(char **parts)
+{
+    if (parts == NULL)
+    {
+        return NULL;
+    }
+
+    char *path = NULL;
+    for (size_t i = 0; parts[i] != NULL; i++)
+    {
+        if (path == NULL)
+        {
+            path = strdup(parts[i]);
+        }
+        else
+        {
+            path = str_replace(path, ".", parts[i]);
+        }
+    }
+
+    return path;
+}
+
+int module_add_file_ast(Module *module, File *file)
+{
+    if (module->ast == NULL)
+    {
+        module->ast = node_new(NODE_MODULE);
+        module->ast->data.module->name = strdup(module->name);
+    }
+
+    if (file->ast == NULL)
+    {
+        // file ast cannot be null
+        return 1;
+    }
+
+    if (module->ast->data.module->files == NULL)
+    {
+        module->ast->data.module->files = node_list_new();
+    }
+
+    node_list_add(&module->ast->data.module->files, file->ast);
+
+    return 0;
 }
 
 // resolve macros in paths. macros available are:
@@ -274,57 +301,31 @@ void project_add_module(Project *project, Module *module)
     project->modules[i + 1] = NULL;
 }
 
-// module path is the local path of the file's directory relative to the project path.
-// separated by a dot delimiter.
-// build this module path then try to find the module. if it does not exist,
-//   create it.
 void project_add_file(Project *project, File *file)
 {
-    char *path_rel = path_relative(project->path_project, file->path);
-    if (path_rel == NULL)
+    if (project->files == NULL)
     {
-        printf("error: could not determine relative path for file: %s\n", file->path);
-        return;
+        project->files = calloc(sizeof(File *), 2);
+        project->files[0] = file;
+        project->files[1] = NULL;
     }
-
-    // strip the file off path_rel and exchange slashes for dots
-    char *module_name = path_dirname(path_rel);
-    for (size_t i = 0; module_name[i] != '\0'; i++)
+    else
     {
-        if (module_name[i] == '/')
+        size_t i = 0;
+        while (project->files[i] != NULL)
         {
-            module_name[i] = '.';
+            i++;
         }
 
-        if (module_name[i] == '\\')
-        {
-            module_name[i] = '.';
-        }
+        project->files = realloc(project->files, sizeof(File *) * (i + 2));
+        project->files[i] = file;
+        project->files[i + 1] = NULL;
     }
-
-    // if module name is ".", change to "src"
-    if (strcmp(module_name, ".") == 0)
-    {
-        module_name = project->name;
-    }
-
-    Module *module = project_find_module(project, module_name);
-    if (module == NULL)
-    {
-        module = module_new();
-        module->name = module_name;
-        module->files = NULL;
-        module->symbols = symbol_table_new();
-
-        project_add_module(project, module);
-    }
-
-    module_add_file(module, file);
 }
 
 void project_add_symbol(Project *project, Symbol *symbol)
 {
-    symbol_table_add(project->symbols, symbol);
+    symbol_table_add(project->symbol_table, symbol);
 }
 
 void project_discover_files(Project *project)
@@ -344,7 +345,9 @@ void project_discover_files(Project *project)
             continue;
         }
 
-        File *file = file_read(path_join(project->path_src, files[i]));
+        char *joined = path_join(project->path_src, files[i]);
+        File *file = file_read(joined);
+        free(joined);
         if (file == NULL)
         {
             printf("error: could not read file: %s\n", files[i]);
@@ -362,29 +365,31 @@ void project_discover_files(Project *project)
         printf("  found file: %s\n", files[i]);
         project_add_file(project, file);
     }
+
+    for (size_t i = 0; files[i] != NULL; i++)
+    {
+        free(files[i]);
+    }
+    free(files);
 }
 
 void project_parse_all(Project *project)
 {
-    if (project->modules == NULL)
+    if (project->files == NULL)
     {
         return;
     }
 
-    for (size_t i = 0; project->modules[i] != NULL; i++)
+    for (size_t i = 0; project->files[i] != NULL; i++)
     {
-        for (size_t j = 0; project->modules[i]->files[j] != NULL; j++)
-        {
-            printf("  parsing file: %s\n", project->modules[i]->files[j]->path);
-            file_parse(project->modules[i]->files[j]);
-        }
+        printf("  parsing file: %s\n", project->files[i]->path);
+        file_parse(project->files[i]);
     }
 }
 
 typedef struct ParserErrorCBContext
 {
     Project *project;
-    Module *module;
     File *file;
 
     int count_errors;
@@ -395,38 +400,94 @@ void project_print_parse_errors_cb(void *context, Node *node, int depth)
     ParserErrorCBContext *ctx = context;
     if (node->kind == NODE_ERROR)
     {
-        parser_print_error(ctx->file->parser, node, ctx->file->path);
+        ctx->count_errors++;
+        parser_print_error(ctx->file->parser, node);
     }
 }
 
 int project_print_parse_errors(Project *project)
 {
-    if (project->modules == NULL)
+    if (project->files == NULL)
     {
         return 0;
     }
 
     int count_errors = 0;
 
-    for (size_t i = 0; project->modules[i] != NULL; i++)
+    for (size_t i = 0; project->files[i] != NULL; i++)
     {
-        for (size_t j = 0; project->modules[i]->files[j] != NULL; j++)
+        if (project->files[i]->ast == NULL)
         {
-            if (project->modules[i]->files[j]->ast == NULL)
-            {
-                printf("error: could not parse file: %s\n", project->modules[i]->files[j]->path);
-                continue;
-            }
-
-            ParserErrorCBContext *ctx = calloc(sizeof(ParserErrorCBContext), 1);
-            ctx->project = project;
-            ctx->module = project->modules[i];
-            ctx->file = project->modules[i]->files[j];
-
-            node_walk(ctx, project->modules[i]->files[j]->ast, project_print_parse_errors_cb);
-
-            count_errors += ctx->count_errors;
+            printf("error: could not parse file: %s\n", project->files[i]->path);
+            continue;
         }
+
+        ParserErrorCBContext *ctx = calloc(sizeof(ParserErrorCBContext), 1);
+        ctx->project = project;
+        ctx->file = project->files[i];
+
+        node_walk(ctx, project->files[i]->ast, project_print_parse_errors_cb);
+
+        count_errors += ctx->count_errors;
+    }
+
+    return count_errors;
+}
+
+int project_modularize_files(Project *project)
+{
+    int count_errors = 0;
+
+    for (size_t i = 0; project->files[i] != NULL; i++)
+    {
+        if (project->files[i]->ast == NULL)
+        {
+            printf("error: file ast is NULL: %s\n", project->files[i]->path);
+            continue;
+        }
+
+        // discover file module from `mod` node declared at start of file.
+        // the module declaration statement has two rules:
+        // - it must be the first statement in the file
+        // - it must be the only module statement in the file
+        // use these two rules to locate it and build a module path, then find
+        // the module or create it based on the path. Note that, unlike other
+        // languages, a file's module is NOT dependent on it's location on disk.
+        Node *module_stmt = project->files[i]->ast->data.file->statements[0];
+        if (module_stmt->kind != NODE_STMT_MOD)
+        {
+            printf("error: file does not start with module declaration: %s\n", project->files[i]->path);
+            count_errors++;
+            continue;
+        }
+
+        char *module_path = module_parts_join(module_stmt->data.stmt_mod->module_path->data.module_path->parts);
+        if (module_path == NULL)
+        {
+            printf("error: could not build module path: %s\n", project->files[i]->path);
+            count_errors++;
+            continue;
+        }
+
+        Module *module = project_find_module(project, module_path);
+        if (module == NULL)
+        {
+            module = module_new();
+            module->name = strdup(module_path);
+            project_add_module(project, module);
+        }
+
+        int result = module_add_file_ast(module, project->files[i]);
+        if (result != 0)
+        {
+            printf("error: could not add file to module: %s\n", project->files[i]->path);
+            count_errors++;
+            continue;
+        }
+
+        printf("  modularized file: %s -> %s\n", project->files[i]->path, module_path);
+
+        free(module_path);
     }
 
     return count_errors;
@@ -440,18 +501,6 @@ int project_analysis(Project *project)
     }
 
     int count_errors = 0;
-
-    for (size_t i = 0; project->modules[i] != NULL; i++)
-    {
-        for (size_t j = 0; project->modules[i]->files[j] != NULL; j++)
-        {
-            if (project->modules[i]->files[j]->ast == NULL)
-            {
-                printf("warning: file ast is NULL: %s\n", project->modules[i]->files[j]->path);
-                continue;
-            }
-        }
-    }
 
     return count_errors;
 }

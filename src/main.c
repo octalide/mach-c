@@ -52,6 +52,7 @@ int cmd_build(int argc, char **argv)
     }
 
     printf("error: target path must be a source or project file\n");
+
     return 1;
 }
 

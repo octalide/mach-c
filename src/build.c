@@ -4,11 +4,17 @@
 #include "project.h"
 #include "ioutil.h"
 #include "cJSON.h"
+#include "symbols.h"
+#include "ast.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 
-#include "ast.h"
+void callback_node_debug_printout(void *context, Node *node, int depth)
+{
+    printf("%*s", depth * 2, "");
+    printf("%s\n", node_kind_to_string(node->kind));
+}
 
 int build_project_lib(Project *project)
 {
@@ -34,6 +40,32 @@ int build_project_exe(Project *project)
     if (count_parse_errors == 0)
     {
         printf("no parse errors\n");
+    } else {
+        printf("%d parse errors. Cannot continue.\n", count_parse_errors);
+        return 1;
+    }
+
+    printf("combining files into modules for analysis...\n");
+    int count_modularize_errors = project_modularize_files(project);
+    if (count_modularize_errors == 0)
+    {
+        printf("no modularization errors\n");
+    } else {
+        printf("%d modularization errors. Cannot continue.\n", count_modularize_errors);
+        return 2;
+    }
+
+    printf("project modules:\n");
+    for (size_t i = 0; project->modules[i] != NULL; i++)
+    {
+        printf("  %s\n", project->modules[i]->name);
+    }
+
+    printf("project module node structure debug printout:\n");
+    for (size_t i = 0; project->modules[i] != NULL; i++)
+    {
+        printf("  %s\n", project->modules[i]->name);
+        node_walk(NULL, project->modules[i]->ast, callback_node_debug_printout);
     }
 
     printf("performing analysis...\n");
@@ -54,8 +86,6 @@ int build_project(Project *project)
     }
 
     return build_project_lib(project);
-
-    return -1;
 }
 
 int build_target_file(char *path, int argc, char **argv)
@@ -65,7 +95,8 @@ int build_target_file(char *path, int argc, char **argv)
     project->path_mach_root = getenv("MACH_ROOT") != NULL ? getenv("MACH_ROOT") : DEFAULT_MACH_PATH;
     project->path_project = path_dirname(path);
     project->name = path_dirname(path);
-    project->version = "0.0.0";
+    project->version = calloc(1, 6);
+    sprintf(project->version, "0.0.0");
     project->path_src = path_dirname(path);
     project->path_out = path_dirname(path);
     project->path_dep = path_dirname(path);
@@ -77,10 +108,11 @@ int build_target_file(char *path, int argc, char **argv)
     project->targets[0] = target_current();
     project->target_count += 1;
 
-    project->symbols = symbol_table_new();
-    project->modules = NULL;
+    project->symbol_table = symbol_table_new();
 
     build_project(project);
+
+    project_free(project);
 
     return 1;
 }
@@ -107,7 +139,8 @@ int build_target_project(char *path, int argc, char **argv)
     project->path_project = path_dirname(path);
     project->path_mach_root = getenv("MACH_ROOT") != NULL ? getenv("MACH_ROOT") : DEFAULT_MACH_PATH;
     project->name = path_dirname(path);
-    project->version = "0.0.0";
+    project->version = calloc(1, 6);
+    sprintf(project->version, "0.0.0");
     project->path_src = path_join(project->path_project, path_dirname(path));
     project->path_out = path_join(project->path_project, path_dirname(path));
     project->path_dep = path_join(project->path_project, path_dirname(path));
@@ -119,19 +152,19 @@ int build_target_project(char *path, int argc, char **argv)
     project->targets[0] = target_current();
     project->target_count += 1;
 
-    project->symbols = symbol_table_new();
+    project->symbol_table = symbol_table_new();
     project->modules = NULL;
 
     const cJSON *version = cJSON_GetObjectItemCaseSensitive(json, "version");
     if (cJSON_IsString(version) && (version->valuestring != NULL))
     {
-        project->version = version->valuestring;
+        project->version = strdup(version->valuestring);
     }
 
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(json, "name");
     if (cJSON_IsString(name) && (name->valuestring != NULL))
     {
-        project->name = name->valuestring;
+        project->name = strdup(name->valuestring);
     }
 
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(json, "type");
@@ -164,25 +197,25 @@ int build_target_project(char *path, int argc, char **argv)
         const cJSON *path_src = cJSON_GetObjectItemCaseSensitive(paths, "src");
         if (cJSON_IsString(path_src) && (path_src->valuestring != NULL))
         {
-            project->path_src = path_src->valuestring;
+            project->path_src = strdup(path_src->valuestring);
         }
 
         const cJSON *path_out = cJSON_GetObjectItemCaseSensitive(paths, "out");
         if (cJSON_IsString(path_out) && (path_out->valuestring != NULL))
         {
-            project->path_out = path_out->valuestring;
+            project->path_out = strdup(path_out->valuestring);
         }
 
         const cJSON *path_dep = cJSON_GetObjectItemCaseSensitive(paths, "dep");
         if (cJSON_IsString(path_dep) && (path_dep->valuestring != NULL))
         {
-            project->path_dep = path_dep->valuestring;
+            project->path_dep = strdup(path_dep->valuestring);
         }
 
         const cJSON *path_lib = cJSON_GetObjectItemCaseSensitive(paths, "lib");
         if (cJSON_IsString(path_lib) && (path_lib->valuestring != NULL))
         {
-            project->path_lib = path_lib->valuestring;
+            project->path_lib = strdup(path_lib->valuestring);
         }
     }
 
@@ -194,7 +227,7 @@ int build_target_project(char *path, int argc, char **argv)
     const cJSON *entrypoint = cJSON_GetObjectItemCaseSensitive(json, "entrypoint");
     if (cJSON_IsString(entrypoint) && (entrypoint->valuestring != NULL))
     {
-        project->entrypoint = entrypoint->valuestring;
+        project->entrypoint = strdup(entrypoint->valuestring);
     }
 
     const cJSON *targets = cJSON_GetObjectItemCaseSensitive(json, "targets");
@@ -213,6 +246,8 @@ int build_target_project(char *path, int argc, char **argv)
         }
     }
 
+    cJSON_free(json);
+
     printf("building project: %s\n", project->name);
     printf("  version:    %s\n", project->version);
     printf("  type:       %d\n", project->type);
@@ -229,6 +264,8 @@ int build_target_project(char *path, int argc, char **argv)
     printf("\n");
 
     build_project(project);
+
+    project_free(project);
 
     return 0;
 }

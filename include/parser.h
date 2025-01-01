@@ -12,14 +12,12 @@ typedef struct Parser
     Token *next;
 
     Lexer *lexer;
-
-    Node *root;
 } Parser;
 
 Parser *parser_new(Lexer *lexer);
 void parser_free(Parser *parser);
 
-void parser_print_error(Parser *parser, Node *node, char *path);
+void parser_print_error(Parser *parser, Node *node);
 
 void parser_add_comment(Parser *parser, Token *token);
 
@@ -29,7 +27,7 @@ bool parser_match(Parser *parser, TokenKind type);
 
 Node *parser_new_error(Token *token, char *message);
 
-Node *parse_program(Parser *parser);
+Node *parse_file(Parser *parser, char *path);
 Node *parse_identifier(Parser *parser);
 
 Node *parse_lit_int(Parser *parser);
@@ -41,7 +39,6 @@ Node *parse_expr_member(Parser *parser, Node *target);
 Node *parse_expr_call(Parser *parser, Node *target);
 Node *parse_expr_index(Parser *parser, Node *target);
 Node *parse_expr_cast(Parser *parser, Node *target);
-// Node *parse_expr_new(Parser *parser);
 Node *parse_expr_unary(Parser *parser);
 Node *parse_expr_binary(Parser *parser, int parent_precedence);
 Node *parse_expr_postfix(Parser *parser);
@@ -61,7 +58,10 @@ Node *parse_field(Parser *parser);
 Node *parse_stmt_val(Parser *parser);
 Node *parse_stmt_var(Parser *parser);
 Node *parse_stmt_def(Parser *parser);
+Node *parse_stmt_mod(Parser *parser);
 Node *parse_stmt_use(Parser *parser);
+Node *parse_stmt_str(Parser *parser);
+Node *parse_stmt_uni(Parser *parser);
 Node *parse_stmt_fun(Parser *parser);
 Node *parse_stmt_ext(Parser *parser);
 Node *parse_stmt_if(Parser *parser);
@@ -75,6 +75,6 @@ Node *parse_stmt_block(Parser *parser);
 Node *parse_stmt_expr(Parser *parser);
 Node *parse_stmt(Parser *parser);
 
-Node *parser_parse(Parser *parser);
+Node *parser_parse(Parser *parser, char *path);
 
 #endif

@@ -1,9 +1,7 @@
 #ifndef PROJECT_H
 #define PROJECT_H
 
-#include "lexer.h"
 #include "parser.h"
-#include "type.h"
 #include "symbols.h"
 #include "target.h"
 

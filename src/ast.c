@@ -1,6 +1,5 @@
 #include "ast.h"
 
-#include "parser.h"
 #include <stdio.h>
 
 Node *node_new(NodeKind kind)

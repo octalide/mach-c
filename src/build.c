@@ -1,6 +1,4 @@
 #include "build.h"
-#include "lexer.h"
-#include "parser.h"
 #include "project.h"
 #include "ioutil.h"
 #include "cJSON.h"

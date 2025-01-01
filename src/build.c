@@ -37,9 +37,8 @@ int build_project_exe(Project *project)
     int count_parse_errors = project_print_parse_errors(project);
     if (count_parse_errors == 0)
     {
-        printf("no parse errors\n");
+        printf("  no parse errors\n");
     } else {
-        printf("%d parse errors. Cannot continue.\n", count_parse_errors);
         return 1;
     }
 
@@ -47,30 +46,28 @@ int build_project_exe(Project *project)
     int count_modularize_errors = project_modularize_files(project);
     if (count_modularize_errors == 0)
     {
-        printf("no modularization errors\n");
+        printf("  no modularization errors\n");
     } else {
-        printf("%d modularization errors. Cannot continue.\n", count_modularize_errors);
         return 2;
     }
 
-    printf("project modules:\n");
-    for (size_t i = 0; project->modules[i] != NULL; i++)
-    {
-        printf("  %s\n", project->modules[i]->name);
-    }
+    // printf("project modules:\n");
+    // for (size_t i = 0; project->modules[i] != NULL; i++)
+    // {
+    //     printf("  %s\n", project->modules[i]->name);
+    // }
 
-    printf("project module node structure debug printout:\n");
-    for (size_t i = 0; project->modules[i] != NULL; i++)
-    {
-        printf("  %s\n", project->modules[i]->name);
-        node_walk(NULL, project->modules[i]->ast, callback_node_debug_printout);
-    }
+    printf("combining modules into program AST...\n");
+    project_combine_modules(project);
+    
+    printf("project node structure debug printout:\n");
+    node_walk(NULL, project->program, callback_node_debug_printout);
 
     printf("performing analysis...\n");
     int count_analysis_errors = project_analysis(project);
     if (count_analysis_errors == 0)
     {
-        printf("no analysis errors\n");
+        printf("  no analysis errors\n");
     }
 
     return 0;

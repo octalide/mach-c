@@ -66,6 +66,7 @@ typedef struct Project
 
     File **files;
     Module **modules;
+    Node *program;
 
     // project symbol table contains all symbols for the entire project
     SymbolTable *symbol_table;
@@ -82,7 +83,7 @@ void project_free(Project *project);
 
 void file_parse(File *file);
 
-char *module_parts_join(char **parts);
+char *module_parts_join(Node *module_path);
 int module_add_file_ast(Module *module, File *file);
 
 char *project_resolve_macros(Project *project, char *str);
@@ -97,6 +98,7 @@ void project_discover_files(Project *project);
 void project_parse_all(Project *project);
 int project_print_parse_errors(Project *project);
 int project_modularize_files(Project *project);
+void project_combine_modules(Project *project);
 int project_analysis(Project *project);
 
 #endif

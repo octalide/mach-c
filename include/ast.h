@@ -12,8 +12,6 @@ typedef enum NodeKind
     NODE_MODULE,     // module root node
     NODE_FILE,       // file root node
 
-    NODE_MODULE_PATH, // module path
-
     NODE_IDENTIFIER, // identifier
 
     // literals
@@ -84,11 +82,6 @@ typedef struct NodeFile
 
     struct Node **statements;
 } NodeFile;
-
-typedef struct NodeModulePath
-{
-    char **parts;
-} NodeModulePath;
 
 typedef struct NodeIdentifier
 {
@@ -301,7 +294,6 @@ typedef struct Node
         NodeProgram *program;
         NodeModule *module;
         NodeFile *file;
-        NodeModulePath *module_path;
         NodeIdentifier *identifier;
         NodeLitInt *lit_int;
         NodeLitFloat *lit_float;

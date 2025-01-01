@@ -192,27 +192,43 @@ char *str_replace(char *orig, char *rep, char *with)
     return result;
 }
 
-char *module_parts_join(char **parts)
+// build module path from the containing node, which has the format of chained
+// identifier member accesses
+char *module_parts_join(Node *module_path)
 {
-    if (parts == NULL)
+    if (module_path == NULL || (module_path->kind != NODE_EXPR_MEMBER && module_path->kind != NODE_IDENTIFIER))
     {
         return NULL;
     }
 
-    char *path = NULL;
-    for (size_t i = 0; parts[i] != NULL; i++)
+    if (module_path->kind == NODE_IDENTIFIER)
     {
-        if (path == NULL)
-        {
-            path = strdup(parts[i]);
-        }
-        else
-        {
-            path = str_replace(path, ".", parts[i]);
-        }
+        return strdup(module_path->data.identifier->name);
     }
 
-    return path;
+    Node *current = module_path;
+    char *joined = strdup(current->data.expr_member->member->data.identifier->name);
+    while (current->kind == NODE_EXPR_MEMBER)
+    {
+        current = current->data.expr_member->target;
+        if (current->kind == NODE_IDENTIFIER)
+        {
+            char *part = current->data.identifier->name;
+            char *new_joined = malloc(strlen(joined) + strlen(part) + 2);
+            sprintf(new_joined, "%s.%s", part, joined);
+            free(joined);
+            joined = new_joined;
+            break;
+        }
+
+        char *part = current->data.expr_member->member->data.identifier->name;
+        char *new_joined = malloc(strlen(joined) + strlen(part) + 2);
+        sprintf(new_joined, "%s.%s", part, joined);
+        free(joined);
+        joined = new_joined;
+    }
+
+    return joined;
 }
 
 int module_add_file_ast(Module *module, File *file)
@@ -333,7 +349,7 @@ void project_discover_files(Project *project)
     char **files = list_files_recursive(project->path_src, NULL, 0);
     if (files == NULL)
     {
-        printf("error: could not list files in directory: %s\n", project->path_src);
+        printf("  error: could not list files in directory: %s\n", project->path_src);
         return;
     }
 
@@ -350,14 +366,14 @@ void project_discover_files(Project *project)
         free(joined);
         if (file == NULL)
         {
-            printf("error: could not read file: %s\n", files[i]);
+            printf("  error: could not read file: %s\n", files[i]);
             continue;
         }
 
         // check if file is empty
         if (file->source == NULL || strlen(file->source) == 0)
         {
-            printf("warning: file is empty: %s\n", files[i]);
+            printf("  warning: file is empty: %s\n", files[i]);
             file_free(file);
             continue;
         }
@@ -401,6 +417,7 @@ void project_print_parse_errors_cb(void *context, Node *node, int depth)
     if (node->kind == NODE_ERROR)
     {
         ctx->count_errors++;
+        printf("\n");
         parser_print_error(ctx->file->parser, node);
     }
 }
@@ -461,7 +478,7 @@ int project_modularize_files(Project *project)
             continue;
         }
 
-        char *module_path = module_parts_join(module_stmt->data.stmt_mod->module_path->data.module_path->parts);
+        char *module_path = module_parts_join(module_stmt->data.stmt_mod->module_path);
         if (module_path == NULL)
         {
             printf("error: could not build module path: %s\n", project->files[i]->path);
@@ -493,6 +510,20 @@ int project_modularize_files(Project *project)
     return count_errors;
 }
 
+void project_combine_modules(Project *project)
+{
+    Node *program = node_new(NODE_PROGRAM);
+    program->data.program->name = strdup(project->name);
+
+    for (size_t i = 0; project->modules[i] != NULL; i++)
+    {
+        project->modules[i]->ast->parent = program;
+        node_list_add(&program->data.program->modules, project->modules[i]->ast);
+    }
+
+    project->program = program;
+}
+
 int project_analysis(Project *project)
 {
     if (project->modules == NULL)
@@ -501,6 +532,15 @@ int project_analysis(Project *project)
     }
 
     int count_errors = 0;
+
+    for (size_t i = 0; project->modules[i] != NULL; i++)
+    {
+        if (project->modules[i]->ast == NULL)
+        {
+            printf("error: module ast is NULL: %s\n", project->modules[i]->name);
+            continue;
+        }
+    }
 
     return count_errors;
 }

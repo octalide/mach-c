@@ -195,43 +195,6 @@ Node *parse_identifier(Parser *parser)
     return node;
 }
 
-Node *parse_module_path(Parser *parser)
-{
-    if (!parser_consume(parser, TOKEN_IDENTIFIER))
-    {
-        parser_advance(parser);
-        return parser_new_error(parser->last, "expected module path");
-    }
-
-    Node *node = node_new(NODE_MODULE_PATH);
-    node->token = token_copy(parser->last);
-    node->data.module_path->parts = realloc(node->data.module_path->parts, 2 * sizeof(char *));
-    node->data.module_path->parts[0] = lexer_raw_value(parser->lexer, parser->last);
-    node->data.module_path->parts[1] = NULL;
-
-    while (parser_consume(parser, TOKEN_DOT))
-    {
-        if (!parser_consume(parser, TOKEN_IDENTIFIER))
-        {
-            parser_advance(parser);
-            free(node);
-            return parser_new_error(parser->last, "expected module path part");
-        }
-
-        int count = 0;
-        while (node->data.module_path->parts[count] != NULL)
-        {
-            count++;
-        }
-
-        node->data.module_path->parts = realloc(node->data.module_path->parts, (count + 2) * sizeof(char *));
-        node->data.module_path->parts[count] = lexer_raw_value(parser->lexer, parser->last);
-        node->data.module_path->parts[count + 1] = NULL;
-    }
-
-    return node;
-}
-
 Node *parse_lit_int(Parser *parser)
 {
     if (!parser_consume(parser, TOKEN_LIT_INT))
@@ -613,7 +576,7 @@ Node *parse_type_array(Parser *parser)
         return parser_new_error(parser->last, "expected type");
     }
     node_type->parent = node;
-    node->data.type_array->type = node;
+    node->data.type_array->type = node_type;
 
     return node;
 }
@@ -1030,12 +993,27 @@ Node *parse_stmt_mod(Parser *parser)
     Node *node = node_new(NODE_STMT_MOD);
     node->token = token_copy(parser->last);
 
-    Node *node_module_path = parse_module_path(parser);
+    Node *node_module_path = parse_expr(parser);
     if (node_module_path->kind == NODE_ERROR)
     {
         node_free(node);
+        node_module_path->data.error->message = "expected module path";
         return node_module_path;
     }
+
+    // validate that module path follows the pattern of chained identifiers
+    Node *current = node_module_path;
+    while (current->kind == NODE_EXPR_MEMBER)
+    {
+        if (current->data.expr_member->member->kind != NODE_IDENTIFIER)
+        {
+            node_free(node);
+            return parser_new_error(parser->last, "expected module path");
+        }
+
+        current = current->data.expr_member->target;
+    }
+
     node_module_path->parent = node;
     node->data.stmt_mod->module_path = node_module_path;
 
@@ -1073,12 +1051,27 @@ Node *parse_stmt_use(Parser *parser)
         parser_advance(parser);
     }
 
-    Node *node_module_path = parse_module_path(parser);
+    Node *node_module_path = parse_expr(parser);
     if (node_module_path->kind == NODE_ERROR)
     {
         node_free(node);
+        node_module_path->data.error->message = "expected module path";
         return node_module_path;
     }
+
+    // validate that module path follows the pattern of chained identifiers
+    Node *current = node_module_path;
+    while (current->kind == NODE_EXPR_MEMBER)
+    {
+        if (current->data.expr_member->member->kind != NODE_IDENTIFIER)
+        {
+            node_free(node);
+            return parser_new_error(parser->last, "expected module path");
+        }
+
+        current = current->data.expr_member->target;
+    }
+
     node_module_path->parent = node;
     node->data.stmt_use->module_path = node_module_path;
 

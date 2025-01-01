@@ -24,11 +24,6 @@ Node *node_new(NodeKind kind)
         node->data.file = calloc(1, sizeof(NodeFile));
         node->data.file->statements = node_list_new();
         break;
-    case NODE_MODULE_PATH:
-        node->data.module_path = calloc(1, sizeof(NodeModulePath));
-        node->data.module_path->parts = calloc(1, sizeof(char *));
-        node->data.module_path->parts[0] = NULL;
-        break;
     case NODE_IDENTIFIER:
         node->data.identifier = calloc(1, sizeof(NodeIdentifier));
         break;
@@ -194,17 +189,6 @@ void node_free(Node *node)
         node->data.file->statements = NULL;
         free(node->data.file);
         node->data.file = NULL;
-        break;
-    case NODE_MODULE_PATH:
-        for (size_t i = 0; node->data.module_path->parts[i] != NULL; i++)
-        {
-            free(node->data.module_path->parts[i]);
-            node->data.module_path->parts[i] = NULL;
-        }
-        free(node->data.module_path->parts);
-        node->data.module_path->parts = NULL;
-        free(node->data.module_path);
-        node->data.module_path = NULL;
         break;
     case NODE_IDENTIFIER:
         free(node->data.identifier->name);
@@ -472,8 +456,6 @@ char *node_kind_to_string(NodeKind kind)
         return "MODULE";
     case NODE_FILE:
         return "FILE";
-    case NODE_MODULE_PATH:
-        return "MODULE_PATH";
     case NODE_IDENTIFIER:
         return "IDENTIFIER";
     case NODE_LIT_INT:
@@ -631,7 +613,6 @@ void node_walk(void *context, Node *node, void (*callback)(void *context, Node *
         }
         depth--;
         break;
-    case NODE_MODULE_PATH:
     case NODE_IDENTIFIER:
     case NODE_LIT_INT:
     case NODE_LIT_FLOAT:

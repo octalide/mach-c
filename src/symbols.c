@@ -1,12 +1,15 @@
 #include "symbols.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 SymbolTable *symbol_table_new()
 {
     SymbolTable *table = calloc(sizeof(SymbolTable), 1);
-    table->symbols = NULL;
+    table->symbols = calloc(sizeof(Symbol *), 2);
+    table->symbols[0] = NULL;
+    
     table->parent = NULL;
 
     return table;
@@ -33,10 +36,10 @@ void symbol_table_free(SymbolTable *table)
     free(table);
 }
 
-Symbol *symbol_new(char *name)
+Symbol *symbol_new()
 {
     Symbol *symbol = calloc(sizeof(Symbol), 1);
-    symbol->name = name;
+    symbol->name = NULL;
 
     return symbol;
 }
@@ -74,6 +77,11 @@ Symbol *symbol_table_get(SymbolTable *table, char *name)
 
 void symbol_table_add(SymbolTable *table, Symbol *symbol)
 {
+    if (table == NULL)
+    {
+        return;
+    }
+
     size_t i = 0;
     while (table->symbols[i] != NULL)
     {
@@ -83,4 +91,17 @@ void symbol_table_add(SymbolTable *table, Symbol *symbol)
     table->symbols = realloc(table->symbols, sizeof(Symbol *) * (i + 2));
     table->symbols[i] = symbol;
     table->symbols[i + 1] = NULL;
+}
+
+void symbol_table_print(SymbolTable *table)
+{
+    if (table == NULL || table->symbols == NULL)
+    {
+        return;
+    }
+
+    for (size_t i = 0; table->symbols[i] != NULL; i++)
+    {
+        printf("  %s (%s)\n", table->symbols[i]->name, type_to_string(table->symbols[i]->type));
+    }
 }

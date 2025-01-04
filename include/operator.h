@@ -3,9 +3,7 @@
 
 #include "token.h"
 
-#include <stdlib.h>
 #include <stdbool.h>
-#include <string.h>
 
 typedef enum Operator
 {

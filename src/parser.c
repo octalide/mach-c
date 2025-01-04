@@ -3,6 +3,8 @@
 #include "operator.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 Parser *parser_new(Lexer *lexer)
 {

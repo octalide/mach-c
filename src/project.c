@@ -1,8 +1,11 @@
 #include "project.h"
 #include "ioutil.h"
 #include "ast.h"
+#include "lexer.h"
+#include "type.h"
 
 #include <stdio.h>
+#include <string.h>
 
 File *file_read(char *path)
 {
@@ -123,6 +126,14 @@ void project_free(Project *project)
     free(project->targets);
     project->targets = NULL;
 
+    for (size_t i = 0; project->files[i] != NULL; i++)
+    {
+        file_free(project->files[i]);
+        project->files[i] = NULL;
+    }
+    free(project->files);
+    project->files = NULL;
+
     for (size_t i = 0; project->modules[i] != NULL; i++)
     {
         module_free(project->modules[i]);
@@ -131,13 +142,8 @@ void project_free(Project *project)
     free(project->modules);
     project->modules = NULL;
 
-    for (size_t i = 0; project->files[i] != NULL; i++)
-    {
-        file_free(project->files[i]);
-        project->files[i] = NULL;
-    }
-    free(project->files);
-    project->files = NULL;
+    node_free(project->program);
+    project->program = NULL;
 
     symbol_table_free(project->symbol_table);
     project->symbol_table = NULL;
@@ -252,6 +258,8 @@ int module_add_file_ast(Module *module, File *file)
 
     node_list_add(&module->ast->data.module->files, file->ast);
 
+    file->ast->parent = module->ast;
+
     return 0;
 }
 
@@ -339,11 +347,6 @@ void project_add_file(Project *project, File *file)
     }
 }
 
-void project_add_symbol(Project *project, Symbol *symbol)
-{
-    symbol_table_add(project->symbol_table, symbol);
-}
-
 void project_discover_files(Project *project)
 {
     char **files = list_files_recursive(project->path_src, NULL, 0);
@@ -403,17 +406,17 @@ void project_parse_all(Project *project)
     }
 }
 
-typedef struct ParserErrorCBContext
+typedef struct CBContextParserError
 {
     Project *project;
     File *file;
 
     int count_errors;
-} ParserErrorCBContext;
+} CBContextParserError;
 
 void project_print_parse_errors_cb(void *context, Node *node, int depth)
 {
-    ParserErrorCBContext *ctx = context;
+    CBContextParserError *ctx = context;
     if (node->kind == NODE_ERROR)
     {
         ctx->count_errors++;
@@ -439,7 +442,7 @@ int project_print_parse_errors(Project *project)
             continue;
         }
 
-        ParserErrorCBContext *ctx = calloc(sizeof(ParserErrorCBContext), 1);
+        CBContextParserError *ctx = calloc(sizeof(CBContextParserError), 1);
         ctx->project = project;
         ctx->file = project->files[i];
 
@@ -524,23 +527,341 @@ void project_combine_modules(Project *project)
     project->program = program;
 }
 
-int project_analysis(Project *project)
+// Type *resolve_nested_node_type(Project *project, Node *node) {
+//     switch (node->kind) {
+//         case NODE_TYPE_POINTER:
+//             Type *type_ptr = type_new(TYPE_POINTER);
+//             type_ptr->data.type_pointer->base_type = resolve_nested_node_type(project, node->data.type_pointer->type);
+//             return type_ptr;
+//         case NODE_TYPE_ARRAY:
+//             Type *type_arr = type_new(TYPE_ARRAY);
+//             // array size has a few possible definitions:
+//             // 1. empty for unbounded size
+//             // 2. literal integer expression
+//             // 3. expression that must be evaluated at compile time
+//             // 4. identifier that links to a symobol of integer type
+
+//             // case 1:
+//             if (node->data.type_array->size == NULL)
+//             {
+//                 type_arr->data.type_array->length = -1;
+//             }
+
+//             switch (node->data.type_array->size->kind) {
+//                 // case 2:
+//                 case NODE_LIT_INT:
+//                     // find containing file node
+//                     Node *node_file = node_find_parent(node, NODE_FILE);
+//                     if (node_file == NULL || node_file->data.file->parser == NULL || node_file->data.file->parser->lexer == NULL)
+//                     {
+//                         return NULL;
+//                     }
+
+//                     // evaluate literal integer expression
+//                     type_arr->data.type_array->length = lexer_eval_lit_int(node_file->data.file->parser->lexer, node->data.type_array->size->token);
+//                     break;
+//                 // case 3:
+//                 // NOTE:
+//                 //   Inside of unary and binary expressions, all leaf nodes must
+//                 //   be compile time constant integers or symbols that point to
+//                 //   them.
+//                 case NODE_EXPR_UNARY:
+//                     // examine each member to ensure compile time definition
+//                     // NOTE: this restriction excludes the usability of anything
+//                     //   but basic types using basic arithematic.
+//                     // The only valid unary operators here are OP_ADD and OP_SUB
+//                     switch (node->data.type_array->size->data.expr_unary->op)
+//                     {
+//                         case OP_ADD:
+//                             switch (node->data.type_array->size->data.expr_unary->target->kind)
+//                             {
+//                                 case NODE_LIT_INT:
+//                                     type_arr->data.type_array->length = lexer_eval_lit_int(node_file->data.file->parser->lexer, node->data.type_array->size->data.expr_unary->target->token);
+//                                     break;
+//                                 case NODE_IDENTIFIER:
+//                                     break;
+//                                 case NODE_EXPR_MEMBER:
+//                                 default:
+//                                     return NULL;
+//                             }
+
+//                         case OP_SUB:
+//                         default:
+//                             return NULL;
+//                     }
+
+//                     break;
+//                 case NODE_EXPR_BINARY:
+//                     // the only valid biary operators here are mathematical:
+//                     // - OP_ADD
+//                     // - OP_SUB
+//                     // - OP_MUL
+//                     // - OP_DIV
+//                     // - OP_MOD
+//                     // - OP_BITWISE_NOT
+//                     // - OP_BITWISE_AND
+//                     // - OP_BITWISE_OR
+//                     // - OP_BITWISE_XOR
+//                     // - OP_BITWISE_SHL
+//                     // - OP_BITWISE_SHR
+
+//                     switch (node->data.type_array->size->data.expr_binary->op)
+//                     {
+//                         case OP_ADD:
+//                         case OP_SUB:
+//                         case OP_MUL:
+//                         case OP_DIV:
+//                         case OP_MOD:
+//                         case OP_BITWISE_NOT:
+//                         case OP_BITWISE_AND:
+//                         case OP_BITWISE_OR:
+//                         case OP_BITWISE_XOR:
+//                         case OP_BITWISE_SHL:
+//                         case OP_BITWISE_SHR:
+//                         default:
+//                             return NULL;
+//                     }
+
+//                     break;
+//                 // case 4:
+//                 case NODE_EXPR_MEMBER:
+//                 default:
+//                     return NULL;
+//             }
+
+//             return type_arr;
+//         default:
+//             return NULL;
+//     }
+// }
+
+typedef struct CBContextError
 {
-    if (project->modules == NULL)
+    char *message;
+    Node *node;
+} CBContextError;
+
+typedef struct CBContextProject
+{
+    Project *project;
+    CBContextError **errors;
+} CBContextProject;
+
+int count_context_errors(CBContextProject *ctx)
+{
+    int count = 0;
+    while (ctx->errors[count] != NULL)
     {
-        return 0;
+        count++;
     }
 
-    int count_errors = 0;
+    return count;
+}
 
-    for (size_t i = 0; project->modules[i] != NULL; i++)
+void add_error_to_context(CBContextProject *ctx, char *message, Node *node)
+{
+    CBContextError *error = calloc(1, sizeof(CBContextError));
+    error->message = strdup(message);
+    error->node = node;
+
+    size_t i = count_context_errors(ctx);
+
+    ctx->errors = realloc(ctx->errors, sizeof(CBContextError *) * (i + 2));
+    ctx->errors[i] = error;
+    ctx->errors[i + 1] = NULL;
+}
+
+void cb_populate_symbol_names_val(void *context, Node *node, int depth)
+{
+    CBContextProject *ctx = context;
+
+    if (node->kind != NODE_STMT_VAL)
     {
-        if (project->modules[i]->ast == NULL)
-        {
-            printf("error: module ast is NULL: %s\n", project->modules[i]->name);
-            continue;
+        return;
+    }
+
+    // find containing module
+    Node *node_module = node_find_parent(node, NODE_MODULE);
+    if (node_module == NULL)
+    {
+        add_error_to_context(ctx, "unable to find containing module", node);
+        return;
+    }
+
+    // join node_module->name and node->data.stmt_val->identifier->name with `:`
+    char *symbol_name = malloc(strlen(node_module->data.module->name) + strlen(node->data.stmt_val->identifier->data.identifier->name) + 2);
+    sprintf(symbol_name, "%s:%s", node_module->data.module->name, node->data.stmt_val->identifier->data.identifier->name);
+
+    // create symbol
+    Symbol *symbol = symbol_new();
+    symbol->name = symbol_name;
+    symbol->type = type_new(TYPE_LAZY);
+
+    // add symbol to symbol table
+    symbol_table_add(ctx->project->symbol_table, symbol);
+}
+
+void cb_populate_symbols(void *context, Node *node, int depth)
+{
+    CBContextProject *ctx = context;
+
+    // nodes capable of creating types:
+    // - def
+    // - ext
+    // - str
+    // - uni
+    // - fun
+    //
+    // nodes capable of defining symbols:
+    // - val
+    // - var
+    // - def
+    // - ext
+    // - str
+    // - uni
+    // - fun
+    //
+    // Symbol names take the format:
+    // <module_path>:<symbol_name>
+
+    switch (node->kind)
+    {
+    case NODE_STMT_VAL:
+    case NODE_STMT_VAR:
+    case NODE_STMT_DEF:
+        Symbol *symbol = symbol_new();
+
+        // pull identifier from def statement
+        symbol->name = strdup(node->data.stmt_def->identifier->data.identifier->name);
+
+        // check if the def statement uses a predefined symbol (alias) or if it
+        // defines its own type. simple check for identifier is enough.
+        Node *def_type = node->data.stmt_def->type;
+        switch (def_type->kind) {
+            case NODE_IDENTIFIER:
+                Symbol *base = symbol_table_get(ctx->project->symbol_table, def_type->data.identifier->name);
+
+                // if symbol not found, mark for lazy type resolution
+                // if symbol found, link to the original type
+                if (base == NULL)
+                {
+                    symbol->type = type_new(TYPE_LAZY);
+                    symbol->type->name = strdup(def_type->data.identifier->name);
+                } else {
+                    symbol->type = base->type;
+                }
+                
+                break;
+            case NODE_TYPE_FUN:
+                Type *type = type_new(TYPE_FUNCTION);
+                for (size_t i = 0; def_type->data.type_function->parameters[i] != NULL; i++)
+                {
+                    Type *param = type_new(TYPE_LAZY);
+                    param->name = strdup(def_type->data.type_function->parameters[i]->data.identifier->name);
+                    type->data.type_function->parameters[i] = param;
+                }
+
+                type->data.type_function->parameters;
+                type->data.type_function->return_type;
+
+                break;
+            case NODE_TYPE_STR:
+            case NODE_TYPE_UNI:
+            case NODE_TYPE_POINTER:
+            case NODE_TYPE_ARRAY:
+                symbol->type = type_new(TYPE_ARRAY);
+                break;
+            default:
+                break;
         }
+    case NODE_STMT_EXT:
+    case NODE_STMT_STR:
+    case NODE_STMT_UNI:
+    case NODE_STMT_FUN:
+    default:
+        break;
+    }
+}
+
+int project_populate_symbols(Project *project) {
+    CBContextProject *ctx = calloc(1, sizeof(CBContextProject));
+    ctx->project = project;
+    ctx->errors = calloc(1, sizeof(CBContextError *));
+    ctx->errors[0] = NULL;
+
+    // populate symbol table with the names from any compile-time constants
+    //   declared with the `val` keyword.
+    node_walk(ctx, project->program, cb_populate_symbol_names_val);
+    int count_errors = count_context_errors(ctx);
+    if (count_errors != 0)
+    {
+        for (size_t i = 0; ctx->errors[i] != NULL; i++)
+        {
+            printf("error: %s\n", ctx->errors[i]->message);
+        }
+
+        return count_errors;
     }
 
-    return count_errors;
+    // print symbols currently in symbol table
+    symbol_table_print(project->symbol_table);
+
+    // node_walk(ctx, project->program, project_populate_symbols_cb);
+    // count_errors = count_context_errors(ctx);
+    // if (count_errors != 0)
+    // {
+    //     for (size_t i = 0; ctx->errors[i] != NULL; i++)
+    //     {
+    //         printf("error: %s\n", ctx->errors[i]->message);
+    //     }
+    // }
+
+    return 0;
+}
+
+int project_validate_types(Project *project) {
+    return 0;
+}
+
+int project_validate_control_flow(Project *project) {
+    return 0;
+}
+
+int project_validate_data_flow(Project *project) {
+    return 0;
+}
+
+int project_analyze(Project *project)
+{
+    if (project->program == NULL || project->program->kind != NODE_PROGRAM)
+    {
+        printf("error: program node is invalid\n");
+        return 1;
+    }
+
+    int count_error_populate_symbols = project_populate_symbols(project);
+    if (count_error_populate_symbols != 0) {
+        printf("populate symbols returned %d errors\n", count_error_populate_symbols);
+        return count_error_populate_symbols;
+    }
+
+    int count_error_validate_types = project_validate_types(project);
+    if (count_error_validate_types != 0) {
+        printf("validate types returned %d errors\n", count_error_validate_types);
+        return count_error_validate_types;
+    }
+
+    int count_error_validate_control_flow = project_validate_control_flow(project);
+    if (count_error_validate_control_flow != 0) {
+        printf("validate control_flow returned %d errors\n", count_error_validate_control_flow);
+        return count_error_validate_control_flow;
+    }
+
+    int count_error_validate_data_flow = project_validate_data_flow(project);
+    if (count_error_validate_data_flow != 0) {
+        printf("validate data_flow returned %d errors\n", count_error_validate_data_flow);
+        return count_error_validate_data_flow;
+    }
+    
+    return 0;
 }

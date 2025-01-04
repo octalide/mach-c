@@ -1,6 +1,7 @@
 #include "ast.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 Node *node_new(NodeKind kind)
 {

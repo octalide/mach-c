@@ -1,12 +1,15 @@
 #ifndef TYPE_H
 #define TYPE_H
 
-#include "ast.h"
 #include "target.h"
+
+#include <stdlib.h>
 
 typedef enum TypeKind
 {
     TYPE_ERROR,
+
+    TYPE_LAZY,
 
     TYPE_META,
     TYPE_VOID,
@@ -30,6 +33,43 @@ typedef enum TypeKind
     TYPE_UNION,
 } TypeKind;
 
+typedef struct TypeError
+{
+    char *message;
+} TypeError;
+
+typedef struct TypeMeta
+{
+    struct Type *base_type;
+} TypeMeta;
+
+typedef struct TypePointer
+{
+    struct Type *base_type;
+} TypePointer;
+
+typedef struct TypeArray
+{
+    struct Type *element_type;
+    int length;
+} TypeArray;
+
+typedef struct TypeFunction
+{
+    struct Type **parameters;
+    struct Type *return_type;
+} TypeFunction;
+
+typedef struct TypeStruct
+{
+    struct Type **fields;
+} TypeStruct;
+
+typedef struct TypeUnion
+{
+    struct Type **fields;
+} TypeUnion;
+
 typedef struct Type
 {
     TypeKind kind;
@@ -38,37 +78,14 @@ typedef struct Type
 
     union
     {
-        struct err
-        {
-            char *message;
-        } err;
-
-        struct ptr
-        {
-            struct Type *base_type;
-        } ptr;
-
-        struct arr
-        {
-            struct Type *element_type;
-            int length;
-        } arr;
-
-        struct fun
-        {
-            struct Type **parameters;
-            struct Type *return_type;
-        } fun;
-
-        struct str
-        {
-            struct Type **fields;
-        } str;
-
-        struct uni
-        {
-            struct Type **fields;
-        } uni;
+        struct TypeError *type_error;
+        struct TypeLazy *type_lazy;
+        struct TypeMeta *type_meta;
+        struct TypePointer *type_pointer;
+        struct TypeArray *type_array;
+        struct TypeFunction *type_function;
+        struct TypeStruct *type_struct;
+        struct TypeUnion *type_union;
     } data;
 } Type;
 
@@ -91,6 +108,8 @@ Type *type_str_field_find(Type *type, char *name);
 void type_uni_add_field(Type *type, Type *field);
 int type_uni_field_count(Type *type);
 Type *type_uni_field_find(Type *type, char *name);
+
+bool type_array_is_unbound(Type *type);
 
 bool type_equals(Target target, Type *a, Type *b);
 int type_sizeof(Target target, Type *type);

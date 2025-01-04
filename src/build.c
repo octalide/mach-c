@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 void callback_node_debug_printout(void *context, Node *node, int depth)
 {
@@ -59,12 +60,12 @@ int build_project_exe(Project *project)
 
     printf("combining modules into program AST...\n");
     project_combine_modules(project);
-    
+
     printf("project node structure debug printout:\n");
     node_walk(NULL, project->program, callback_node_debug_printout);
 
     printf("performing analysis...\n");
-    int count_analysis_errors = project_analysis(project);
+    int count_analysis_errors = project_analyze(project);
     if (count_analysis_errors == 0)
     {
         printf("  no analysis errors\n");

@@ -91,7 +91,6 @@ char *project_resolve_macros(Project *project, char *str);
 Module *project_find_module(Project *project, char *name);
 void project_add_module(Project *project, Module *module);
 void project_add_file(Project *project, File *file);
-void project_add_symbol(Project *project, Symbol *symbol);
 
 void project_discover_files(Project *project);
 
@@ -99,6 +98,12 @@ void project_parse_all(Project *project);
 int project_print_parse_errors(Project *project);
 int project_modularize_files(Project *project);
 void project_combine_modules(Project *project);
-int project_analysis(Project *project);
+
+int project_populate_symbols(Project *project);
+int project_validate_types(Project *project);
+int project_validate_control_flow(Project *project);
+int project_validate_data_flow(Project *project);
+
+int project_analyze(Project *project);
 
 #endif

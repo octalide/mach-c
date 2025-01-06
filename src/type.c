@@ -1,4 +1,5 @@
 #include "type.h"
+#include "target.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -19,20 +20,37 @@ Type *type_new(TypeKind kind)
     type->kind = kind;
     type->name = NULL;
 
-    if (kind == TYPE_FUNCTION)
+    switch (type->kind)
     {
-        type->data.type_function->parameters = calloc(sizeof(Type *), 2);
-        type->data.type_function->parameters[0] = NULL;
-    }
-    else if (kind == TYPE_STRUCT)
-    {
-        type->data.type_struct->fields = calloc(sizeof(Type *), 2);
-        type->data.type_struct->fields[0] = NULL;
-    }
-    else if (kind == TYPE_UNION)
-    {
-        type->data.type_union->fields = calloc(sizeof(Type *), 2);
-        type->data.type_union->fields[0] = NULL;
+        case TYPE_ERROR:
+            type->data.type_error = calloc(sizeof(TypeError), 1);
+            break;
+        case TYPE_META:
+            type->data.type_meta = calloc(sizeof(TypeMeta), 1);
+            break;
+        case TYPE_POINTER:
+            type->data.type_pointer = calloc(sizeof(TypePointer), 1);
+            break;
+        case TYPE_ARRAY:
+            type->data.type_array = calloc(sizeof(TypeArray), 1);
+            break;
+        case TYPE_FUNCTION:
+            type->data.type_function = calloc(sizeof(TypeFunction), 1);
+            type->data.type_function->parameters = calloc(sizeof(Type *), 2);
+            type->data.type_function->parameters[0] = NULL;
+            break;
+        case TYPE_STRUCT:
+            type->data.type_struct = calloc(sizeof(TypeStruct), 1);
+            type->data.type_struct->fields = calloc(sizeof(Type *), 2);
+            type->data.type_struct->fields[0] = NULL;
+            break;
+        case TYPE_UNION:
+            type->data.type_union = calloc(sizeof(TypeUnion), 1);
+            type->data.type_union->fields = calloc(sizeof(Type *), 2);
+            type->data.type_union->fields[0] = NULL;
+            break;
+        default:
+            break;
     }
 
     return type;
@@ -127,85 +145,11 @@ char *type_to_string(Type *type)
     case TYPE_F64:
         return "F64";
     case TYPE_FUNCTION:
-        size_t params_len = 1; // for the initial '('
-        for (int i = 0; type->data.type_function->parameters[i] != NULL; i++)
-        {
-            char *param_str = type_to_string(type->data.type_function->parameters[i]);
-            params_len += strlen(param_str) + 1; // +1 for ',' or '\0'
-            free(param_str);
-        }
-
-        char *params = malloc(params_len);
-        params[0] = '\0';
-        for (int i = 0; type->data.type_function->parameters[i] != NULL; i++)
-        {
-            char *param_str = type_to_string(type->data.type_function->parameters[i]);
-            strcat(params, param_str);
-            if (type->data.type_function->parameters[i + 1] != NULL)
-            {
-                strcat(params, ",");
-            }
-            free(param_str);
-        }
-
-        char *return_str = type_to_string(type->data.type_function->return_type);
-        char *result_fun = malloc(strlen(params) + strlen(return_str) + 3);
-        sprintf(result_fun, "(%s)%s", params, return_str);
-        free(params);
-        free(return_str);
-        return result_fun;
+        return "FUNCTION";
     case TYPE_STRUCT:
-        size_t fields_len = 1; // for the initial '{'
-        for (int i = 0; type->data.type_struct->fields[i] != NULL; i++)
-        {
-            char *field_str = type_to_string(type->data.type_struct->fields[i]);
-            fields_len += strlen(field_str) + 1; // +1 for ',' or '\0'
-            free(field_str);
-        }
-
-        char *fields = malloc(fields_len);
-        fields[0] = '\0';
-        for (int i = 0; type->data.type_struct->fields[i] != NULL; i++)
-        {
-            char *field_str = type_to_string(type->data.type_struct->fields[i]);
-            strcat(fields, field_str);
-            if (type->data.type_struct->fields[i + 1] != NULL)
-            {
-                strcat(fields, ",");
-            }
-            free(field_str);
-        }
-
-        char *result_str = malloc(strlen(fields) + 3);
-        sprintf(result_str, "{%s}", fields);
-        free(fields);
-        return result_str;
+        return "STRUCT";
     case TYPE_UNION:
-        size_t u_fields_len = 1; // for the initial '{'
-        for (int i = 0; type->data.type_union->fields[i] != NULL; i++)
-        {
-            char *field_str = type_to_string(type->data.type_union->fields[i]);
-            u_fields_len += strlen(field_str) + 1; // +1 for ',' or '\0'
-            free(field_str);
-        }
-
-        char *u_fields = malloc(u_fields_len);
-        u_fields[0] = '\0';
-        for (int i = 0; type->data.type_union->fields[i] != NULL; i++)
-        {
-            char *field_str = type_to_string(type->data.type_union->fields[i]);
-            strcat(u_fields, field_str);
-            if (type->data.type_union->fields[i + 1] != NULL)
-            {
-                strcat(u_fields, ",");
-            }
-            free(field_str);
-        }
-
-        char *result_uni = malloc(strlen(u_fields) + 3);
-        sprintf(result_uni, "<%s>", u_fields);
-        free(u_fields);
-        return result_uni;
+        return "UNION";
     default:
         return "UNKNOWN";
     }
@@ -534,4 +478,103 @@ int type_offsetof(Target target, Type *type, char *name)
     }
 
     return -1;
+}
+
+// describe each type including things like data layout
+char *type_describe(Type *type)
+{
+    char *result = malloc(1024);
+
+    switch (type->kind)
+    {
+    case TYPE_ERROR:
+        sprintf(result, "{ kind: ERROR, msg: %s }", type->data.type_error->message);
+        break;
+    case TYPE_META:
+        sprintf(result, "{ kind: META }");
+        break;
+    case TYPE_VOID:
+        sprintf(result, "{ kind: VOID }");
+        break;
+    case TYPE_U8:
+        sprintf(result, "{ kind: U8, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_U16:
+        sprintf(result, "{ kind: U16, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_U32:
+        sprintf(result, "{ kind: U32, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_U64:
+        sprintf(result, "{ kind: U64, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_I8:
+        sprintf(result, "{ kind: I8, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_I16:
+        sprintf(result, "{ kind: I16, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_I32:
+        sprintf(result, "{ kind: I32, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_I64:
+        sprintf(result, "{ kind: I64, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_F32:
+        sprintf(result, "{ kind: F32, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_F64:
+        sprintf(result, "{ kind: F64, size: %d }", type_sizeof(target_current(), type));
+        break;
+    case TYPE_ARRAY:
+        sprintf(result, "{ kind: ARRAY, size: %d, element: %s }", type_sizeof(target_current(), type), type_describe(type->data.type_array->element_type));
+        break;
+    case TYPE_FUNCTION:
+        sprintf(result, "{ kind: FUNCTION, return: %s, params: [", type_describe(type->data.type_function->return_type));
+        for (int i = 0; type->data.type_function->parameters[i] != NULL; i++)
+        {
+            char *param_desc = type_describe(type->data.type_function->parameters[i]);
+            strcat(result, param_desc);
+            if (type->data.type_function->parameters[i + 1] != NULL)
+            {
+                strcat(result, ", ");
+            }
+            free(param_desc);
+        }
+        strcat(result, "] }");
+        break;
+    case TYPE_STRUCT:
+        sprintf(result, "{ kind: STRUCT, fields: [");
+        for (int i = 0; type->data.type_struct->fields[i] != NULL; i++)
+        {
+            char *field_desc = type_describe(type->data.type_struct->fields[i]);
+            strcat(result, field_desc);
+            if (type->data.type_struct->fields[i + 1] != NULL)
+            {
+                strcat(result, ", ");
+            }
+            free(field_desc);
+        }
+        strcat(result, "] }");
+        break;
+    case TYPE_UNION:
+        sprintf(result, "{ kind: UNION, fields: [");
+        for (int i = 0; type->data.type_union->fields[i] != NULL; i++)
+        {
+            char *field_desc = type_describe(type->data.type_union->fields[i]);
+            strcat(result, field_desc);
+            if (type->data.type_union->fields[i + 1] != NULL)
+            {
+                strcat(result, ", ");
+            }
+            free(field_desc);
+        }
+        strcat(result, "] }");
+        break;
+    default:
+        sprintf(result, "{ kind: UNKNOWN }");
+        break;
+    }
+
+    return result;
 }

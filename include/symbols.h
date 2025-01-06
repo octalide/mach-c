@@ -2,10 +2,12 @@
 #define SYMBOLS_H
 
 #include "type.h"
+#include "ast.h"
 
 typedef struct Symbol {
     char *name;
     Type *type;
+    Node *location;
 } Symbol;
 
 typedef struct SymbolTable {

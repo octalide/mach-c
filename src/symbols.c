@@ -102,6 +102,6 @@ void symbol_table_print(SymbolTable *table)
 
     for (size_t i = 0; table->symbols[i] != NULL; i++)
     {
-        printf("  %s (%s)\n", table->symbols[i]->name, type_to_string(table->symbols[i]->type));
+        printf("  %s: %s\n", table->symbols[i]->name, type_describe(table->symbols[i]->type));
     }
 }

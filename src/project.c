@@ -87,7 +87,7 @@ Project *project_new()
     project->modules = calloc(sizeof(Module *), 2);
     project->modules[0] = NULL;
 
-    project->symbol_table = symbol_table_new();
+    project->symbols = symbol_table_new();
 
     return project;
 }
@@ -145,8 +145,8 @@ void project_free(Project *project)
     node_free(project->program);
     project->program = NULL;
 
-    symbol_table_free(project->symbol_table);
-    project->symbol_table = NULL;
+    symbol_table_free(project->symbols);
+    project->symbols = NULL;
 
     free(project);
 }
@@ -527,113 +527,74 @@ void project_combine_modules(Project *project)
     project->program = program;
 }
 
-// Type *resolve_nested_node_type(Project *project, Node *node) {
-//     switch (node->kind) {
-//         case NODE_TYPE_POINTER:
-//             Type *type_ptr = type_new(TYPE_POINTER);
-//             type_ptr->data.type_pointer->base_type = resolve_nested_node_type(project, node->data.type_pointer->type);
-//             return type_ptr;
-//         case NODE_TYPE_ARRAY:
-//             Type *type_arr = type_new(TYPE_ARRAY);
-//             // array size has a few possible definitions:
-//             // 1. empty for unbounded size
-//             // 2. literal integer expression
-//             // 3. expression that must be evaluated at compile time
-//             // 4. identifier that links to a symobol of integer type
+void project_add_base_symbols(Project *project)
+{
+    Symbol *s_void = symbol_new();
+    s_void->name = malloc(5);
+    sprintf(s_void->name, "void");
+    s_void->type = type_new(TYPE_VOID);
+    symbol_table_add(project->symbols, s_void);
 
-//             // case 1:
-//             if (node->data.type_array->size == NULL)
-//             {
-//                 type_arr->data.type_array->length = -1;
-//             }
+    Symbol *s_u8 = symbol_new();
+    s_u8->name = malloc(3);
+    sprintf(s_u8->name, "u8");
+    s_u8->type = type_new(TYPE_U8);
+    symbol_table_add(project->symbols, s_u8);
 
-//             switch (node->data.type_array->size->kind) {
-//                 // case 2:
-//                 case NODE_LIT_INT:
-//                     // find containing file node
-//                     Node *node_file = node_find_parent(node, NODE_FILE);
-//                     if (node_file == NULL || node_file->data.file->parser == NULL || node_file->data.file->parser->lexer == NULL)
-//                     {
-//                         return NULL;
-//                     }
+    Symbol *s_u16 = symbol_new();
+    s_u16->name = malloc(3);
+    sprintf(s_u16->name, "u16");
+    s_u16->type = type_new(TYPE_U16);
+    symbol_table_add(project->symbols, s_u16);
 
-//                     // evaluate literal integer expression
-//                     type_arr->data.type_array->length = lexer_eval_lit_int(node_file->data.file->parser->lexer, node->data.type_array->size->token);
-//                     break;
-//                 // case 3:
-//                 // NOTE:
-//                 //   Inside of unary and binary expressions, all leaf nodes must
-//                 //   be compile time constant integers or symbols that point to
-//                 //   them.
-//                 case NODE_EXPR_UNARY:
-//                     // examine each member to ensure compile time definition
-//                     // NOTE: this restriction excludes the usability of anything
-//                     //   but basic types using basic arithematic.
-//                     // The only valid unary operators here are OP_ADD and OP_SUB
-//                     switch (node->data.type_array->size->data.expr_unary->op)
-//                     {
-//                         case OP_ADD:
-//                             switch (node->data.type_array->size->data.expr_unary->target->kind)
-//                             {
-//                                 case NODE_LIT_INT:
-//                                     type_arr->data.type_array->length = lexer_eval_lit_int(node_file->data.file->parser->lexer, node->data.type_array->size->data.expr_unary->target->token);
-//                                     break;
-//                                 case NODE_IDENTIFIER:
-//                                     break;
-//                                 case NODE_EXPR_MEMBER:
-//                                 default:
-//                                     return NULL;
-//                             }
+    Symbol *s_u32 = symbol_new();
+    s_u32->name = malloc(3);
+    sprintf(s_u32->name, "u32");
+    s_u32->type = type_new(TYPE_U32);
+    symbol_table_add(project->symbols, s_u32);
 
-//                         case OP_SUB:
-//                         default:
-//                             return NULL;
-//                     }
+    Symbol *s_u64 = symbol_new();
+    s_u64->name = malloc(3);
+    sprintf(s_u64->name, "u64");
+    s_u64->type = type_new(TYPE_U64);
+    symbol_table_add(project->symbols, s_u64);
 
-//                     break;
-//                 case NODE_EXPR_BINARY:
-//                     // the only valid biary operators here are mathematical:
-//                     // - OP_ADD
-//                     // - OP_SUB
-//                     // - OP_MUL
-//                     // - OP_DIV
-//                     // - OP_MOD
-//                     // - OP_BITWISE_NOT
-//                     // - OP_BITWISE_AND
-//                     // - OP_BITWISE_OR
-//                     // - OP_BITWISE_XOR
-//                     // - OP_BITWISE_SHL
-//                     // - OP_BITWISE_SHR
+    Symbol *s_i8 = symbol_new();
+    s_i8->name = malloc(3);
+    sprintf(s_i8->name, "i8");
+    s_i8->type = type_new(TYPE_I8);
+    symbol_table_add(project->symbols, s_i8);
 
-//                     switch (node->data.type_array->size->data.expr_binary->op)
-//                     {
-//                         case OP_ADD:
-//                         case OP_SUB:
-//                         case OP_MUL:
-//                         case OP_DIV:
-//                         case OP_MOD:
-//                         case OP_BITWISE_NOT:
-//                         case OP_BITWISE_AND:
-//                         case OP_BITWISE_OR:
-//                         case OP_BITWISE_XOR:
-//                         case OP_BITWISE_SHL:
-//                         case OP_BITWISE_SHR:
-//                         default:
-//                             return NULL;
-//                     }
+    Symbol *s_i16 = symbol_new();
+    s_i16->name = malloc(3);
+    sprintf(s_i16->name, "i16");
+    s_i16->type = type_new(TYPE_I16);
+    symbol_table_add(project->symbols, s_i16);
 
-//                     break;
-//                 // case 4:
-//                 case NODE_EXPR_MEMBER:
-//                 default:
-//                     return NULL;
-//             }
+    Symbol *s_i32 = symbol_new();
+    s_i32->name = malloc(3);
+    sprintf(s_i32->name, "i32");
+    s_i32->type = type_new(TYPE_I32);
+    symbol_table_add(project->symbols, s_i32);
 
-//             return type_arr;
-//         default:
-//             return NULL;
-//     }
-// }
+    Symbol *s_i64 = symbol_new();
+    s_i64->name = malloc(3);
+    sprintf(s_i64->name, "i64");
+    s_i64->type = type_new(TYPE_I64);
+    symbol_table_add(project->symbols, s_i64);
+
+    Symbol *s_f32 = symbol_new();
+    s_f32->name = malloc(3);
+    sprintf(s_f32->name, "f32");
+    s_f32->type = type_new(TYPE_F32);
+    symbol_table_add(project->symbols, s_f32);
+
+    Symbol *s_f64 = symbol_new();
+    s_f64->name = malloc(3);
+    sprintf(s_f64->name, "f64");
+    s_f64->type = type_new(TYPE_F64);
+    symbol_table_add(project->symbols, s_f64);
+}
 
 typedef struct CBContextError
 {
@@ -698,96 +659,28 @@ void cb_populate_symbol_names_val(void *context, Node *node, int depth)
     symbol->type = type_new(TYPE_LAZY);
 
     // add symbol to symbol table
-    symbol_table_add(ctx->project->symbol_table, symbol);
-}
-
-void cb_populate_symbols(void *context, Node *node, int depth)
-{
-    CBContextProject *ctx = context;
-
-    // nodes capable of creating types:
-    // - def
-    // - ext
-    // - str
-    // - uni
-    // - fun
-    //
-    // nodes capable of defining symbols:
-    // - val
-    // - var
-    // - def
-    // - ext
-    // - str
-    // - uni
-    // - fun
-    //
-    // Symbol names take the format:
-    // <module_path>:<symbol_name>
-
-    switch (node->kind)
-    {
-    case NODE_STMT_VAL:
-    case NODE_STMT_VAR:
-    case NODE_STMT_DEF:
-        Symbol *symbol = symbol_new();
-
-        // pull identifier from def statement
-        symbol->name = strdup(node->data.stmt_def->identifier->data.identifier->name);
-
-        // check if the def statement uses a predefined symbol (alias) or if it
-        // defines its own type. simple check for identifier is enough.
-        Node *def_type = node->data.stmt_def->type;
-        switch (def_type->kind) {
-            case NODE_IDENTIFIER:
-                Symbol *base = symbol_table_get(ctx->project->symbol_table, def_type->data.identifier->name);
-
-                // if symbol not found, mark for lazy type resolution
-                // if symbol found, link to the original type
-                if (base == NULL)
-                {
-                    symbol->type = type_new(TYPE_LAZY);
-                    symbol->type->name = strdup(def_type->data.identifier->name);
-                } else {
-                    symbol->type = base->type;
-                }
-                
-                break;
-            case NODE_TYPE_FUN:
-                Type *type = type_new(TYPE_FUNCTION);
-                for (size_t i = 0; def_type->data.type_function->parameters[i] != NULL; i++)
-                {
-                    Type *param = type_new(TYPE_LAZY);
-                    param->name = strdup(def_type->data.type_function->parameters[i]->data.identifier->name);
-                    type->data.type_function->parameters[i] = param;
-                }
-
-                type->data.type_function->parameters;
-                type->data.type_function->return_type;
-
-                break;
-            case NODE_TYPE_STR:
-            case NODE_TYPE_UNI:
-            case NODE_TYPE_POINTER:
-            case NODE_TYPE_ARRAY:
-                symbol->type = type_new(TYPE_ARRAY);
-                break;
-            default:
-                break;
-        }
-    case NODE_STMT_EXT:
-    case NODE_STMT_STR:
-    case NODE_STMT_UNI:
-    case NODE_STMT_FUN:
-    default:
-        break;
-    }
+    symbol_table_add(ctx->project->symbols, symbol);
 }
 
 int project_populate_symbols(Project *project) {
+    // add symbols for basic types
+    project_add_base_symbols(project);
+
     CBContextProject *ctx = calloc(1, sizeof(CBContextProject));
     ctx->project = project;
     ctx->errors = calloc(1, sizeof(CBContextError *));
     ctx->errors[0] = NULL;
+    
+    for (size_t i = 0; project->modules[i] != NULL; i++)
+    {
+        node_walk(ctx, project->modules[i]->ast, cb_populate_symbol_names_val);
+    }
+
+    // populate symbol table with the names from any `str` keywords
+    // populate symbol table with the names from any `uni` keywords
+    // populate symbol table with the names from any `fun` keywords
+    // populate symbol table with the names from any `def` keywords
+    // populate symbol table with the names from any `ext` keywords
 
     // populate symbol table with the names from any compile-time constants
     //   declared with the `val` keyword.
@@ -803,8 +696,36 @@ int project_populate_symbols(Project *project) {
         return count_errors;
     }
 
-    // print symbols currently in symbol table
-    symbol_table_print(project->symbol_table);
+    // rules/assumptions:
+    // - project scope contains all builtin symbols
+    // - each module scope is localized
+    // - each scope inside of a module is directly heirarchal
+    //
+    // implemenation:
+    // - direct parent discovery
+    // - no sibling discovery
+    // - every module is a sibling (?)
+    //   - std.foo     <- NOT "parent" of `foo.bar`, distinct
+    //   - std.foo.bar
+    //
+    // code explanation:
+    // ``` src/foo/bar/baz.mach
+    // mod foo.bar;  # current module
+    //
+    // use foo: foo; # required to import foo, even though is organized as "parent"
+    //
+    // def baz: u32; # alias for type, defined only in `foo.bar`
+    // ```
+    //
+    // ``` src/foo/qux.mach
+    // mod foo;
+    //
+    // use foo.bar; # short form for `use bar: foo.bar;`
+    //
+    // fun main(): u32 {
+    //     ret bar.baz; # fully resolves to `foo.bar.baz`
+    // }
+    // ```
 
     // node_walk(ctx, project->program, project_populate_symbols_cb);
     // count_errors = count_context_errors(ctx);

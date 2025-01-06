@@ -79,7 +79,6 @@ typedef struct Type
     union
     {
         struct TypeError *type_error;
-        struct TypeLazy *type_lazy;
         struct TypeMeta *type_meta;
         struct TypePointer *type_pointer;
         struct TypeArray *type_array;
@@ -115,5 +114,7 @@ bool type_equals(Target target, Type *a, Type *b);
 int type_sizeof(Target target, Type *type);
 int type_alignof(Target target, Type *type);
 int type_offsetof(Target target, Type *type, char *name);
+
+char *type_describe(Type *type);
 
 #endif

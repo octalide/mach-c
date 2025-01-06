@@ -104,7 +104,7 @@ int build_target_file(char *path, int argc, char **argv)
     project->targets[0] = target_current();
     project->target_count += 1;
 
-    project->symbol_table = symbol_table_new();
+    project->symbols = symbol_table_new();
 
     build_project(project);
 
@@ -148,7 +148,7 @@ int build_target_project(char *path, int argc, char **argv)
     project->targets[0] = target_current();
     project->target_count += 1;
 
-    project->symbol_table = symbol_table_new();
+    project->symbols = symbol_table_new();
     project->modules = NULL;
 
     const cJSON *version = cJSON_GetObjectItemCaseSensitive(json, "version");

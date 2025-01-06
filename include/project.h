@@ -38,6 +38,8 @@ typedef struct Module
     // module ast strips the program node off of each file ast and combines them
     //   into one ast for the whole module
     Node *ast;
+
+    SymbolTable *symbols;
 } Module;
 
 typedef enum ProjectType
@@ -68,9 +70,17 @@ typedef struct Project
     Module **modules;
     Node *program;
 
-    // project symbol table contains all symbols for the entire project
-    SymbolTable *symbol_table;
+    // root symbol table holds things like base types and
+    // builtin definitions
+    SymbolTable *symbols;
 } Project;
+
+typedef struct Scope
+{
+    Symbol **symbol;
+
+    struct Scope *parent;
+} Scope;
 
 File *file_read(char *path);
 void file_free(File *file);
@@ -98,6 +108,8 @@ void project_parse_all(Project *project);
 int project_print_parse_errors(Project *project);
 int project_modularize_files(Project *project);
 void project_combine_modules(Project *project);
+
+void project_add_base_symbols(Project *project);
 
 int project_populate_symbols(Project *project);
 int project_validate_types(Project *project);

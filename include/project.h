@@ -2,7 +2,7 @@
 #define PROJECT_H
 
 #include "parser.h"
-#include "symbols.h"
+#include "scope.h"
 #include "target.h"
 
 #include <stdbool.h>
@@ -38,8 +38,6 @@ typedef struct Module
     // module ast strips the program node off of each file ast and combines them
     //   into one ast for the whole module
     Node *ast;
-
-    SymbolTable *symbols;
 } Module;
 
 typedef enum ProjectType
@@ -72,15 +70,8 @@ typedef struct Project
 
     // root symbol table holds things like base types and
     // builtin definitions
-    SymbolTable *symbols;
+    Scope *symbols;
 } Project;
-
-typedef struct Scope
-{
-    Symbol **symbol;
-
-    struct Scope *parent;
-} Scope;
 
 File *file_read(char *path);
 void file_free(File *file);

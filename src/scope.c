@@ -1,12 +1,12 @@
-#include "symbols.h"
+#include "scope.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-SymbolTable *symbol_table_new()
+Scope *scope_new()
 {
-    SymbolTable *table = calloc(sizeof(SymbolTable), 1);
+    Scope *table = calloc(sizeof(Scope), 1);
     table->symbols = calloc(sizeof(Symbol *), 2);
     table->symbols[0] = NULL;
     
@@ -15,7 +15,7 @@ SymbolTable *symbol_table_new()
     return table;
 }
 
-void symbol_table_free(SymbolTable *table)
+void scope_free(Scope *table)
 {
     if (table == NULL)
     {
@@ -57,7 +57,7 @@ void symbol_free(Symbol *symbol)
     free(symbol);
 }
 
-Symbol *symbol_table_get(SymbolTable *table, char *name)
+Symbol *scope_get(Scope *table, char *name)
 {
     for (size_t i = 0; table->symbols[i] != NULL; i++)
     {
@@ -69,13 +69,13 @@ Symbol *symbol_table_get(SymbolTable *table, char *name)
 
     if (table->parent != NULL)
     {
-        return symbol_table_get(table->parent, name);
+        return scope_get(table->parent, name);
     }
 
     return NULL;
 }
 
-void symbol_table_add(SymbolTable *table, Symbol *symbol)
+void scope_add(Scope *table, Symbol *symbol)
 {
     if (table == NULL)
     {
@@ -93,7 +93,7 @@ void symbol_table_add(SymbolTable *table, Symbol *symbol)
     table->symbols[i + 1] = NULL;
 }
 
-void symbol_table_print(SymbolTable *table)
+void scope_print(Scope *table)
 {
     if (table == NULL || table->symbols == NULL)
     {

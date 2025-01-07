@@ -87,7 +87,7 @@ Project *project_new()
     project->modules = calloc(sizeof(Module *), 2);
     project->modules[0] = NULL;
 
-    project->symbols = symbol_table_new();
+    project->symbols = scope_new();
 
     return project;
 }
@@ -145,7 +145,7 @@ void project_free(Project *project)
     node_free(project->program);
     project->program = NULL;
 
-    symbol_table_free(project->symbols);
+    scope_free(project->symbols);
     project->symbols = NULL;
 
     free(project);
@@ -533,67 +533,67 @@ void project_add_base_symbols(Project *project)
     s_void->name = malloc(5);
     sprintf(s_void->name, "void");
     s_void->type = type_new(TYPE_VOID);
-    symbol_table_add(project->symbols, s_void);
+    scope_add(project->symbols, s_void);
 
     Symbol *s_u8 = symbol_new();
     s_u8->name = malloc(3);
     sprintf(s_u8->name, "u8");
     s_u8->type = type_new(TYPE_U8);
-    symbol_table_add(project->symbols, s_u8);
+    scope_add(project->symbols, s_u8);
 
     Symbol *s_u16 = symbol_new();
     s_u16->name = malloc(3);
     sprintf(s_u16->name, "u16");
     s_u16->type = type_new(TYPE_U16);
-    symbol_table_add(project->symbols, s_u16);
+    scope_add(project->symbols, s_u16);
 
     Symbol *s_u32 = symbol_new();
     s_u32->name = malloc(3);
     sprintf(s_u32->name, "u32");
     s_u32->type = type_new(TYPE_U32);
-    symbol_table_add(project->symbols, s_u32);
+    scope_add(project->symbols, s_u32);
 
     Symbol *s_u64 = symbol_new();
     s_u64->name = malloc(3);
     sprintf(s_u64->name, "u64");
     s_u64->type = type_new(TYPE_U64);
-    symbol_table_add(project->symbols, s_u64);
+    scope_add(project->symbols, s_u64);
 
     Symbol *s_i8 = symbol_new();
     s_i8->name = malloc(3);
     sprintf(s_i8->name, "i8");
     s_i8->type = type_new(TYPE_I8);
-    symbol_table_add(project->symbols, s_i8);
+    scope_add(project->symbols, s_i8);
 
     Symbol *s_i16 = symbol_new();
     s_i16->name = malloc(3);
     sprintf(s_i16->name, "i16");
     s_i16->type = type_new(TYPE_I16);
-    symbol_table_add(project->symbols, s_i16);
+    scope_add(project->symbols, s_i16);
 
     Symbol *s_i32 = symbol_new();
     s_i32->name = malloc(3);
     sprintf(s_i32->name, "i32");
     s_i32->type = type_new(TYPE_I32);
-    symbol_table_add(project->symbols, s_i32);
+    scope_add(project->symbols, s_i32);
 
     Symbol *s_i64 = symbol_new();
     s_i64->name = malloc(3);
     sprintf(s_i64->name, "i64");
     s_i64->type = type_new(TYPE_I64);
-    symbol_table_add(project->symbols, s_i64);
+    scope_add(project->symbols, s_i64);
 
     Symbol *s_f32 = symbol_new();
     s_f32->name = malloc(3);
     sprintf(s_f32->name, "f32");
     s_f32->type = type_new(TYPE_F32);
-    symbol_table_add(project->symbols, s_f32);
+    scope_add(project->symbols, s_f32);
 
     Symbol *s_f64 = symbol_new();
     s_f64->name = malloc(3);
     sprintf(s_f64->name, "f64");
     s_f64->type = type_new(TYPE_F64);
-    symbol_table_add(project->symbols, s_f64);
+    scope_add(project->symbols, s_f64);
 }
 
 typedef struct CBContextError
@@ -659,7 +659,7 @@ void cb_populate_symbol_names_val(void *context, Node *node, int depth)
     symbol->type = type_new(TYPE_LAZY);
 
     // add symbol to symbol table
-    symbol_table_add(ctx->project->symbols, symbol);
+    scope_add(ctx->project->symbols, symbol);
 }
 
 int project_populate_symbols(Project *project) {
@@ -674,13 +674,13 @@ int project_populate_symbols(Project *project) {
     for (size_t i = 0; project->modules[i] != NULL; i++)
     {
         node_walk(ctx, project->modules[i]->ast, cb_populate_symbol_names_val);
-    }
 
-    // populate symbol table with the names from any `str` keywords
-    // populate symbol table with the names from any `uni` keywords
-    // populate symbol table with the names from any `fun` keywords
-    // populate symbol table with the names from any `def` keywords
-    // populate symbol table with the names from any `ext` keywords
+        // populate symbol table with the names from any `str` keywords
+        // populate symbol table with the names from any `uni` keywords
+        // populate symbol table with the names from any `fun` keywords
+        // populate symbol table with the names from any `def` keywords
+        // populate symbol table with the names from any `ext` keywords
+    }
 
     // populate symbol table with the names from any compile-time constants
     //   declared with the `val` keyword.

@@ -6,6 +6,7 @@
 typedef struct Symbol {
     char *name;
     Type *type;
+    bool constant;
 } Symbol;
 
 typedef struct Scope {
@@ -14,11 +15,11 @@ typedef struct Scope {
     struct Scope *parent;
 } Scope;
 
-Scope *scope_new();
-void scope_free(Scope *table);
-
 Symbol *symbol_new();
 void symbol_free(Symbol *symbol);
+
+Scope *scope_new();
+void scope_free(Scope *table);
 
 Symbol *scope_get(Scope *table, char *name);
 void scope_add(Scope *table, Symbol *symbol);

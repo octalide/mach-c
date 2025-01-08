@@ -66,12 +66,12 @@ void type_free(Type *type)
     switch (type->kind)
     {
     case TYPE_POINTER:
-        type_free(type->data.type_pointer->base_type);
-        type->data.type_pointer->base_type = NULL;
+        type_free(type->data.type_pointer->type_base);
+        type->data.type_pointer->type_base = NULL;
         break;
     case TYPE_ARRAY:
-        type_free(type->data.type_array->element_type);
-        type->data.type_array->element_type = NULL;
+        type_free(type->data.type_array->type_element);
+        type->data.type_array->type_element = NULL;
         break;
     case TYPE_FUNCTION:
         for (int i = 0; type->data.type_function->parameters[i] != NULL; i++)
@@ -81,8 +81,8 @@ void type_free(Type *type)
         }
         type->data.type_function->parameters = NULL;
 
-        type_free(type->data.type_function->return_type);
-        type->data.type_function->return_type = NULL;
+        type_free(type->data.type_function->type_return);
+        type->data.type_function->type_return = NULL;
         break;
     case TYPE_STRUCT:
         for (int i = 0; type->data.type_struct->fields[i] != NULL; i++)
@@ -118,8 +118,6 @@ char *type_to_string(Type *type)
     {
     case TYPE_ERROR:
         return "ERROR";
-    case TYPE_LAZY:
-        return "LAZY";
     case TYPE_META:
         return "META";
     case TYPE_VOID:
@@ -302,9 +300,9 @@ bool type_equals(Target target, Type *a, Type *b)
     case TYPE_F64:
         return size_a == size_b && align_a == align_b;
     case TYPE_ARRAY:
-        return type_equals(target, a->data.type_array->element_type, b->data.type_array->element_type);
+        return type_equals(target, a->data.type_array->type_element, b->data.type_array->type_element);
     case TYPE_FUNCTION:
-        if (!type_equals(target, a->data.type_function->return_type, b->data.type_function->return_type))
+        if (!type_equals(target, a->data.type_function->type_return, b->data.type_function->type_return))
         {
             return false;
         }
@@ -354,7 +352,7 @@ bool type_equals(Target target, Type *a, Type *b)
 
         return true;
     case TYPE_POINTER:
-        return type_equals(target, a->data.type_pointer->base_type, b->data.type_pointer->base_type);
+        return type_equals(target, a->data.type_pointer->type_base, b->data.type_pointer->type_base);
     default:
         return false;
     }
@@ -388,7 +386,7 @@ int type_sizeof(Target target, Type *type)
             return 0;
         }
 
-        return type_sizeof(target, type->data.type_array->element_type) * type->data.type_array->length;
+        return type_sizeof(target, type->data.type_array->type_element) * type->data.type_array->length;
     case TYPE_FUNCTION:
         return 0;
     case TYPE_STRUCT:
@@ -435,7 +433,7 @@ int type_alignof(Target target, Type *type)
     case TYPE_F64:
         return 8;
     case TYPE_ARRAY:
-        return type_alignof(target, type->data.type_array->element_type);
+        return type_alignof(target, type->data.type_array->type_element);
     case TYPE_FUNCTION:
         return 0;
     case TYPE_STRUCT:
@@ -527,10 +525,10 @@ char *type_describe(Type *type)
         sprintf(result, "{ kind: F64, size: %d }", type_sizeof(target_current(), type));
         break;
     case TYPE_ARRAY:
-        sprintf(result, "{ kind: ARRAY, size: %d, element: %s }", type_sizeof(target_current(), type), type_describe(type->data.type_array->element_type));
+        sprintf(result, "{ kind: ARRAY, size: %d, element: %s }", type_sizeof(target_current(), type), type_describe(type->data.type_array->type_element));
         break;
     case TYPE_FUNCTION:
-        sprintf(result, "{ kind: FUNCTION, return: %s, params: [", type_describe(type->data.type_function->return_type));
+        sprintf(result, "{ kind: FUNCTION, return: %s, params: [", type_describe(type->data.type_function->type_return));
         for (int i = 0; type->data.type_function->parameters[i] != NULL; i++)
         {
             char *param_desc = type_describe(type->data.type_function->parameters[i]);

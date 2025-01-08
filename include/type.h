@@ -9,9 +9,8 @@ typedef enum TypeKind
 {
     TYPE_ERROR,
 
-    TYPE_LAZY,
-
     TYPE_META,
+
     TYPE_VOID,
 
     TYPE_U8,
@@ -26,7 +25,6 @@ typedef enum TypeKind
     TYPE_F64,
 
     TYPE_POINTER,
-
     TYPE_ARRAY,
     TYPE_FUNCTION,
     TYPE_STRUCT,
@@ -40,24 +38,24 @@ typedef struct TypeError
 
 typedef struct TypeMeta
 {
-    struct Type *base_type;
+    struct Type *type_base;
 } TypeMeta;
 
 typedef struct TypePointer
 {
-    struct Type *base_type;
+    struct Type *type_base;
 } TypePointer;
 
 typedef struct TypeArray
 {
-    struct Type *element_type;
+    struct Type *type_element;
     int length;
 } TypeArray;
 
 typedef struct TypeFunction
 {
     struct Type **parameters;
-    struct Type *return_type;
+    struct Type *type_return;
 } TypeFunction;
 
 typedef struct TypeStruct

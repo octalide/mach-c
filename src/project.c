@@ -656,7 +656,6 @@ void cb_populate_symbol_names_val(void *context, Node *node, int depth)
     // create symbol
     Symbol *symbol = symbol_new();
     symbol->name = symbol_name;
-    symbol->type = type_new(TYPE_LAZY);
 
     // add symbol to symbol table
     scope_add(ctx->project->symbols, symbol);

@@ -4,38 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-Scope *scope_new()
-{
-    Scope *table = calloc(sizeof(Scope), 1);
-    table->symbols = calloc(sizeof(Symbol *), 2);
-    table->symbols[0] = NULL;
-    
-    table->parent = NULL;
-
-    return table;
-}
-
-void scope_free(Scope *table)
-{
-    if (table == NULL)
-    {
-        return;
-    }
-
-    if (table->symbols != NULL)
-    {
-        for (size_t i = 0; table->symbols[i] != NULL; i++)
-        {
-            symbol_free(table->symbols[i]);
-        }
-    }
-
-    free(table->symbols);
-    table->symbols = NULL;
-
-    free(table);
-}
-
 Symbol *symbol_new()
 {
     Symbol *symbol = calloc(sizeof(Symbol), 1);
@@ -57,51 +25,90 @@ void symbol_free(Symbol *symbol)
     free(symbol);
 }
 
-Symbol *scope_get(Scope *table, char *name)
+Scope *scope_new()
 {
-    for (size_t i = 0; table->symbols[i] != NULL; i++)
+    Scope *scope = calloc(sizeof(Scope), 1);
+    scope->symbols = calloc(sizeof(Symbol *), 2);
+    scope->symbols[0] = NULL;
+    
+    scope->parent = NULL;
+
+    return scope;
+}
+
+void scope_free(Scope *scope)
+{
+    if (scope == NULL)
     {
-        if (strcmp(table->symbols[i]->name, name) == 0)
+        return;
+    }
+
+    if (scope->symbols != NULL)
+    {
+        for (size_t i = 0; scope->symbols[i] != NULL; i++)
         {
-            return table->symbols[i];
+            symbol_free(scope->symbols[i]);
+            scope->symbols[i] = NULL;
         }
     }
 
-    if (table->parent != NULL)
+    free(scope->symbols);
+    scope->symbols = NULL;
+
+    scope->parent = NULL;
+
+    free(scope);
+}
+
+Symbol *scope_get(Scope *scope, char *name)
+{
+    Scope *current = scope;
+    while (current != NULL)
     {
-        return scope_get(table->parent, name);
+        if (scope->symbols != NULL)
+        {
+            for (size_t i = 0; scope->symbols[i] != NULL; i++)
+            {
+                if (strcmp(scope->symbols[i]->name, name) == 0)
+                {
+                    return scope->symbols[i];
+                }
+            }
+        }
+
+        current = current->parent;
     }
 
     return NULL;
 }
 
-void scope_add(Scope *table, Symbol *symbol)
+void scope_add(Scope *scope, Symbol *symbol)
 {
-    if (table == NULL)
+    if (scope == NULL)
     {
         return;
     }
 
     size_t i = 0;
-    while (table->symbols[i] != NULL)
+    while (scope->symbols[i] != NULL)
     {
         i++;
     }
 
-    table->symbols = realloc(table->symbols, sizeof(Symbol *) * (i + 2));
-    table->symbols[i] = symbol;
-    table->symbols[i + 1] = NULL;
+    scope->symbols = realloc(scope->symbols, sizeof(Symbol *) * (i + 2));
+    scope->symbols[i] = symbol;
+    scope->symbols[i + 1] = NULL;
 }
 
-void scope_print(Scope *table)
+void scope_print(Scope *scope)
 {
-    if (table == NULL || table->symbols == NULL)
+    if (scope == NULL || scope->symbols == NULL)
     {
         return;
     }
 
-    for (size_t i = 0; table->symbols[i] != NULL; i++)
+    for (size_t i = 0; scope->symbols[i] != NULL; i++)
     {
-        printf("  %s: %s\n", table->symbols[i]->name, type_describe(table->symbols[i]->type));
+        printf("  %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->type));
     }
 }

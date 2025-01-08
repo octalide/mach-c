@@ -68,9 +68,8 @@ typedef struct Project
     Module **modules;
     Node *program;
 
-    // root symbol table holds things like base types and
-    // builtin definitions
-    Scope *symbols;
+    // root scope holds things like base types and builtin definitions
+    Scope *scope;
 } Project;
 
 File *file_read(char *path);
@@ -99,14 +98,5 @@ void project_parse_all(Project *project);
 int project_print_parse_errors(Project *project);
 int project_modularize_files(Project *project);
 void project_combine_modules(Project *project);
-
-void project_add_base_symbols(Project *project);
-
-int project_populate_symbols(Project *project);
-int project_validate_types(Project *project);
-int project_validate_control_flow(Project *project);
-int project_validate_data_flow(Project *project);
-
-int project_analyze(Project *project);
 
 #endif

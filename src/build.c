@@ -64,13 +64,6 @@ int build_project_exe(Project *project)
     printf("project node structure debug printout:\n");
     node_walk(NULL, project->program, callback_node_debug_printout);
 
-    printf("performing analysis...\n");
-    int count_analysis_errors = project_analyze(project);
-    if (count_analysis_errors == 0)
-    {
-        printf("  no analysis errors\n");
-    }
-
     return 0;
 }
 
@@ -104,7 +97,7 @@ int build_target_file(char *path, int argc, char **argv)
     project->targets[0] = target_current();
     project->target_count += 1;
 
-    project->symbols = scope_new();
+    project->scope = scope_new();
 
     build_project(project);
 
@@ -148,7 +141,7 @@ int build_target_project(char *path, int argc, char **argv)
     project->targets[0] = target_current();
     project->target_count += 1;
 
-    project->symbols = scope_new();
+    project->scope = scope_new();
     project->modules = NULL;
 
     const cJSON *version = cJSON_GetObjectItemCaseSensitive(json, "version");

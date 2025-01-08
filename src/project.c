@@ -1,6 +1,6 @@
 #include "project.h"
-#include "ioutil.h"
 #include "ast.h"
+#include "ioutil.h"
 #include "lexer.h"
 #include "type.h"
 
@@ -87,7 +87,7 @@ Project *project_new()
     project->modules = calloc(sizeof(Module *), 2);
     project->modules[0] = NULL;
 
-    project->symbols = scope_new();
+    project->scope = scope_new();
 
     return project;
 }
@@ -145,8 +145,8 @@ void project_free(Project *project)
     node_free(project->program);
     project->program = NULL;
 
-    scope_free(project->symbols);
-    project->symbols = NULL;
+    scope_free(project->scope);
+    project->scope = NULL;
 
     free(project);
 }
@@ -202,7 +202,8 @@ char *str_replace(char *orig, char *rep, char *with)
 // identifier member accesses
 char *module_parts_join(Node *module_path)
 {
-    if (module_path == NULL || (module_path->kind != NODE_EXPR_MEMBER && module_path->kind != NODE_IDENTIFIER))
+    if (module_path == NULL || (module_path->kind != NODE_EXPR_MEMBER &&
+                                module_path->kind != NODE_IDENTIFIER))
     {
         return NULL;
     }
@@ -213,7 +214,8 @@ char *module_parts_join(Node *module_path)
     }
 
     Node *current = module_path;
-    char *joined = strdup(current->data.expr_member->member->data.identifier->name);
+    char *joined =
+        strdup(current->data.expr_member->member->data.identifier->name);
     while (current->kind == NODE_EXPR_MEMBER)
     {
         current = current->data.expr_member->target;
@@ -313,7 +315,7 @@ void project_add_module(Project *project, Module *module)
         project->modules[1] = NULL;
         return;
     }
-    
+
     size_t i = 0;
     while (project->modules[i] != NULL)
     {
@@ -352,7 +354,8 @@ void project_discover_files(Project *project)
     char **files = list_files_recursive(project->path_src, NULL, 0);
     if (files == NULL)
     {
-        printf("  error: could not list files in directory: %s\n", project->path_src);
+        printf("  error: could not list files in directory: %s\n",
+               project->path_src);
         return;
     }
 
@@ -438,7 +441,8 @@ int project_print_parse_errors(Project *project)
     {
         if (project->files[i]->ast == NULL)
         {
-            printf("error: could not parse file: %s\n", project->files[i]->path);
+            printf("error: could not parse file: %s\n",
+                   project->files[i]->path);
             continue;
         }
 
@@ -476,15 +480,18 @@ int project_modularize_files(Project *project)
         Node *module_stmt = project->files[i]->ast->data.file->statements[0];
         if (module_stmt->kind != NODE_STMT_MOD)
         {
-            printf("error: file does not start with module declaration: %s\n", project->files[i]->path);
+            printf("error: file does not start with module declaration: %s\n",
+                   project->files[i]->path);
             count_errors++;
             continue;
         }
 
-        char *module_path = module_parts_join(module_stmt->data.stmt_mod->module_path);
+        char *module_path =
+            module_parts_join(module_stmt->data.stmt_mod->module_path);
         if (module_path == NULL)
         {
-            printf("error: could not build module path: %s\n", project->files[i]->path);
+            printf("error: could not build module path: %s\n",
+                   project->files[i]->path);
             count_errors++;
             continue;
         }
@@ -500,12 +507,14 @@ int project_modularize_files(Project *project)
         int result = module_add_file_ast(module, project->files[i]);
         if (result != 0)
         {
-            printf("error: could not add file to module: %s\n", project->files[i]->path);
+            printf("error: could not add file to module: %s\n",
+                   project->files[i]->path);
             count_errors++;
             continue;
         }
 
-        printf("  modularized file: %s -> %s\n", project->files[i]->path, module_path);
+        printf("  modularized file: %s -> %s\n", project->files[i]->path,
+               module_path);
 
         free(module_path);
     }
@@ -521,267 +530,9 @@ void project_combine_modules(Project *project)
     for (size_t i = 0; project->modules[i] != NULL; i++)
     {
         project->modules[i]->ast->parent = program;
-        node_list_add(&program->data.program->modules, project->modules[i]->ast);
+        node_list_add(&program->data.program->modules,
+                      project->modules[i]->ast);
     }
 
     project->program = program;
-}
-
-void project_add_base_symbols(Project *project)
-{
-    Symbol *s_void = symbol_new();
-    s_void->name = malloc(5);
-    sprintf(s_void->name, "void");
-    s_void->type = type_new(TYPE_VOID);
-    scope_add(project->symbols, s_void);
-
-    Symbol *s_u8 = symbol_new();
-    s_u8->name = malloc(3);
-    sprintf(s_u8->name, "u8");
-    s_u8->type = type_new(TYPE_U8);
-    scope_add(project->symbols, s_u8);
-
-    Symbol *s_u16 = symbol_new();
-    s_u16->name = malloc(3);
-    sprintf(s_u16->name, "u16");
-    s_u16->type = type_new(TYPE_U16);
-    scope_add(project->symbols, s_u16);
-
-    Symbol *s_u32 = symbol_new();
-    s_u32->name = malloc(3);
-    sprintf(s_u32->name, "u32");
-    s_u32->type = type_new(TYPE_U32);
-    scope_add(project->symbols, s_u32);
-
-    Symbol *s_u64 = symbol_new();
-    s_u64->name = malloc(3);
-    sprintf(s_u64->name, "u64");
-    s_u64->type = type_new(TYPE_U64);
-    scope_add(project->symbols, s_u64);
-
-    Symbol *s_i8 = symbol_new();
-    s_i8->name = malloc(3);
-    sprintf(s_i8->name, "i8");
-    s_i8->type = type_new(TYPE_I8);
-    scope_add(project->symbols, s_i8);
-
-    Symbol *s_i16 = symbol_new();
-    s_i16->name = malloc(3);
-    sprintf(s_i16->name, "i16");
-    s_i16->type = type_new(TYPE_I16);
-    scope_add(project->symbols, s_i16);
-
-    Symbol *s_i32 = symbol_new();
-    s_i32->name = malloc(3);
-    sprintf(s_i32->name, "i32");
-    s_i32->type = type_new(TYPE_I32);
-    scope_add(project->symbols, s_i32);
-
-    Symbol *s_i64 = symbol_new();
-    s_i64->name = malloc(3);
-    sprintf(s_i64->name, "i64");
-    s_i64->type = type_new(TYPE_I64);
-    scope_add(project->symbols, s_i64);
-
-    Symbol *s_f32 = symbol_new();
-    s_f32->name = malloc(3);
-    sprintf(s_f32->name, "f32");
-    s_f32->type = type_new(TYPE_F32);
-    scope_add(project->symbols, s_f32);
-
-    Symbol *s_f64 = symbol_new();
-    s_f64->name = malloc(3);
-    sprintf(s_f64->name, "f64");
-    s_f64->type = type_new(TYPE_F64);
-    scope_add(project->symbols, s_f64);
-}
-
-typedef struct CBContextError
-{
-    char *message;
-    Node *node;
-} CBContextError;
-
-typedef struct CBContextProject
-{
-    Project *project;
-    CBContextError **errors;
-} CBContextProject;
-
-int count_context_errors(CBContextProject *ctx)
-{
-    int count = 0;
-    while (ctx->errors[count] != NULL)
-    {
-        count++;
-    }
-
-    return count;
-}
-
-void add_error_to_context(CBContextProject *ctx, char *message, Node *node)
-{
-    CBContextError *error = calloc(1, sizeof(CBContextError));
-    error->message = strdup(message);
-    error->node = node;
-
-    size_t i = count_context_errors(ctx);
-
-    ctx->errors = realloc(ctx->errors, sizeof(CBContextError *) * (i + 2));
-    ctx->errors[i] = error;
-    ctx->errors[i + 1] = NULL;
-}
-
-void cb_populate_symbol_names_val(void *context, Node *node, int depth)
-{
-    CBContextProject *ctx = context;
-
-    if (node->kind != NODE_STMT_VAL)
-    {
-        return;
-    }
-
-    // find containing module
-    Node *node_module = node_find_parent(node, NODE_MODULE);
-    if (node_module == NULL)
-    {
-        add_error_to_context(ctx, "unable to find containing module", node);
-        return;
-    }
-
-    // join node_module->name and node->data.stmt_val->identifier->name with `:`
-    char *symbol_name = malloc(strlen(node_module->data.module->name) + strlen(node->data.stmt_val->identifier->data.identifier->name) + 2);
-    sprintf(symbol_name, "%s:%s", node_module->data.module->name, node->data.stmt_val->identifier->data.identifier->name);
-
-    // create symbol
-    Symbol *symbol = symbol_new();
-    symbol->name = symbol_name;
-
-    // add symbol to symbol table
-    scope_add(ctx->project->symbols, symbol);
-}
-
-int project_populate_symbols(Project *project) {
-    // add symbols for basic types
-    project_add_base_symbols(project);
-
-    CBContextProject *ctx = calloc(1, sizeof(CBContextProject));
-    ctx->project = project;
-    ctx->errors = calloc(1, sizeof(CBContextError *));
-    ctx->errors[0] = NULL;
-    
-    for (size_t i = 0; project->modules[i] != NULL; i++)
-    {
-        node_walk(ctx, project->modules[i]->ast, cb_populate_symbol_names_val);
-
-        // populate symbol table with the names from any `str` keywords
-        // populate symbol table with the names from any `uni` keywords
-        // populate symbol table with the names from any `fun` keywords
-        // populate symbol table with the names from any `def` keywords
-        // populate symbol table with the names from any `ext` keywords
-    }
-
-    // populate symbol table with the names from any compile-time constants
-    //   declared with the `val` keyword.
-    node_walk(ctx, project->program, cb_populate_symbol_names_val);
-    int count_errors = count_context_errors(ctx);
-    if (count_errors != 0)
-    {
-        for (size_t i = 0; ctx->errors[i] != NULL; i++)
-        {
-            printf("error: %s\n", ctx->errors[i]->message);
-        }
-
-        return count_errors;
-    }
-
-    // rules/assumptions:
-    // - project scope contains all builtin symbols
-    // - each module scope is localized
-    // - each scope inside of a module is directly heirarchal
-    //
-    // implemenation:
-    // - direct parent discovery
-    // - no sibling discovery
-    // - every module is a sibling (?)
-    //   - std.foo     <- NOT "parent" of `foo.bar`, distinct
-    //   - std.foo.bar
-    //
-    // code explanation:
-    // ``` src/foo/bar/baz.mach
-    // mod foo.bar;  # current module
-    //
-    // use foo: foo; # required to import foo, even though is organized as "parent"
-    //
-    // def baz: u32; # alias for type, defined only in `foo.bar`
-    // ```
-    //
-    // ``` src/foo/qux.mach
-    // mod foo;
-    //
-    // use foo.bar; # short form for `use bar: foo.bar;`
-    //
-    // fun main(): u32 {
-    //     ret bar.baz; # fully resolves to `foo.bar.baz`
-    // }
-    // ```
-
-    // node_walk(ctx, project->program, project_populate_symbols_cb);
-    // count_errors = count_context_errors(ctx);
-    // if (count_errors != 0)
-    // {
-    //     for (size_t i = 0; ctx->errors[i] != NULL; i++)
-    //     {
-    //         printf("error: %s\n", ctx->errors[i]->message);
-    //     }
-    // }
-
-    return 0;
-}
-
-int project_validate_types(Project *project) {
-    return 0;
-}
-
-int project_validate_control_flow(Project *project) {
-    return 0;
-}
-
-int project_validate_data_flow(Project *project) {
-    return 0;
-}
-
-int project_analyze(Project *project)
-{
-    if (project->program == NULL || project->program->kind != NODE_PROGRAM)
-    {
-        printf("error: program node is invalid\n");
-        return 1;
-    }
-
-    int count_error_populate_symbols = project_populate_symbols(project);
-    if (count_error_populate_symbols != 0) {
-        printf("populate symbols returned %d errors\n", count_error_populate_symbols);
-        return count_error_populate_symbols;
-    }
-
-    int count_error_validate_types = project_validate_types(project);
-    if (count_error_validate_types != 0) {
-        printf("validate types returned %d errors\n", count_error_validate_types);
-        return count_error_validate_types;
-    }
-
-    int count_error_validate_control_flow = project_validate_control_flow(project);
-    if (count_error_validate_control_flow != 0) {
-        printf("validate control_flow returned %d errors\n", count_error_validate_control_flow);
-        return count_error_validate_control_flow;
-    }
-
-    int count_error_validate_data_flow = project_validate_data_flow(project);
-    if (count_error_validate_data_flow != 0) {
-        printf("validate data_flow returned %d errors\n", count_error_validate_data_flow);
-        return count_error_validate_data_flow;
-    }
-    
-    return 0;
 }

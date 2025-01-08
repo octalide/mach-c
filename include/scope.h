@@ -5,6 +5,8 @@
 
 typedef enum SymbolKind
 {
+    SYMBOL_ERR,
+
     SYMBOL_VAL,
     SYMBOL_VAR,
     SYMBOL_DEF,
@@ -12,8 +14,13 @@ typedef enum SymbolKind
     SYMBOL_UNI,
     SYMBOL_FUN,
     SYMBOL_EXT,
-    SYMBOL_USE
+    SYMBOL_USE,
 } SymbolKind;
+
+typedef struct SymbolErr
+{
+    char *message;
+} SymbolErr;
 
 typedef struct SymbolVal
 {
@@ -61,6 +68,7 @@ typedef struct Symbol {
     char *name;
 
     union {
+        SymbolErr err;
         SymbolVal val;
         SymbolVar var;
         SymbolDef def;

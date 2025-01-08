@@ -135,8 +135,11 @@ void scope_print(Scope *scope)
         case SYMBOL_USE:
             printf("  use %s: %s\n", scope->symbols[i]->name, scope->symbols[i]->data.use.module);
             break;
+        case SYMBOL_ERR:
+            printf("  err %s: %s\n", scope->symbols[i]->name, scope->symbols[i]->data.err.message);
+            break;
         default:
-            printf("  unknown %s\n", scope->symbols[i]->name);
+            printf("  %s: unknown symbol kind\n", scope->symbols[i]->name);
             break;
         }
     }

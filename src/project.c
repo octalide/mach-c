@@ -2,7 +2,6 @@
 #include "ast.h"
 #include "ioutil.h"
 #include "lexer.h"
-#include "type.h"
 
 #include <stdio.h>
 #include <string.h>

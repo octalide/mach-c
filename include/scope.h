@@ -3,10 +3,73 @@
 
 #include "type.h"
 
-typedef struct Symbol {
-    char *name;
+typedef enum SymbolKind
+{
+    SYMBOL_VAL,
+    SYMBOL_VAR,
+    SYMBOL_DEF,
+    SYMBOL_STR,
+    SYMBOL_UNI,
+    SYMBOL_FUN,
+    SYMBOL_EXT,
+    SYMBOL_USE
+} SymbolKind;
+
+typedef struct SymbolVal
+{
     Type *type;
-    bool constant;
+} SymbolVal;
+
+typedef struct SymbolVar
+{
+    Type *type;
+} SymbolVar;
+
+typedef struct SymbolDef
+{
+    Type *type;
+} SymbolDef;
+
+typedef struct SymbolStr
+{
+    Type *type;
+} SymbolStr;
+
+typedef struct SymbolUni
+{
+    Type *type;
+} SymbolUni;
+
+typedef struct SymbolFun
+{
+    Type *type;
+} SymbolFun;
+
+typedef struct SymbolExt
+{
+    Type *type;
+} SymbolExt;
+
+typedef struct SymbolUse
+{
+    char *module;
+} SymbolUse;
+
+typedef struct Symbol {
+    SymbolKind kind;
+
+    char *name;
+
+    union {
+        SymbolVal val;
+        SymbolVar var;
+        SymbolDef def;
+        SymbolStr str;
+        SymbolUni uni;
+        SymbolFun fun;
+        SymbolExt ext;
+        SymbolUse use;
+    } data;
 } Symbol;
 
 typedef struct Scope {

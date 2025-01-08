@@ -109,6 +109,35 @@ void scope_print(Scope *scope)
 
     for (size_t i = 0; scope->symbols[i] != NULL; i++)
     {
-        printf("  %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->type));
+        switch (scope->symbols[i]->kind)
+        {
+        case SYMBOL_VAL:
+            printf("  val %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->data.val.type));
+            break;
+        case SYMBOL_VAR:
+            printf("  var %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->data.var.type));
+            break;
+        case SYMBOL_DEF:
+            printf("  def %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->data.def.type));
+            break;
+        case SYMBOL_STR:
+            printf("  str %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->data.str.type));
+            break;
+        case SYMBOL_UNI:
+            printf("  uni %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->data.uni.type));
+            break;
+        case SYMBOL_FUN:
+            printf("  fun %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->data.fun.type));
+            break;
+        case SYMBOL_EXT:
+            printf("  ext %s: %s\n", scope->symbols[i]->name, type_describe(scope->symbols[i]->data.ext.type));
+            break;
+        case SYMBOL_USE:
+            printf("  use %s: %s\n", scope->symbols[i]->name, scope->symbols[i]->data.use.module);
+            break;
+        default:
+            printf("  unknown %s\n", scope->symbols[i]->name);
+            break;
+        }
     }
 }

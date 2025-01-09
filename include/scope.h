@@ -93,11 +93,13 @@ Symbol *symbol_new();
 void symbol_free(Symbol *symbol);
 
 Scope *scope_new();
-void scope_free(Scope *table);
+void scope_free(Scope *scope);
 
-Symbol *scope_get(Scope *table, char *name);
-void scope_add(Scope *table, Symbol *symbol);
+Symbol *scope_get(Scope *scope, char *name);
+void scope_add(Scope *scope, Symbol *symbol);
 
-void scope_print(Scope *table);
+void scope_add_scope(Scope *target, Scope *source);
+
+void scope_print(Scope *scope);
 
 #endif

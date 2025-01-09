@@ -60,7 +60,7 @@ void scope_free(Scope *scope)
         free(scope->name);
         scope->name = NULL;
     }
-    
+
     // DO NOT free parent
     // not owned by this object
     scope->parent = NULL;
@@ -105,6 +105,27 @@ void scope_add(Scope *scope, Symbol *symbol)
 
     scope->symbols = realloc(scope->symbols, sizeof(Symbol *) * (i + 2));
     scope->symbols[i] = symbol;
+    scope->symbols[i + 1] = NULL;
+}
+
+void scope_add_scope(Scope *scope, Scope *child)
+{
+    if (scope == NULL)
+    {
+        return;
+    }
+
+    size_t i = 0;
+    while (scope->symbols[i] != NULL)
+    {
+        i++;
+    }
+
+    scope->symbols = realloc(scope->symbols, sizeof(Symbol *) * (i + 2));
+    scope->symbols[i] = symbol_new();
+    scope->symbols[i]->kind = SYMBOL_SCOPE;
+    scope->symbols[i]->name = strdup(child->name);
+    scope->symbols[i]->data.scope = child;
     scope->symbols[i + 1] = NULL;
 }
 

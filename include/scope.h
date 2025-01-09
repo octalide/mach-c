@@ -59,7 +59,8 @@ typedef struct SymbolExt
 
 typedef struct SymbolUse
 {
-    char *module;
+    char *module_name;
+    struct Scope *module_scope;
 } SymbolUse;
 
 typedef struct Symbol {

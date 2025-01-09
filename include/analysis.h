@@ -3,6 +3,8 @@
 
 #include "project.h"
 
+int analyze_node(Scope *scope, Node *node);
 
+int analize_project(Project *project);
 
 #endif

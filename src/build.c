@@ -97,7 +97,7 @@ int build_target_file(char *path, int argc, char **argv)
     project->targets[0] = target_current();
     project->target_count += 1;
 
-    project->scope = scope_new();
+    project->scope_project = scope_new();
 
     build_project(project);
 
@@ -141,7 +141,7 @@ int build_target_project(char *path, int argc, char **argv)
     project->targets[0] = target_current();
     project->target_count += 1;
 
-    project->scope = scope_new();
+    project->scope_project = scope_new();
     project->modules = NULL;
 
     const cJSON *version = cJSON_GetObjectItemCaseSensitive(json, "version");

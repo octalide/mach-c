@@ -66,10 +66,11 @@ typedef struct Project
 
     File **files;
     Module **modules;
+
     Node *program;
 
-    // root scope holds things like base types and builtin definitions
-    Scope *scope;
+    Scope *scope_project;
+    Scope **scopes_modules;
 } Project;
 
 File *file_read(char *path);
@@ -85,6 +86,9 @@ void file_parse(File *file);
 
 char *module_parts_join(Node *module_path);
 int module_add_file_ast(Module *module, File *file);
+
+Scope *module_scope_new(Project *project, Module *module);
+Scope *module_scope_get(Project *project, char *name);
 
 char *project_resolve_macros(Project *project, char *str);
 

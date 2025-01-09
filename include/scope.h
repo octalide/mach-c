@@ -81,6 +81,9 @@ typedef struct Symbol {
 } Symbol;
 
 typedef struct Scope {
+    // name is used to prefix module scopes with their name
+    char *name;
+
     Symbol **symbols;
 
     struct Scope *parent;

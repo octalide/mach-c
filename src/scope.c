@@ -55,6 +55,14 @@ void scope_free(Scope *scope)
     free(scope->symbols);
     scope->symbols = NULL;
 
+    if (scope->name != NULL)
+    {
+        free(scope->name);
+        scope->name = NULL;
+    }
+    
+    // DO NOT free parent
+    // not owned by this object
     scope->parent = NULL;
 
     free(scope);

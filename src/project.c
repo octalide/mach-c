@@ -86,7 +86,7 @@ Project *project_new()
     project->modules = calloc(sizeof(Module *), 2);
     project->modules[0] = NULL;
 
-    project->scope = scope_new();
+    project->scope_project = scope_new();
 
     return project;
 }
@@ -141,11 +141,17 @@ void project_free(Project *project)
     free(project->modules);
     project->modules = NULL;
 
+    for (size_t i = 0; project->scopes_modules[i] != NULL; i++)
+    {
+        scope_free(project->scopes_modules[i]);
+        project->scopes_modules[i] = NULL;
+    }
+
     node_free(project->program);
     project->program = NULL;
 
-    scope_free(project->scope);
-    project->scope = NULL;
+    scope_free(project->scope_project);
+    project->scope_project = NULL;
 
     free(project);
 }
@@ -262,6 +268,33 @@ int module_add_file_ast(Module *module, File *file)
     file->ast->parent = module->ast;
 
     return 0;
+}
+
+Scope *module_scope_new(Project *project, Module *module)
+{
+    Scope *scope = scope_new();
+    scope->parent = project->scope_project;
+    scope->name = strdup(module->name);
+
+    return scope;
+}
+
+Scope *module_scope_get(Project *project, char *name)
+{
+    if (project->scopes_modules == NULL)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; project->scopes_modules[i] != NULL; i++)
+    {
+        if (strcmp(project->scopes_modules[i]->name, name) == 0)
+        {
+            return project->scopes_modules[i];
+        }
+    }
+
+    return NULL;
 }
 
 // resolve macros in paths. macros available are:

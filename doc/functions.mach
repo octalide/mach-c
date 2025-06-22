@@ -1,0 +1,9 @@
+# functions as types
+# NOTE: Functions in mach are first-class citizens, meaning they can be passed around as values, stored in variables, and returned from other functions.
+def foo: fun(radius: f32) f32;
+
+# function implementation example
+# NOTE: This is a function that calculates the area of a circle given its radius. It uses the `ret` keyword to return a value.
+fun circle_area(radius: f32) f32 {
+    ret 3.14159 * radius * radius;
+}

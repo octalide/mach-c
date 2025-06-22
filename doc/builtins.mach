@@ -1,0 +1,33 @@
+# builtin functions
+# NOTE: These are the ONLY builtin functions in mach.
+
+str point {
+    x: f32;
+    y: f32;
+}
+
+fun example() {
+    # `size_of` function
+    # NOTE: The `size_of` function returns the size of a type in bytes.
+    val size_i32: u32 = size_of(i32); # Size of i32
+
+    # `align_of` function
+    # NOTE: The `align_of` function returns the alignment of a type in bytes.
+    val align_i32: u32 = align_of(i32); # Alignment of i32
+
+    # `type_of` function
+    # NOTE: The `type_of` function returns the type of a value as a string.
+    val type_of_i32: str = type_of(i32); # Type of i32
+
+    # `offset_of` function
+    # NOTE: The `offset_of` function returns the offset of a field in a struct.
+    # It takes a struct type and a field name as arguments.
+    val offset_x: u32 = offset_of(point.y); # Offset of field x in `point` struct
+
+    # `len` function
+    # NOTE: The `len` function returns the length of an array.
+    val arr:     [_]i32 = [_]i32{1, 2, 3, 4, 5}; # Dynamic size array of i32
+    var arr2:    [5]i32 = [5]i32{1, 2, 3, 4, 5}; # Fixed size array of i32
+    val length:  u32    = len(arr); # Length of the array
+    val length2: u32    = len(arr2); # Length of the fixed size array
+}

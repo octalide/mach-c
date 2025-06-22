@@ -1,0 +1,79 @@
+# NOTE: This file contains examples of logical and comparison operations in the Mach programming language.
+# These operations are fundamental for controlling the flow of programs and making decisions based on conditions.
+# Mach does NOT have a builtin boolean type, but uses `u8` for boolean values, where `0` is false and any non-zero value is true.
+# The optional mach standard library provides a `bool` type that is an alias for `u8`, with `true` as `1` and `false` as `0`.
+fun example() {
+    # if/or statements
+    # NOTE: The `if` statement checks a condition and executes the block if the condition is true.
+    # The only non-standard behavior of the `if` statement is that it can have an `or` block, which behaves both like typical `else` and `else if` statements.
+    val x: u8 = 5;
+    if (x > 0 || x < 10) {
+        # This block executes if x is greater than 0 or less than 10
+    }
+    or (x == 5) {
+        # This block executes if x is equal to 5
+    }
+    or {
+        # This block executes if none of the previous conditions were true
+    }
+
+    # looping
+    # NOTE: Mach ONLY includes a `for` loop, which iterates over a range of values while a condition is true.
+    # The condition is optional, and if omitted, the loop will run until escaped.
+    # Standard C-syle for loop syntax is not supported.
+    var i: u8 = 0;
+    for (i < 10) {
+        # This block executes while i is less than 10
+        i = i + 1; # Increment i by 1
+    }
+
+    for {
+        # This block executes indefinitely until escaped
+        if (i == 5) {
+            cnt; # Skip the rest of the loop if i is equal to 5
+        }
+
+        if (i >= 10) {
+            brk; # Exit the loop if i is greater than or equal to 10
+        }
+        i = i + 1; # Increment i by 1
+    }
+
+    # arithmetic operators
+    var a: u8 = 10;
+    var b: u8 = 5;
+
+    a + b; # Addition
+    a - b; # Subtraction
+    a * b; # Multiplication
+    a / b; # Division
+    a % b; # Modulus
+
+    # comparison operators
+    # NOTE: Comparison operators return a `u8` value, where `0` is false and any non-zero value is true.
+    a == b; # Equal to
+    a != b; # Not equal to
+    a < b;  # Less than
+    a <= b; # Less than or equal to
+    a > b;  # Greater than
+    a >= b; # Greater than or equal to
+
+    # logical operators
+    # NOTE: Logical operators return a `u8` value, where `0` is false and any non-zero value is true.
+    a && b; # Logical AND
+    a || b; # Logical OR
+    !a;     # Logical NOT (negation)
+
+    # bitwise operators
+    # NOTE: Bitwise operators operate on the binary representation of integers.
+    a & b;  # Bitwise AND
+    a | b;  # Bitwise OR
+    a ^ b;  # Bitwise XOR (exclusive OR)
+    a << 1; # Left shift (shifts bits to the left, filling with zeros)
+    a >> 1; # Right shift (shifts bits to the right, filling with zeros for unsigned types, or sign bit for signed types)
+    ~a;     # Bitwise NOT (inverts all bits)
+
+    # assignment operators
+    # NOTE: Assignment operators are used to assign values to variables.
+    a = b;  # Simple assignment
+}

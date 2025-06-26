@@ -1370,6 +1370,7 @@ Node *parser_parse_stmt_fun(Parser *parser)
     }
 
     node_init(node, NODE_STMT_FUNCTION);
+    node->function.name        = name;
     node->function.params      = params;
     node->function.return_type = return_type;
     node->function.body        = body;

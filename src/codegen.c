@@ -318,17 +318,51 @@ static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node)
         return NULL;
     }
 
-    // get function name from first parameter (hack for now)
-    const char *func_name = "main"; // default name
+    // get function name
+    const char *func_name = "unknown";
+    if (func_node->function.name && func_node->function.name->kind == NODE_IDENTIFIER)
+    {
+        func_name = func_node->function.name->str_value;
+    }
 
     // create function type
     LLVMTypeRef return_type = codegen_type(codegen, func_node->function.return_type);
 
-    // for now, create functions with no parameters
-    LLVMTypeRef func_type = LLVMFunctionType(return_type, NULL, 0, false);
+    // handle parameters
+    LLVMTypeRef *param_types = NULL;
+    unsigned     param_count = 0;
+
+    if (func_node->function.params)
+    {
+        param_count = node_list_count(func_node->function.params);
+        if (param_count > 0)
+        {
+            param_types = malloc(sizeof(LLVMTypeRef) * param_count);
+            for (unsigned i = 0; i < param_count; i++)
+            {
+                Node *param = func_node->function.params[i];
+                if (param && param->kind == NODE_STMT_VAL && param->decl.type)
+                {
+                    param_types[i] = codegen_type(codegen, param->decl.type);
+                }
+                else
+                {
+                    param_types[i] = LLVMInt32TypeInContext(codegen->context); // default
+                }
+            }
+        }
+    }
+
+    LLVMTypeRef func_type = LLVMFunctionType(return_type, param_types, param_count, func_node->function.is_variadic);
 
     // create function
     LLVMValueRef function = LLVMAddFunction(codegen->module, func_name, func_type);
+
+    // cleanup param_types
+    if (param_types)
+    {
+        free(param_types);
+    }
 
     // create entry block
     LLVMBasicBlockRef entry_block = LLVMAppendBasicBlockInContext(codegen->context, function, "entry");
@@ -337,6 +371,24 @@ static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node)
     // set current function
     LLVMValueRef prev_function = codegen->current_function;
     codegen->current_function  = function;
+
+    // create local variables for parameters
+    if (func_node->function.params && param_count > 0)
+    {
+        for (unsigned i = 0; i < param_count; i++)
+        {
+            Node *param = func_node->function.params[i];
+            if (param && param->kind == NODE_STMT_VAL && param->decl.name && param->decl.name->kind == NODE_IDENTIFIER)
+            {
+                const char  *param_name  = param->decl.name->str_value;
+                LLVMValueRef param_value = LLVMGetParam(function, i);
+                LLVMSetValueName(param_value, param_name);
+
+                // for now, just add to symbol table (later we'll create allocas for mutable params)
+                add_symbol(codegen, param_name, param_value);
+            }
+        }
+    }
 
     // generate function body
     bool has_terminator = false;
@@ -443,6 +495,86 @@ static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node)
         }
         codegen_error(codegen, "Undefined symbol");
         return NULL;
+    }
+
+    case NODE_EXPR_BINARY:
+    {
+        LLVMValueRef left  = codegen_expression(codegen, expr_node->binary.left);
+        LLVMValueRef right = codegen_expression(codegen, expr_node->binary.right);
+
+        if (!left || !right)
+        {
+            return NULL;
+        }
+
+        switch (expr_node->binary.op)
+        {
+        case OP_ADD:
+            return LLVMBuildAdd(codegen->builder, left, right, "add_tmp");
+        case OP_SUB:
+            return LLVMBuildSub(codegen->builder, left, right, "sub_tmp");
+        case OP_MUL:
+            return LLVMBuildMul(codegen->builder, left, right, "mul_tmp");
+        case OP_DIV:
+            // assume signed division for now
+            return LLVMBuildSDiv(codegen->builder, left, right, "div_tmp");
+        case OP_MOD:
+            return LLVMBuildSRem(codegen->builder, left, right, "mod_tmp");
+        default:
+            codegen_error(codegen, "Unsupported binary operator");
+            return NULL;
+        }
+    }
+
+    case NODE_EXPR_CALL:
+    {
+        // get function name
+        if (!expr_node->call.target || expr_node->call.target->kind != NODE_IDENTIFIER)
+        {
+            codegen_error(codegen, "Invalid function call target");
+            return NULL;
+        }
+
+        const char  *func_name = expr_node->call.target->str_value;
+        LLVMValueRef function  = get_symbol(codegen, func_name);
+
+        if (!function)
+        {
+            codegen_error(codegen, "Undefined function");
+            return NULL;
+        }
+
+        // build arguments
+        LLVMValueRef *args      = NULL;
+        unsigned      arg_count = 0;
+
+        if (expr_node->call.args)
+        {
+            arg_count = node_list_count(expr_node->call.args);
+            if (arg_count > 0)
+            {
+                args = malloc(sizeof(LLVMValueRef) * arg_count);
+                for (unsigned i = 0; i < arg_count; i++)
+                {
+                    args[i] = codegen_expression(codegen, expr_node->call.args[i]);
+                    if (!args[i])
+                    {
+                        free(args);
+                        return NULL;
+                    }
+                }
+            }
+        }
+
+        // make the call
+        LLVMValueRef result = LLVMBuildCall2(codegen->builder, LLVMGlobalGetValueType(function), function, args, arg_count, "call_tmp");
+
+        if (args)
+        {
+            free(args);
+        }
+
+        return result;
     }
 
     default:

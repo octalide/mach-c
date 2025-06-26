@@ -114,6 +114,7 @@ struct Node
 
         struct
         {
+            Node  *name;
             Node **params;
             Node  *return_type;
             Node  *body;

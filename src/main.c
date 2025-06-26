@@ -308,6 +308,12 @@ static void print_node(Node *node, int indent)
 
     case NODE_STMT_FUNCTION:
     case NODE_TYPE_FUNCTION:
+        if (node->function.name)
+        {
+            print_indent(indent + 1);
+            printf("name:\n");
+            print_node(node->function.name, indent + 2);
+        }
         if (node->function.params)
         {
             print_indent(indent + 1);

@@ -55,6 +55,11 @@ void node_dnit(Node *node)
 
     case NODE_STMT_FUNCTION:
     case NODE_TYPE_FUNCTION:
+        if (node->function.name)
+        {
+            node_dnit(node->function.name);
+            free(node->function.name);
+        }
         if (node->function.params)
         {
             for (int i = 0; node->function.params[i]; i++)

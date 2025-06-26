@@ -1381,6 +1381,80 @@ Node *parser_parse_stmt_str(Parser *parser)
 {
     parser_advance(parser); // consume 'str'
 
+    // check if this is direct struct definition: str name { ... }
+    if (parser_check(parser, TOKEN_IDENTIFIER))
+    {
+        Node *name = parser_parse_identifier(parser);
+        if (name == NULL)
+        {
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after struct name"))
+        {
+            node_dnit(name);
+            free(name);
+            return NULL;
+        }
+
+        Node **fields = parser_parse_field_list(parser);
+
+        if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}' after struct fields"))
+        {
+            node_dnit(name);
+            free(name);
+            if (fields)
+            {
+                for (size_t i = 0; i < node_list_count(fields); i++)
+                {
+                    node_dnit(fields[i]);
+                    free(fields[i]);
+                }
+                free(fields);
+            }
+            return NULL;
+        }
+
+        // create struct type node
+        Node *struct_type = malloc(sizeof(Node));
+        if (struct_type == NULL)
+        {
+            node_dnit(name);
+            free(name);
+            if (fields)
+            {
+                for (size_t i = 0; i < node_list_count(fields); i++)
+                {
+                    node_dnit(fields[i]);
+                    free(fields[i]);
+                }
+                free(fields);
+            }
+            return NULL;
+        }
+
+        node_init(struct_type, NODE_STMT_STRUCT);
+        struct_type->composite.fields = fields;
+
+        // create def statement node (same AST as def name: str { ... };)
+        Node *node = malloc(sizeof(Node));
+        if (node == NULL)
+        {
+            node_dnit(name);
+            free(name);
+            node_dnit(struct_type);
+            free(struct_type);
+            return NULL;
+        }
+
+        node_init(node, NODE_STMT_DEF);
+        node->decl.name = name;
+        node->decl.type = struct_type;
+        node->decl.init = NULL;
+        return node;
+    }
+
+    // anonymous struct definition for type context: str { ... }
     if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after str"))
     {
         return NULL;
@@ -1417,6 +1491,80 @@ Node *parser_parse_stmt_uni(Parser *parser)
 {
     parser_advance(parser); // consume 'uni'
 
+    // check if this is direct union definition: uni name { ... }
+    if (parser_check(parser, TOKEN_IDENTIFIER))
+    {
+        Node *name = parser_parse_identifier(parser);
+        if (name == NULL)
+        {
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after union name"))
+        {
+            node_dnit(name);
+            free(name);
+            return NULL;
+        }
+
+        Node **fields = parser_parse_field_list(parser);
+
+        if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}' after union fields"))
+        {
+            node_dnit(name);
+            free(name);
+            if (fields)
+            {
+                for (size_t i = 0; i < node_list_count(fields); i++)
+                {
+                    node_dnit(fields[i]);
+                    free(fields[i]);
+                }
+                free(fields);
+            }
+            return NULL;
+        }
+
+        // create union type node
+        Node *union_type = malloc(sizeof(Node));
+        if (union_type == NULL)
+        {
+            node_dnit(name);
+            free(name);
+            if (fields)
+            {
+                for (size_t i = 0; i < node_list_count(fields); i++)
+                {
+                    node_dnit(fields[i]);
+                    free(fields[i]);
+                }
+                free(fields);
+            }
+            return NULL;
+        }
+
+        node_init(union_type, NODE_STMT_UNION);
+        union_type->composite.fields = fields;
+
+        // create def statement node (same AST as def name: uni { ... };)
+        Node *node = malloc(sizeof(Node));
+        if (node == NULL)
+        {
+            node_dnit(name);
+            free(name);
+            node_dnit(union_type);
+            free(union_type);
+            return NULL;
+        }
+
+        node_init(node, NODE_STMT_DEF);
+        node->decl.name = name;
+        node->decl.type = union_type;
+        node->decl.init = NULL;
+        return node;
+    }
+
+    // anonymous union definition for type context: uni { ... }
     if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after uni"))
     {
         return NULL;

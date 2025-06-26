@@ -31,45 +31,45 @@ val VERSION: u8 = 1;
 val BUFFER_SIZE: u64 = 4096;
 
 # Struct definitions
-def point: str {
+str point {
     x: f32;
     y: f32;
     z: f32;
-};
+}
 
-def rectangle: str {
+str rectangle {
     top_left: point;
     bottom_right: point;
     area: f32;
-};
+}
 
-def node: str {
+str node {
     data: i32;
     next: *node;
     prev: *node;
-};
+}
 
-def complex_struct: str {
+str complex_struct {
     id: u64;
     name: [32]u8;
     position: point;
     children: [10]*node;
     metadata: *u8;
-};
+}
 
 # Union definitions
-def number: uni {
+uni number {
     as_int: i32;
     as_float: f32;
     as_bytes: [4]u8;
-};
+}
 
-def variant: uni {
+uni variant {
     integer: i64;
     floating: f64;
     pointer: *u8;
     array: [8]u8;
-};
+}
 
 # Explicit casting examples - :: operator for same-size type reinterpretation
 # NOTE: Mach avoids implicit casting. Only literals can be implicitly cast.

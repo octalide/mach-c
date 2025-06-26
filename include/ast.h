@@ -12,10 +12,13 @@ typedef struct Node Node;
 
 typedef enum NodeKind
 {
-    // basic nodes
-    NODE_IDENTIFIER,
+    NODE_ERROR,
+
     NODE_PROGRAM,
+
     NODE_BLOCK,
+
+    NODE_IDENTIFIER,
 
     // literals
     NODE_LIT_INT,
@@ -39,6 +42,7 @@ typedef enum NodeKind
     NODE_TYPE_UNION,
 
     // statements
+    NODE_STMT_USE,
     NODE_STMT_VAL,
     NODE_STMT_VAR,
     NODE_STMT_DEF,
@@ -77,6 +81,11 @@ struct Node
         Node **children; // array of child nodes (null-terminated)
 
         // specific structures for complex nodes
+        struct
+        {
+            char *message;
+        } error;
+
         struct
         {
             Node    *left;

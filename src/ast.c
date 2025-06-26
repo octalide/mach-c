@@ -19,6 +19,8 @@ void node_dnit(Node *node)
 
     switch (node->kind)
     {
+    case NODE_ERROR:
+        break;
     case NODE_IDENTIFIER:
     case NODE_LIT_STRING:
         free(node->str_value);
@@ -142,6 +144,7 @@ void node_dnit(Node *node)
     case NODE_EXPR_INDEX:
     case NODE_EXPR_MEMBER:
     case NODE_EXPR_CAST:
+    case NODE_STMT_USE:
     case NODE_STMT_EXTERNAL:
     case NODE_STMT_RETURN:
     case NODE_STMT_EXPRESSION:
@@ -339,6 +342,8 @@ const char *node_kind_name(NodeKind kind)
 {
     switch (kind)
     {
+    case NODE_ERROR:
+        return "error";
     case NODE_IDENTIFIER:
         return "identifier";
     case NODE_PROGRAM:
@@ -391,6 +396,8 @@ const char *node_kind_name(NodeKind kind)
         return "struct_statement";
     case NODE_STMT_UNION:
         return "union_statement";
+    case NODE_STMT_USE:
+        return "use_statement";
     case NODE_STMT_EXTERNAL:
         return "external_statement";
     case NODE_STMT_IF:

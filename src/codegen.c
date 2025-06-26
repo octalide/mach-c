@@ -614,6 +614,47 @@ static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node)
 
     case NODE_EXPR_BINARY:
     {
+        // handle assignment specially since left side should not be evaluated as expression
+        if (expr_node->binary.op == OP_ASSIGN)
+        {
+            // assignment requires special handling - left side must be an lvalue
+            if (expr_node->binary.left->kind != NODE_IDENTIFIER)
+            {
+                codegen_error(codegen, "Left side of assignment must be a variable");
+                return NULL;
+            }
+
+            const char  *var_name   = expr_node->binary.left->str_value;
+            LLVMValueRef var_alloca = get_symbol(codegen, var_name);
+
+            if (!var_alloca)
+            {
+                codegen_error(codegen, "Undefined variable in assignment");
+                return NULL;
+            }
+
+            SymbolKind kind = get_symbol_kind(codegen, var_name);
+            if (kind != SYMBOL_VARIABLE)
+            {
+                codegen_error(codegen, "Cannot assign to const variable or function");
+                return NULL;
+            }
+
+            // evaluate right side
+            LLVMValueRef value = codegen_expression(codegen, expr_node->binary.right);
+            if (!value)
+            {
+                return NULL;
+            }
+
+            // store the value
+            LLVMBuildStore(codegen->builder, value, var_alloca);
+
+            // return the assigned value
+            return value;
+        }
+
+        // handle other binary operators
         LLVMValueRef left  = codegen_expression(codegen, expr_node->binary.left);
         LLVMValueRef right = codegen_expression(codegen, expr_node->binary.right);
 

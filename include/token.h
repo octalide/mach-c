@@ -32,7 +32,7 @@ typedef enum TokenKind
     TOKEN_KW_BRK, // brk
 
     // value keywords
-    TOKEN_TYPE_NAT, // "not a type" (`void` equivalent)
+    TOKEN_TYPE_ANY, // any - untyped value
     TOKEN_TYPE_I8,  // i8
     TOKEN_TYPE_I16, // i16
     TOKEN_TYPE_I32, // i32

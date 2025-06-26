@@ -1,76 +1,262 @@
+#include "ast.h"
 #include "ioutil.h"
-#include "build.h"
+#include "lexer.h"
+#include "parser.h"
 
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-int cmd_build(int argc, char **argv)
+static void print_usage(const char *program_name)
 {
-    char *path_target = NULL;
-    for (int i = 0; i < argc; i++)
-    {
-        if (argv[i][0] != '-')
-        {
-            path_target = argv[i];
-
-            // remove this arg after selection
-            for (int j = i; j < argc - 1; j++)
-            {
-                argv[j] = argv[j + 1];
-            }
-
-            break;
-        }
-    }
-
-    if (!file_exists(path_target))
-    {
-        fprintf(stderr, "error: target path does not exist: `%s`\n", path_target);
-        return 1;
-    }
-
-    if (is_directory(path_target))
-    {
-        fprintf(stderr, "error: target path cannot be a directory\n");
-        return 1;
-    }
-
-    // determine whether the target is a `.mach` source file, or a `.json`
-    //   project configuration file
-    char *ext = path_get_extension(path_target);
-    if (strcmp(ext, "mach") == 0)
-    {
-        printf("building target file: %s\n", path_target);
-        return build_target_file(path_target, argc, argv);
-    }
-
-    if (strcmp(ext, "json") == 0)
-    {
-        printf("building target project: %s\n", path_target);
-        return build_target_project(path_target, argc, argv);
-    }
-
-    printf("error: target path must be a source or project file\n");
-
-    return 1;
+    printf("Usage: %s <command> <file>\n", program_name);
+    printf("Commands:\n");
+    printf("  parse   Parse and display AST for the given file\n");
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command> [options]\n", argv[0]);
+static void print_node(Node *node, int indent);
+static void print_indent(int indent);
+
+int main(int argc, char **argv)
+{
+    if (argc < 3)
+    {
+        print_usage(argv[0]);
         return 1;
     }
 
-    if (argc > 1) {
-        char *first_arg = argv[1];
-        if (strcmp(first_arg, "build") == 0) {
-            return cmd_build(argc - 2, argv + 2);
-        } else {
-            fprintf(stderr, "Unknown command: %s\n", first_arg);
-            return 1;
-        }
+    const char *command  = argv[1];
+    const char *filename = argv[2];
+
+    if (strcmp(command, "parse") != 0)
+    {
+        fprintf(stderr, "Error: Unknown command '%s'\n", command);
+        print_usage(argv[0]);
+        return 1;
     }
 
+    // check if file exists
+    if (!file_exists((char *)filename))
+    {
+        fprintf(stderr, "Error: File '%s' does not exist\n", filename);
+        return 1;
+    }
+
+    // read the file
+    char *source = read_file((char *)filename);
+    if (source == NULL)
+    {
+        fprintf(stderr, "Error: Could not read file '%s'\n", filename);
+        return 1;
+    }
+
+    // initialize lexer
+    Lexer lexer;
+    lexer_init(&lexer, source);
+
+    // initialize parser
+    Parser parser;
+    parser_init(&parser, &lexer);
+
+    // parse the program
+    Node *program = parser_parse_program(&parser);
+
+    if (parser.has_error)
+    {
+        fprintf(stderr, "Parse error occurred\n");
+        free(source);
+        parser_dnit(&parser);
+        lexer_dnit(&lexer);
+        return 1;
+    }
+
+    if (program == NULL)
+    {
+        fprintf(stderr, "Failed to parse program\n");
+        free(source);
+        parser_dnit(&parser);
+        lexer_dnit(&lexer);
+        return 1;
+    }
+
+    // output AST
+    printf("AST for %s:\n", filename);
+    print_node(program, 0);
+
+    // cleanup
+    node_dnit(program);
+    free(program);
+    parser_dnit(&parser);
+    lexer_dnit(&lexer);
+    free(source);
+
     return 0;
+}
+
+static void print_indent(int indent)
+{
+    for (int i = 0; i < indent; i++)
+    {
+        printf("  ");
+    }
+}
+
+static void print_node(Node *node, int indent)
+{
+    if (node == NULL)
+    {
+        print_indent(indent);
+        printf("(null)\n");
+        return;
+    }
+
+    print_indent(indent);
+    printf("%s", node_kind_name(node->kind));
+
+    switch (node->kind)
+    {
+    case NODE_IDENTIFIER:
+        printf(" '%s'", node->str_value);
+        break;
+    case NODE_LIT_INT:
+        printf(" %llu", node->int_value);
+        break;
+    case NODE_LIT_FLOAT:
+        printf(" %g", node->float_value);
+        break;
+    case NODE_LIT_CHAR:
+        printf(" '%c'", node->char_value);
+        break;
+    case NODE_LIT_STRING:
+        printf(" \"%s\"", node->str_value);
+        break;
+    default:
+        break;
+    }
+
+    printf("\n");
+
+    // print children based on node type
+    switch (node->kind)
+    {
+    case NODE_PROGRAM:
+    case NODE_BLOCK:
+        if (node->children)
+        {
+            for (size_t i = 0; i < node_list_count(node->children); i++)
+            {
+                print_node(node->children[i], indent + 1);
+            }
+        }
+        break;
+
+    case NODE_EXPR_BINARY:
+    case NODE_EXPR_INDEX:
+    case NODE_EXPR_MEMBER:
+    case NODE_EXPR_CAST:
+    case NODE_TYPE_ARRAY:
+        print_node(node->binary.left, indent + 1);
+        print_node(node->binary.right, indent + 1);
+        break;
+
+    case NODE_EXPR_UNARY:
+    case NODE_TYPE_POINTER:
+    case NODE_STMT_RETURN:
+    case NODE_STMT_EXPRESSION:
+        print_node(node->single, indent + 1);
+        break;
+
+    case NODE_EXPR_CALL:
+        print_node(node->call.target, indent + 1);
+        if (node->call.args)
+        {
+            for (size_t i = 0; i < node_list_count(node->call.args); i++)
+            {
+                print_node(node->call.args[i], indent + 1);
+            }
+        }
+        break;
+
+    case NODE_STMT_VAL:
+    case NODE_STMT_VAR:
+    case NODE_STMT_DEF:
+    case NODE_STMT_EXTERNAL:
+        print_node(node->decl.name, indent + 1);
+        if (node->decl.type)
+        {
+            print_node(node->decl.type, indent + 1);
+        }
+        if (node->decl.init)
+        {
+            print_node(node->decl.init, indent + 1);
+        }
+        break;
+
+    case NODE_STMT_FUNCTION:
+    case NODE_TYPE_FUNCTION:
+        if (node->function.params)
+        {
+            print_indent(indent + 1);
+            printf("parameters:\n");
+            for (size_t i = 0; i < node_list_count(node->function.params); i++)
+            {
+                print_node(node->function.params[i], indent + 2);
+            }
+        }
+        if (node->function.return_type)
+        {
+            print_indent(indent + 1);
+            printf("return_type:\n");
+            print_node(node->function.return_type, indent + 2);
+        }
+        if (node->function.body)
+        {
+            print_indent(indent + 1);
+            printf("body:\n");
+            print_node(node->function.body, indent + 2);
+        }
+        break;
+
+    case NODE_STMT_STRUCT:
+    case NODE_STMT_UNION:
+        if (node->composite.fields)
+        {
+            print_indent(indent + 1);
+            printf("fields:\n");
+            for (size_t i = 0; i < node_list_count(node->composite.fields); i++)
+            {
+                print_node(node->composite.fields[i], indent + 2);
+            }
+        }
+        break;
+
+    case NODE_STMT_USE:
+        if (node->binary.left)
+        {
+            print_indent(indent + 1);
+            printf("alias:\n");
+            print_node(node->binary.left, indent + 2);
+        }
+        print_indent(indent + 1);
+        printf("module:\n");
+        print_node(node->binary.right, indent + 2);
+        break;
+
+    case NODE_STMT_IF:
+    case NODE_STMT_OR:
+    case NODE_STMT_FOR:
+        if (node->conditional.condition)
+        {
+            print_indent(indent + 1);
+            printf("condition:\n");
+            print_node(node->conditional.condition, indent + 2);
+        }
+        print_indent(indent + 1);
+        printf("body:\n");
+        print_node(node->conditional.body, indent + 2);
+        break;
+
+    default:
+        break;
+    }
 }

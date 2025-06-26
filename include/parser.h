@@ -1,80 +1,95 @@
 #ifndef PARSER_H
 #define PARSER_H
 
-#include "lexer.h"
 #include "ast.h"
+#include "lexer.h"
+#include "token.h"
 
 typedef struct Parser
 {
-    Token **comments;
-    Token *last;
-    Token *curr;
-    Token *next;
-
     Lexer *lexer;
+    Token  current;
+    Token  peek;
+    bool   has_error;
 } Parser;
 
-Parser *parser_new(Lexer *lexer);
-void parser_free(Parser *parser);
+// core parser functions
+void parser_init(Parser *parser, Lexer *lexer);
+void parser_dnit(Parser *parser);
 
-void parser_print_error(Parser *parser, Node *node);
+// parsing functions
+Node *parser_parse_program(Parser *parser);
 
-void parser_add_comment(Parser *parser, Token *token);
-
+// utility functions
 void parser_advance(Parser *parser);
+bool parser_check(Parser *parser, TokenKind kind);
+bool parser_match(Parser *parser, TokenKind kind);
+bool parser_consume(Parser *parser, TokenKind kind, const char *message);
 
-bool parser_match(Parser *parser, TokenKind type);
+// expression parsing
+Node *parser_parse_expr(Parser *parser);
+Node *parser_parse_expr_assignment(Parser *parser);
+Node *parser_parse_expr_logical_or(Parser *parser);
+Node *parser_parse_expr_logical_and(Parser *parser);
+Node *parser_parse_expr_bitwise_or(Parser *parser);
+Node *parser_parse_expr_bitwise_xor(Parser *parser);
+Node *parser_parse_expr_bitwise_and(Parser *parser);
+Node *parser_parse_expr_equality(Parser *parser);
+Node *parser_parse_expr_comparison(Parser *parser);
+Node *parser_parse_expr_shift(Parser *parser);
+Node *parser_parse_expr_term(Parser *parser);
+Node *parser_parse_expr_factor(Parser *parser);
+Node *parser_parse_expr_unary(Parser *parser);
+Node *parser_parse_expr_postfix(Parser *parser);
+Node *parser_parse_expr_primary(Parser *parser);
+Node *parser_parse_expr_call(Parser *parser, Node *target);
+Node *parser_parse_expr_index(Parser *parser, Node *target);
+Node *parser_parse_expr_member(Parser *parser, Node *target);
+Node *parser_parse_expr_cast(Parser *parser, Node *target);
 
-Node *parser_new_error(Token *token, char *message);
+// literal parsing
+Node *parser_parse_lit_int(Parser *parser);
+Node *parser_parse_lit_float(Parser *parser);
+Node *parser_parse_lit_char(Parser *parser);
+Node *parser_parse_lit_string(Parser *parser);
+Node *parser_parse_lit_array(Parser *parser);
+Node *parser_parse_lit_struct(Parser *parser);
 
-Node *parse_file(Parser *parser, char *path);
-Node *parse_identifier(Parser *parser);
+// statement parsing
+Node *parser_parse_stmt(Parser *parser);
+Node *parser_parse_stmt_block(Parser *parser);
+Node *parser_parse_stmt_val(Parser *parser);
+Node *parser_parse_stmt_var(Parser *parser);
+Node *parser_parse_stmt_def(Parser *parser);
+Node *parser_parse_stmt_fun(Parser *parser);
+Node *parser_parse_stmt_str(Parser *parser);
+Node *parser_parse_stmt_uni(Parser *parser);
+Node *parser_parse_stmt_ext(Parser *parser);
+Node *parser_parse_stmt_use(Parser *parser);
+Node *parser_parse_stmt_if(Parser *parser);
+Node *parser_parse_stmt_or(Parser *parser);
+Node *parser_parse_stmt_for(Parser *parser);
+Node *parser_parse_stmt_break(Parser *parser);
+Node *parser_parse_stmt_continue(Parser *parser);
+Node *parser_parse_stmt_return(Parser *parser);
+Node *parser_parse_stmt_expr(Parser *parser);
 
-Node *parse_lit_int(Parser *parser);
-Node *parse_lit_float(Parser *parser);
-Node *parse_lit_char(Parser *parser);
-Node *parse_lit_string(Parser *parser);
+// type parsing
+Node *parser_parse_type(Parser *parser);
+Node *parser_parse_type_array(Parser *parser, Node *base_type);
+Node *parser_parse_type_array_prefix(Parser *parser);
+Node *parser_parse_type_pointer(Parser *parser, Node *base_type);
+Node *parser_parse_type_function(Parser *parser);
 
-Node *parse_expr_member(Parser *parser, Node *target);
-Node *parse_expr_call(Parser *parser, Node *target);
-Node *parse_expr_index(Parser *parser, Node *target);
-Node *parse_expr_cast(Parser *parser, Node *target);
-Node *parse_expr_unary(Parser *parser);
-Node *parse_expr_binary(Parser *parser, int parent_precedence);
-Node *parse_expr_postfix(Parser *parser);
-Node *parse_expr_grouping(Parser *parser);
-Node *parse_expr_primary(Parser *parser);
-Node *parse_expr(Parser *parser);
+// helper functions
+Node **parser_parse_parameter_list(Parser *parser, bool *is_variadic);
+Node **parser_parse_type_parameter_list(Parser *parser, bool *is_variadic);
+Node **parser_parse_argument_list(Parser *parser);
+Node **parser_parse_field_list(Parser *parser);
+Node  *parser_parse_identifier(Parser *parser);
 
-Node *parse_type_array(Parser *parser);
-Node *parse_type_pointer(Parser *parser);
-Node *parse_type_function(Parser *parser);
-Node *parse_type_struct(Parser *parser);
-Node *parse_type_union(Parser *parser);
-Node *parse_type(Parser *parser);
-
-Node *parse_field(Parser *parser);
-
-Node *parse_stmt_val(Parser *parser);
-Node *parse_stmt_var(Parser *parser);
-Node *parse_stmt_def(Parser *parser);
-Node *parse_stmt_mod(Parser *parser);
-Node *parse_stmt_use(Parser *parser);
-Node *parse_stmt_str(Parser *parser);
-Node *parse_stmt_uni(Parser *parser);
-Node *parse_stmt_fun(Parser *parser);
-Node *parse_stmt_ext(Parser *parser);
-Node *parse_stmt_if(Parser *parser);
-Node *parse_stmt_or(Parser *parser);
-Node *parse_stmt_for(Parser *parser);
-Node *parse_stmt_break(Parser *parser);
-Node *parse_stmt_continue(Parser *parser);
-Node *parse_stmt_return(Parser *parser);
-Node *parse_stmt_asm(Parser *parser);
-Node *parse_stmt_block(Parser *parser);
-Node *parse_stmt_expr(Parser *parser);
-Node *parse_stmt(Parser *parser);
-
-Node *parser_parse(Parser *parser, char *path);
+// error handling
+void parser_error(Parser *parser, const char *message);
+void parser_synchronize(Parser *parser);
 
 #endif

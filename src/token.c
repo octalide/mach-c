@@ -5,15 +5,15 @@
 void token_init(Token *token, TokenKind kind, int pos, int len)
 {
     token->kind = kind;
-    token->pos = pos;
-    token->len = len;
+    token->pos  = pos;
+    token->len  = len;
 }
 
 void token_dnit(Token *token)
 {
     token->kind = TOKEN_ERROR;
-    token->pos = -1;
-    token->len = -1;
+    token->pos  = -1;
+    token->len  = -1;
 }
 
 void token_copy(Token *src, Token *dst)
@@ -24,8 +24,8 @@ void token_copy(Token *src, Token *dst)
     }
 
     dst->kind = src->kind;
-    dst->pos = src->pos;
-    dst->len = src->len;
+    dst->pos  = src->pos;
+    dst->len  = src->len;
 }
 
 char *token_kind_to_string(TokenKind kind)

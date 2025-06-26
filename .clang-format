@@ -1,3 +1,8 @@
 IndentWidth: 4
 BreakBeforeBraces: Allman
 ColumnLimit: 256
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AlignConsecutiveDeclarations: Consecutive
+AlignConsecutiveAssignments: Consecutive

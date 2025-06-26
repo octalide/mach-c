@@ -4,7 +4,7 @@
 typedef enum TokenKind
 {
     TOKEN_ERROR = -1,
-    TOKEN_EOF = 0,
+    TOKEN_EOF   = 0,
     TOKEN_COMMENT,
 
     // literals
@@ -89,14 +89,14 @@ typedef enum TokenKind
 typedef struct Token
 {
     TokenKind kind;
-    int pos;
-    int len;
+    int       pos;
+    int       len;
 } Token;
 
 void token_init(Token *token, TokenKind kind, int pos, int len);
 void token_dnit(Token *token);
 
-void token_copy(Token *src, Token *dst);
+void  token_copy(Token *src, Token *dst);
 char *token_kind_to_string(TokenKind kind);
 
 #endif

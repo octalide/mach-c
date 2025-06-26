@@ -3,7 +3,12 @@
 CC = clang
 CFLAGS = -std=c23 -Wall -Wextra -Werror -pedantic -O2
 CFLAGS_DEBUG = -std=c23 -Wall -Wextra -Werror -pedantic -g -O0 -DDEBUG
-LDFLAGS = 
+
+# LLVM flags
+LLVM_CFLAGS = $(shell llvm-config --cflags)
+LLVM_LDFLAGS = $(shell llvm-config --ldflags --libs core)
+
+LDFLAGS = $(LLVM_LDFLAGS) 
 
 # Directories
 SRCDIR = src
@@ -34,7 +39,7 @@ $(OBJDIR): | $(BINDIR)
 
 # Build object files
 $(OBJDIR)/%.o: $(SRCDIR)/%.c $(HEADERS) | $(OBJDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(CC) $(CFLAGS) $(LLVM_CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Link executable
 $(TARGET): $(OBJECTS) | $(BINDIR)
@@ -42,6 +47,7 @@ $(TARGET): $(OBJECTS) | $(BINDIR)
 
 # Debug build
 debug: CFLAGS = $(CFLAGS_DEBUG)
+debug: LLVM_CFLAGS = $(shell llvm-config --cflags)
 debug: $(TARGET)
 
 # Clean build artifacts
@@ -79,4 +85,4 @@ help:
 
 # Generate dependency files
 $(OBJDIR)/%.d: $(SRCDIR)/%.c | $(OBJDIR)
-	@$(CC) $(CFLAGS) $(INCLUDES) -MM $< | sed 's,\($*\)\.o[ :]*,$(OBJDIR)/\1.o $@ : ,g' > $@
+	@$(CC) $(CFLAGS) $(LLVM_CFLAGS) $(INCLUDES) -MM $< | sed 's,\($*\)\.o[ :]*,$(OBJDIR)/\1.o $@ : ,g' > $@

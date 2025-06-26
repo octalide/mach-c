@@ -96,7 +96,8 @@ typedef struct Token
 void token_init(Token *token, TokenKind kind, int pos, int len);
 void token_dnit(Token *token);
 
-void  token_copy(Token *src, Token *dst);
-char *token_kind_to_string(TokenKind kind);
+void      token_copy(Token *src, Token *dst);
+char     *token_kind_to_string(TokenKind kind);
+TokenKind token_kind_from_identifier(const char *text, int len);
 
 #endif

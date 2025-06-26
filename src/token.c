@@ -1,6 +1,7 @@
 #include "token.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 void token_init(Token *token, TokenKind kind, int pos, int len)
 {
@@ -179,4 +180,133 @@ char *token_kind_to_string(TokenKind kind)
     default:
         return "UNKNOWN";
     }
+}
+
+TokenKind token_kind_from_identifier(const char *text, int len)
+{
+    // check built-in types first
+    if (len == 2)
+    {
+        if (strncmp(text, "if", 2) == 0)
+        {
+            return TOKEN_KW_IF;
+        }
+        if (strncmp(text, "or", 2) == 0)
+        {
+            return TOKEN_KW_OR;
+        }
+        if (strncmp(text, "i8", 2) == 0)
+        {
+            return TOKEN_TYPE_I8;
+        }
+        if (strncmp(text, "u8", 2) == 0)
+        {
+            return TOKEN_TYPE_U8;
+        }
+    }
+    if (len == 3)
+    {
+        if (strncmp(text, "use", 3) == 0)
+        {
+            return TOKEN_KW_USE;
+        }
+        if (strncmp(text, "ext", 3) == 0)
+        {
+            return TOKEN_KW_EXT;
+        }
+        if (strncmp(text, "def", 3) == 0)
+        {
+            return TOKEN_KW_DEF;
+        }
+        if (strncmp(text, "str", 3) == 0)
+        {
+            return TOKEN_KW_STR;
+        }
+        if (strncmp(text, "uni", 3) == 0)
+        {
+            return TOKEN_KW_UNI;
+        }
+        if (strncmp(text, "val", 3) == 0)
+        {
+            return TOKEN_KW_VAL;
+        }
+        if (strncmp(text, "var", 3) == 0)
+        {
+            return TOKEN_KW_VAR;
+        }
+        if (strncmp(text, "fun", 3) == 0)
+        {
+            return TOKEN_KW_FUN;
+        }
+        if (strncmp(text, "ret", 3) == 0)
+        {
+            return TOKEN_KW_RET;
+        }
+        if (strncmp(text, "if", 3) == 0)
+        {
+            return TOKEN_KW_IF;
+        }
+        if (strncmp(text, "or", 3) == 0)
+        {
+            return TOKEN_KW_OR;
+        }
+        if (strncmp(text, "for", 3) == 0)
+        {
+            return TOKEN_KW_FOR;
+        }
+        if (strncmp(text, "cnt", 3) == 0)
+        {
+            return TOKEN_KW_CNT;
+        }
+        if (strncmp(text, "brk", 3) == 0)
+        {
+            return TOKEN_KW_BRK;
+        }
+        if (strncmp(text, "nat", 3) == 0)
+        {
+            return TOKEN_TYPE_NAT;
+        }
+        if (strncmp(text, "i8", 3) == 0)
+        {
+            return TOKEN_TYPE_I8;
+        }
+        if (strncmp(text, "i16", 3) == 0)
+        {
+            return TOKEN_TYPE_I16;
+        }
+        if (strncmp(text, "i32", 3) == 0)
+        {
+            return TOKEN_TYPE_I32;
+        }
+        if (strncmp(text, "i64", 3) == 0)
+        {
+            return TOKEN_TYPE_I64;
+        }
+        if (strncmp(text, "u8", 3) == 0)
+        {
+            return TOKEN_TYPE_U8;
+        }
+        if (strncmp(text, "u16", 3) == 0)
+        {
+            return TOKEN_TYPE_U16;
+        }
+        if (strncmp(text, "u32", 3) == 0)
+        {
+            return TOKEN_TYPE_U32;
+        }
+        if (strncmp(text, "u64", 3) == 0)
+        {
+            return TOKEN_TYPE_U64;
+        }
+        if (strncmp(text, "f32", 3) == 0)
+        {
+            return TOKEN_TYPE_F32;
+        }
+        if (strncmp(text, "f64", 3) == 0)
+        {
+            return TOKEN_TYPE_F64;
+        }
+    }
+
+    return TOKEN_IDENTIFIER;
 }

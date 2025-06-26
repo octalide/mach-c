@@ -2,153 +2,15 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-Node *node_new(NodeKind kind)
+void node_init(Node *node, NodeKind kind)
 {
-    Node *node = calloc(1, sizeof(Node));
+    memset(node, 0, sizeof(Node));
     node->kind = kind;
-
-    switch (kind)
-    {
-    case NODE_ERROR:
-        node->data.error = calloc(1, sizeof(NodeError));
-        break;
-    case NODE_PROGRAM:
-        node->data.program = calloc(1, sizeof(NodeProgram));
-        node->data.program->modules = node_list_new();
-        break;
-    case NODE_MODULE:
-        node->data.module = calloc(1, sizeof(NodeModule));
-        node->data.module->files = node_list_new();
-        break;
-    case NODE_FILE:
-        node->data.file = calloc(1, sizeof(NodeFile));
-        node->data.file->statements = node_list_new();
-        break;
-    case NODE_IDENTIFIER:
-        node->data.identifier = calloc(1, sizeof(NodeIdentifier));
-        break;
-    case NODE_LIT_INT:
-        node->data.lit_int = calloc(1, sizeof(NodeLitInt));
-        node->data.lit_int->value = 0;
-        break;
-    case NODE_LIT_FLOAT:
-        node->data.lit_float = calloc(1, sizeof(NodeLitFloat));
-        node->data.lit_float->value = 0;
-        break;
-    case NODE_LIT_CHAR:
-        node->data.lit_char = calloc(1, sizeof(NodeLitChar));
-        node->data.lit_char->value = 0;
-        break;
-    case NODE_LIT_STRING:
-        node->data.lit_string = calloc(1, sizeof(NodeLitString));
-        break;
-    case NODE_EXPR_MEMBER:
-        node->data.expr_member = calloc(1, sizeof(NodeExprMember));
-        break;
-    case NODE_EXPR_CALL:
-        node->data.expr_call = calloc(1, sizeof(NodeExprCall));
-        node->data.expr_call->arguments = node_list_new();
-        break;
-    case NODE_EXPR_INDEX:
-        node->data.expr_index = calloc(1, sizeof(NodeExprIndex));
-        break;
-    case NODE_EXPR_CAST:
-        node->data.expr_cast = calloc(1, sizeof(NodeExprCast));
-        break;
-    case NODE_EXPR_UNARY:
-        node->data.expr_unary = calloc(1, sizeof(NodeExprUnary));
-        break;
-    case NODE_EXPR_BINARY:
-        node->data.expr_binary = calloc(1, sizeof(NodeExprBinary));
-        break;
-    case NODE_TYPE_ARRAY:
-        node->data.type_array = calloc(1, sizeof(NodeTypeArray));
-        break;
-    case NODE_TYPE_POINTER:
-        node->data.type_pointer = calloc(1, sizeof(NodeTypePointer));
-        break;
-    case NODE_TYPE_FUN:
-        node->data.type_function = calloc(1, sizeof(NodeTypeFunction));
-        node->data.type_function->parameters = node_list_new();
-        break;
-    case NODE_TYPE_STR:
-        node->data.type_struct = calloc(1, sizeof(NodeTypeStruct));
-        node->data.type_struct->fields = node_list_new();
-        break;
-    case NODE_TYPE_UNI:
-        node->data.type_union = calloc(1, sizeof(NodeTypeUnion));
-        node->data.type_union->fields = node_list_new();
-        break;
-    case NODE_FIELD:
-        node->data.field = calloc(1, sizeof(NodeField));
-        break;
-    case NODE_STMT_VAL:
-        node->data.stmt_val = calloc(1, sizeof(NodeStmtVal));
-        break;
-    case NODE_STMT_VAR:
-        node->data.stmt_var = calloc(1, sizeof(NodeStmtVar));
-        break;
-    case NODE_STMT_MOD:
-        node->data.stmt_mod = calloc(1, sizeof(NodeStmtMod));
-        break;
-    case NODE_STMT_DEF:
-        node->data.stmt_def = calloc(1, sizeof(NodeStmtDef));
-        break;
-    case NODE_STMT_USE:
-        node->data.stmt_use = calloc(1, sizeof(NodeStmtUse));
-        break;
-    case NODE_STMT_STR:
-        node->data.stmt_str = calloc(1, sizeof(NodeStmtStruct));
-        node->data.stmt_str->fields = node_list_new();
-        break;
-    case NODE_STMT_UNI:
-        node->data.stmt_uni = calloc(1, sizeof(NodeStmtUnion));
-        node->data.stmt_uni->fields = node_list_new();
-        break;
-    case NODE_STMT_FUN:
-        node->data.stmt_fun = calloc(1, sizeof(NodeStmtFun));
-        node->data.stmt_fun->parameters = node_list_new();
-        break;
-    case NODE_STMT_EXT:
-        node->data.stmt_ext = calloc(1, sizeof(NodeStmtExt));
-        break;
-    case NODE_STMT_IF:
-        node->data.stmt_if = calloc(1, sizeof(NodeStmtIf));
-        break;
-    case NODE_STMT_OR:
-        node->data.stmt_or = calloc(1, sizeof(NodeStmtOr));
-        break;
-    case NODE_STMT_FOR:
-        node->data.stmt_for = calloc(1, sizeof(NodeStmtFor));
-        break;
-    case NODE_STMT_BRK:
-        node->data.stmt_break = calloc(1, sizeof(NodeStmtBreak));
-        break;
-    case NODE_STMT_CNT:
-        node->data.stmt_continue = calloc(1, sizeof(NodeStmtContinue));
-        break;
-    case NODE_STMT_RET:
-        node->data.stmt_return = calloc(1, sizeof(NodeStmtReturn));
-        break;
-    case NODE_STMT_ASM:
-        node->data.stmt_asm = calloc(1, sizeof(NodeStmtAsm));
-        break;
-    case NODE_STMT_BLOCK:
-        node->data.stmt_block = calloc(1, sizeof(NodeStmtBlock));
-        node->data.stmt_block->statements = node_list_new();
-        break;
-    case NODE_STMT_EXPR:
-        node->data.stmt_expr = calloc(1, sizeof(NodeStmtExpr));
-        break;
-    default:
-        break;
-    }
-
-    return node;
 }
 
-void node_free(Node *node)
+void node_dnit(Node *node)
 {
     if (node == NULL)
     {
@@ -157,678 +19,398 @@ void node_free(Node *node)
 
     switch (node->kind)
     {
-    case NODE_ERROR:
-        free(node->data.error->message);
-        node->data.error->message = NULL;
-       
-        free(node->data.error);
-        node->data.error = NULL;
-        
-        break;
-    case NODE_PROGRAM:
-        node_list_free(node->data.program->modules);
-        node->data.program->modules = NULL;
-        free(node->data.program->name);
-        node->data.program->name = NULL;
-        free(node->data.program);
-        node->data.program = NULL;
-        break;
-    case NODE_MODULE:
-        free(node->data.module->name);
-        node->data.module->name = NULL;
-        node_list_free(node->data.module->files);
-        node->data.module->files = NULL;
-        free(node->data.module);
-        node->data.module = NULL;
-        break;
-    case NODE_FILE:
-        free(node->data.file->path);
-        node->data.file->path = NULL;
-        // parser_free(node->data.file->parser); // NOTE: not owned by node
-        node->data.file->parser = NULL;
-        node_list_free(node->data.file->statements);
-        node->data.file->statements = NULL;
-        free(node->data.file);
-        node->data.file = NULL;
-        break;
     case NODE_IDENTIFIER:
-        free(node->data.identifier->name);
-        node->data.identifier->name = NULL;
-        free(node->data.identifier);
-        node->data.identifier = NULL;
-        break;
-    case NODE_LIT_INT:
-        free(node->data.lit_int);
-        node->data.lit_int = NULL;
-        break;
-    case NODE_LIT_FLOAT:
-        free(node->data.lit_float);
-        node->data.lit_float = NULL;
-        break;
-    case NODE_LIT_CHAR:
-        free(node->data.lit_char);
-        node->data.lit_char = NULL;
-        break;
     case NODE_LIT_STRING:
-        free(node->data.lit_string->value);
-        node->data.lit_string->value = NULL;
-        free(node->data.lit_string);
-        node->data.lit_string = NULL;
+        free(node->str_value);
+        node->str_value = NULL;
         break;
-    case NODE_EXPR_MEMBER:
-        node_free(node->data.expr_member->target);
-        node->data.expr_member->target = NULL;
-        node_free(node->data.expr_member->member);
-        node->data.expr_member->member = NULL;
-        free(node->data.expr_member);
-        node->data.expr_member = NULL;
-        break;
-    case NODE_EXPR_CALL:
-        node_free(node->data.expr_call->target);
-        node->data.expr_call->target = NULL;
-        node_list_free(node->data.expr_call->arguments);
-        node->data.expr_call->arguments = NULL;
-        free(node->data.expr_call);
-        node->data.expr_call = NULL;
-        break;
-    case NODE_EXPR_INDEX:
-        node_free(node->data.expr_index->target);
-        node->data.expr_index->target = NULL;
-        node_free(node->data.expr_index->index);
-        node->data.expr_index->index = NULL;
-        free(node->data.expr_index);
-        node->data.expr_index = NULL;
-        break;
-    case NODE_EXPR_CAST:
-        node_free(node->data.expr_cast->target);
-        node->data.expr_cast->target = NULL;
-        node_free(node->data.expr_cast->type);
-        node->data.expr_cast->type = NULL;
-        free(node->data.expr_cast);
-        node->data.expr_cast = NULL;
-        break;
-    case NODE_EXPR_UNARY:
-        node_free(node->data.expr_unary->target);
-        node->data.expr_unary->target = NULL;
-        free(node->data.expr_unary);
-        node->data.expr_unary = NULL;
-        break;
+
     case NODE_EXPR_BINARY:
-        node_free(node->data.expr_binary->left);
-        node->data.expr_binary->left = NULL;
-        node_free(node->data.expr_binary->right);
-        node->data.expr_binary->right = NULL;
-        free(node->data.expr_binary);
-        node->data.expr_binary = NULL;
+        node_dnit(node->binary.left);
+        free(node->binary.left);
+        node_dnit(node->binary.right);
+        free(node->binary.right);
         break;
-    case NODE_TYPE_ARRAY:
-        node_free(node->data.type_array->type);
-        node->data.type_array->type = NULL;
-        node_free(node->data.type_array->size);
-        node->data.type_array->size = NULL;
-        free(node->data.type_array);
-        node->data.type_array = NULL;
+
+    case NODE_EXPR_UNARY:
+        node_dnit(node->unary.target);
+        free(node->unary.target);
         break;
-    case NODE_TYPE_POINTER:
-        node_free(node->data.type_pointer->type);
-        node->data.type_pointer->type = NULL;
-        free(node->data.type_pointer);
-        node->data.type_pointer = NULL;
+
+    case NODE_EXPR_CALL:
+        node_dnit(node->call.target);
+        free(node->call.target);
+        if (node->call.args)
+        {
+            for (int i = 0; node->call.args[i]; i++)
+            {
+                node_dnit(node->call.args[i]);
+                free(node->call.args[i]);
+            }
+            free(node->call.args);
+        }
         break;
-    case NODE_TYPE_FUN:
-        node_free(node->data.type_function->return_type);
-        node->data.type_function->return_type = NULL;
-        node_list_free(node->data.type_function->parameters);
-        node->data.type_function->parameters = NULL;
-        free(node->data.type_function);
-        node->data.type_function = NULL;
+
+    case NODE_STMT_FUNCTION:
+    case NODE_TYPE_FUNCTION:
+        if (node->function.params)
+        {
+            for (int i = 0; node->function.params[i]; i++)
+            {
+                node_dnit(node->function.params[i]);
+                free(node->function.params[i]);
+            }
+            free(node->function.params);
+        }
+        if (node->function.return_type)
+        {
+            node_dnit(node->function.return_type);
+            free(node->function.return_type);
+        }
+        if (node->function.body)
+        {
+            node_dnit(node->function.body);
+            free(node->function.body);
+        }
         break;
-    case NODE_TYPE_STR:
-        node_list_free(node->data.type_struct->fields);
-        node->data.type_struct->fields = NULL;
-        free(node->data.type_struct);
-        node->data.type_struct = NULL;
-        break;
-    case NODE_TYPE_UNI:
-        node_list_free(node->data.type_union->fields);
-        node->data.type_union->fields = NULL;
-        free(node->data.type_union);
-        node->data.type_union = NULL;
-        break;
-    case NODE_FIELD:
-        node_free(node->data.field->identifier);
-        node->data.field->identifier = NULL;
-        node_free(node->data.field->type);
-        node->data.field->type = NULL;
-        free(node->data.field);
-        node->data.field = NULL;
-        break;
-    case NODE_STMT_VAL:
-        node_free(node->data.stmt_val->identifier);
-        node->data.stmt_val->identifier = NULL;
-        node_free(node->data.stmt_val->type);
-        node->data.stmt_val->type = NULL;
-        node_free(node->data.stmt_val->initializer);
-        node->data.stmt_val->initializer = NULL;
-        free(node->data.stmt_val);
-        node->data.stmt_val = NULL;
-        break;
-    case NODE_STMT_VAR:
-        node_free(node->data.stmt_var->identifier);
-        node->data.stmt_var->identifier = NULL;
-        node_free(node->data.stmt_var->type);
-        node->data.stmt_var->type = NULL;
-        node_free(node->data.stmt_var->initializer);
-        node->data.stmt_var->initializer = NULL;
-        free(node->data.stmt_var);
-        node->data.stmt_var = NULL;
-        break;
-    case NODE_STMT_DEF:
-        node_free(node->data.stmt_def->identifier);
-        node->data.stmt_def->identifier = NULL;
-        node_free(node->data.stmt_def->type);
-        node->data.stmt_def->type = NULL;
-        free(node->data.stmt_def);
-        node->data.stmt_def = NULL;
-        break;
-    case NODE_STMT_MOD:
-        node_free(node->data.stmt_mod->module_path);
-        node->data.stmt_mod->module_path = NULL;
-        free(node->data.stmt_mod);
-        node->data.stmt_mod = NULL;
-        break;
-    case NODE_STMT_USE:
-        node_free(node->data.stmt_use->alias);
-        node->data.stmt_use->alias = NULL;
-        node_free(node->data.stmt_use->module_path);
-        node->data.stmt_use->module_path = NULL;
-        free(node->data.stmt_use);
-        node->data.stmt_use = NULL;
-        break;
-    case NODE_STMT_STR:
-        node_free(node->data.stmt_str->identifier);
-        node->data.stmt_str->identifier = NULL;
-        node_list_free(node->data.stmt_str->fields);
-        node->data.stmt_str->fields = NULL;
-        free(node->data.stmt_str);
-        node->data.stmt_str = NULL;
-        break;
-    case NODE_STMT_UNI:
-        node_free(node->data.stmt_uni->identifier);
-        node->data.stmt_uni->identifier = NULL;
-        node_list_free(node->data.stmt_uni->fields);
-        node->data.stmt_uni->fields = NULL;
-        free(node->data.stmt_uni);
-        node->data.stmt_uni = NULL;
-        break;
-    case NODE_STMT_FUN:
-        node_free(node->data.stmt_fun->identifier);
-        node->data.stmt_fun->identifier = NULL;
-        node_free(node->data.stmt_fun->return_type);
-        node->data.stmt_fun->return_type = NULL;
-        node_list_free(node->data.stmt_fun->parameters);
-        node->data.stmt_fun->parameters = NULL;
-        node_free(node->data.stmt_fun->body);
-        node->data.stmt_fun->body = NULL;
-        free(node->data.stmt_fun);
-        node->data.stmt_fun = NULL;
-        break;
-    case NODE_STMT_EXT:
-        node_free(node->data.stmt_ext->identifier);
-        node->data.stmt_ext->identifier = NULL;
-        node_free(node->data.stmt_ext->type);
-        node->data.stmt_ext->type = NULL;
-        free(node->data.stmt_ext);
-        node->data.stmt_ext = NULL;
-        break;
+
     case NODE_STMT_IF:
-        node_free(node->data.stmt_if->condition);
-        node->data.stmt_if->condition = NULL;
-        node_free(node->data.stmt_if->body);
-        node->data.stmt_if->body = NULL;
-        free(node->data.stmt_if);
-        node->data.stmt_if = NULL;
-        break;
     case NODE_STMT_OR:
-        node_free(node->data.stmt_or->condition);
-        node->data.stmt_or->condition = NULL;
-        node_free(node->data.stmt_or->body);
-        node->data.stmt_or->body = NULL;
-        free(node->data.stmt_or);
-        node->data.stmt_or = NULL;
-        break;
     case NODE_STMT_FOR:
-        node_free(node->data.stmt_for->condition);
-        node->data.stmt_for->condition = NULL;
-        node_free(node->data.stmt_for->body);
-        node->data.stmt_for->body = NULL;
-        free(node->data.stmt_for);
-        node->data.stmt_for = NULL;
+        if (node->conditional.condition)
+        {
+            node_dnit(node->conditional.condition);
+            free(node->conditional.condition);
+        }
+        if (node->conditional.body)
+        {
+            node_dnit(node->conditional.body);
+            free(node->conditional.body);
+        }
         break;
-    case NODE_STMT_BRK:
-        free(node->data.stmt_break);
-        node->data.stmt_break = NULL;
+
+    case NODE_STMT_VAL:
+    case NODE_STMT_VAR:
+    case NODE_STMT_DEF:
+        if (node->decl.name)
+        {
+            node_dnit(node->decl.name);
+            free(node->decl.name);
+        }
+        if (node->decl.type)
+        {
+            node_dnit(node->decl.type);
+            free(node->decl.type);
+        }
+        if (node->decl.init)
+        {
+            node_dnit(node->decl.init);
+            free(node->decl.init);
+        }
         break;
-    case NODE_STMT_CNT:
-        free(node->data.stmt_continue);
-        node->data.stmt_continue = NULL;
+
+    case NODE_TYPE_STRUCT:
+    case NODE_TYPE_UNION:
+    case NODE_STMT_STRUCT:
+    case NODE_STMT_UNION:
+        if (node->composite.fields)
+        {
+            for (int i = 0; node->composite.fields[i]; i++)
+            {
+                node_dnit(node->composite.fields[i]);
+                free(node->composite.fields[i]);
+            }
+            free(node->composite.fields);
+        }
         break;
-    case NODE_STMT_RET:
-        node_free(node->data.stmt_return->value);
-        node->data.stmt_return->value = NULL;
-        free(node->data.stmt_return);
-        node->data.stmt_return = NULL;
+
+    case NODE_PROGRAM:
+    case NODE_BLOCK:
+        if (node->children)
+        {
+            for (int i = 0; node->children[i]; i++)
+            {
+                node_dnit(node->children[i]);
+                free(node->children[i]);
+            }
+            free(node->children);
+        }
         break;
-    case NODE_STMT_ASM:
-        node_free(node->data.stmt_asm->code);
-        node->data.stmt_asm->code = NULL;
-        free(node->data.stmt_asm);
-        node->data.stmt_asm = NULL;
+
+    case NODE_TYPE_ARRAY:
+    case NODE_TYPE_POINTER:
+    case NODE_EXPR_INDEX:
+    case NODE_EXPR_MEMBER:
+    case NODE_EXPR_CAST:
+    case NODE_STMT_EXTERNAL:
+    case NODE_STMT_RETURN:
+    case NODE_STMT_EXPRESSION:
+        if (node->single)
+        {
+            node_dnit(node->single);
+            free(node->single);
+        }
         break;
-    case NODE_STMT_BLOCK:
-        node_list_free(node->data.stmt_block->statements);
-        node->data.stmt_block->statements = NULL;
-        free(node->data.stmt_block);
-        node->data.stmt_block = NULL;
+
+    case NODE_LIT_INT:
+    case NODE_LIT_FLOAT:
+    case NODE_LIT_CHAR:
+    case NODE_STMT_BREAK:
+    case NODE_STMT_CONTINUE:
         break;
-    case NODE_STMT_EXPR:
-        node_free(node->data.stmt_expr->expression);
-        node->data.stmt_expr->expression = NULL;
-        free(node->data.stmt_expr);
-        node->data.stmt_expr = NULL;
+
+    case NODE_COUNT:
         break;
     }
 
-    token_free(node->token);
-    node->token = NULL;
-
-    free(node);
+    memset(node, 0, sizeof(Node));
 }
 
-char *node_kind_to_string(NodeKind kind)
+// node creation helpers
+Node *node_identifier(const char *name)
 {
-    switch (kind)
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
     {
-    case NODE_ERROR:
-        return "ERROR";
-    case NODE_PROGRAM:
-        return "PROGRAM";
-    case NODE_MODULE:
-        return "MODULE";
-    case NODE_FILE:
-        return "FILE";
-    case NODE_IDENTIFIER:
-        return "IDENTIFIER";
-    case NODE_LIT_INT:
-        return "LIT_INT";
-    case NODE_LIT_FLOAT:
-        return "LIT_FLOAT";
-    case NODE_LIT_CHAR:
-        return "LIT_CHAR";
-    case NODE_LIT_STRING:
-        return "LIT_STRING";
-    case NODE_EXPR_MEMBER:
-        return "EXPR_MEMBER";
-    case NODE_EXPR_CALL:
-        return "EXPR_CALL";
-    case NODE_EXPR_INDEX:
-        return "EXPR_INDEX";
-    case NODE_EXPR_CAST:
-        return "EXPR_CAST";
-    case NODE_EXPR_UNARY:
-        return "EXPR_UNARY";
-    case NODE_EXPR_BINARY:
-        return "EXPR_BINARY";
-    case NODE_TYPE_ARRAY:
-        return "TYPE_ARRAY";
-    case NODE_TYPE_POINTER:
-        return "TYPE_POINTER";
-    case NODE_TYPE_FUN:
-        return "TYPE_FUN";
-    case NODE_TYPE_STR:
-        return "TYPE_STR";
-    case NODE_TYPE_UNI:
-        return "TYPE_UNI";
-    case NODE_FIELD:
-        return "FIELD";
-    case NODE_STMT_VAL:
-        return "STMT_VAL";
-    case NODE_STMT_VAR:
-        return "STMT_VAR";
-    case NODE_STMT_DEF:
-        return "STMT_DEF";
-    case NODE_STMT_MOD:
-        return "STMT_MOD";
-    case NODE_STMT_USE:
-        return "STMT_USE";
-    case NODE_STMT_STR:
-        return "STMT_STR";
-    case NODE_STMT_UNI:
-        return "STMT_UNI";
-    case NODE_STMT_FUN:
-        return "STMT_FUN";
-    case NODE_STMT_EXT:
-        return "STMT_EXT";
-    case NODE_STMT_IF:
-        return "STMT_IF";
-    case NODE_STMT_OR:
-        return "STMT_OR";
-    case NODE_STMT_FOR:
-        return "STMT_FOR";
-    case NODE_STMT_BRK:
-        return "STMT_BRK";
-    case NODE_STMT_CNT:
-        return "STMT_CNT";
-    case NODE_STMT_RET:
-        return "STMT_RET";
-    case NODE_STMT_ASM:
-        return "STMT_ASM";
-    case NODE_STMT_BLOCK:
-        return "STMT_BLOCK";
-    case NODE_STMT_EXPR:
-        return "STMT_EXPR";
-    default:
-        return "UNKNOWN";
+        return NULL;
     }
+
+    node_init(node, NODE_IDENTIFIER);
+    node->str_value = strdup(name);
+    return node;
 }
 
-Node **node_list_new()
+Node *node_int(unsigned long long value)
 {
-    Node **list = calloc(1, sizeof(Node *));
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+    {
+        return NULL;
+    }
 
+    node_init(node, NODE_LIT_INT);
+    node->int_value = value;
+    return node;
+}
+
+Node *node_float(double value)
+{
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+    {
+        return NULL;
+    }
+
+    node_init(node, NODE_LIT_FLOAT);
+    node->float_value = value;
+    return node;
+}
+
+Node *node_char(char value)
+{
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+    {
+        return NULL;
+    }
+
+    node_init(node, NODE_LIT_CHAR);
+    node->char_value = value;
+    return node;
+}
+
+Node *node_string(const char *value)
+{
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+    {
+        return NULL;
+    }
+
+    node_init(node, NODE_LIT_STRING);
+    node->str_value = strdup(value);
+    return node;
+}
+
+Node *node_binary(Operator op, Node *left, Node *right)
+{
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+    {
+        return NULL;
+    }
+
+    node_init(node, NODE_EXPR_BINARY);
+    node->binary.op    = op;
+    node->binary.left  = left;
+    node->binary.right = right;
+    return node;
+}
+
+Node *node_unary(Operator op, Node *target)
+{
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+    {
+        return NULL;
+    }
+
+    node_init(node, NODE_EXPR_UNARY);
+    node->unary.op     = op;
+    node->unary.target = target;
+    return node;
+}
+
+Node *node_call(Node *target, Node **args)
+{
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+    {
+        return NULL;
+    }
+
+    node_init(node, NODE_EXPR_CALL);
+    node->call.target = target;
+    node->call.args   = args;
+    return node;
+}
+
+Node *node_block(Node **statements)
+{
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+    {
+        return NULL;
+    }
+
+    node_init(node, NODE_BLOCK);
+    node->children = statements;
+    return node;
+}
+
+// list utilities
+Node **node_list_new(void)
+{
+    Node **list = malloc(sizeof(Node *));
+    if (list == NULL)
+    {
+        return NULL;
+    }
+
+    list[0] = NULL;
     return list;
 }
 
-int node_list_count(Node **list)
+void node_list_add(Node ***list, Node *node)
+{
+    if (list == NULL || *list == NULL)
+    {
+        return;
+    }
+
+    size_t count    = node_list_count(*list);
+    Node **new_list = realloc(*list, (count + 2) * sizeof(Node *));
+    if (new_list == NULL)
+    {
+        return;
+    }
+
+    new_list[count]     = node;
+    new_list[count + 1] = NULL;
+    *list               = new_list;
+}
+
+size_t node_list_count(Node **list)
 {
     if (list == NULL)
     {
         return 0;
     }
 
-    int count = 0;
+    size_t count = 0;
     while (list[count] != NULL)
     {
         count++;
     }
-
     return count;
 }
 
-void node_list_add(Node ***list, Node *node)
+const char *node_kind_name(NodeKind kind)
 {
-    int count = node_list_count(*list);
-    Node **new_list = realloc(*list, (count + 2) * sizeof(Node *));
-    new_list[count + 1] = NULL;
-    new_list[count] = node;
-    *list = new_list;
-}
-
-void node_list_free(Node **list)
-{
-    int count = node_list_count(list);
-    for (int i = 0; i < count - 1; i++)
+    switch (kind)
     {
-        node_free(list[i]);
-        list[i] = NULL;
-    }
-    free(list);
-}
-
-void node_walk(void *context, Node *node, void (*callback)(void *context, Node *node, int depth))
-{
-    static int depth = 0;
-
-    if (node == NULL)
-    {
-        return;
-    }
-
-    callback(context, node, depth);
-
-    switch (node->kind)
-    {
-    case NODE_ERROR:
-        break;
-    case NODE_PROGRAM:
-        depth++;
-        for (int i = 0; i < node_list_count(node->data.program->modules); i++)
-        {
-            node_walk(context, node->data.program->modules[i], callback);
-        }
-        depth--;
-        break;
-    case NODE_MODULE:
-        depth++;
-        for (int i = 0; i < node_list_count(node->data.module->files); i++)
-        {
-            node_walk(context, node->data.module->files[i], callback);
-        }
-        depth--;
-        break;
-    case NODE_FILE:
-        depth++;
-        for (int i = 0; i < node_list_count(node->data.file->statements); i++)
-        {
-            node_walk(context, node->data.file->statements[i], callback);
-        }
-        depth--;
-        break;
     case NODE_IDENTIFIER:
+        return "identifier";
+    case NODE_PROGRAM:
+        return "program";
+    case NODE_BLOCK:
+        return "block";
+
     case NODE_LIT_INT:
+        return "int_literal";
     case NODE_LIT_FLOAT:
+        return "float_literal";
     case NODE_LIT_CHAR:
+        return "char_literal";
     case NODE_LIT_STRING:
-        break;
-    case NODE_EXPR_MEMBER:
-        depth++;
-        node_walk(context, node->data.expr_member->target, callback);
-        node_walk(context, node->data.expr_member->member, callback);
-        depth--;
-        break;
+        return "string_literal";
+
     case NODE_EXPR_CALL:
-        depth++;
-        node_walk(context, node->data.expr_call->target, callback);
-        for (int i = 0; i < node_list_count(node->data.expr_call->arguments); i++)
-        {
-            node_walk(context, node->data.expr_call->arguments[i], callback);
-        }
-        depth--;
-        break;
+        return "call_expression";
     case NODE_EXPR_INDEX:
-        depth++;
-        node_walk(context, node->data.expr_index->target, callback);
-        node_walk(context, node->data.expr_index->index, callback);
-        depth--;
-        break;
+        return "index_expression";
+    case NODE_EXPR_MEMBER:
+        return "member_expression";
     case NODE_EXPR_CAST:
-        depth++;
-        node_walk(context, node->data.expr_cast->target, callback);
-        node_walk(context, node->data.expr_cast->type, callback);
-        depth--;
-        break;
+        return "cast_expression";
     case NODE_EXPR_UNARY:
-        depth++;
-        node_walk(context, node->data.expr_unary->target, callback);
-        depth--;
-        break;
+        return "unary_expression";
     case NODE_EXPR_BINARY:
-        depth++;
-        node_walk(context, node->data.expr_binary->left, callback);
-        node_walk(context, node->data.expr_binary->right, callback);
-        depth--;
-        break;
+        return "binary_expression";
+
     case NODE_TYPE_ARRAY:
-        depth++;
-        node_walk(context, node->data.type_array->type, callback);
-        node_walk(context, node->data.type_array->size, callback);
-        depth--;
-        break;
+        return "array_type";
     case NODE_TYPE_POINTER:
-        depth++;
-        node_walk(context, node->data.type_pointer->type, callback);
-        depth--;
-        break;
-    case NODE_TYPE_FUN:
-        depth++;
-        node_walk(context, node->data.type_function->return_type, callback);
-        for (int i = 0; i < node_list_count(node->data.type_function->parameters); i++)
-        {
-            node_walk(context, node->data.type_function->parameters[i], callback);
-        }
-        depth--;
-        break;
-    case NODE_TYPE_STR:
-        for (int i = 0; i < node_list_count(node->data.type_struct->fields); i++)
-        {
-            depth++;
-            node_walk(context, node->data.type_struct->fields[i], callback);
-            depth--;
-        }
-        break;
-    case NODE_TYPE_UNI:
-        for (int i = 0; i < node_list_count(node->data.type_union->fields); i++)
-        {
-            depth++;
-            node_walk(context, node->data.type_union->fields[i], callback);
-            depth--;
-        }
-        break;
-    case NODE_FIELD:
-        depth++;
-        node_walk(context, node->data.field->identifier, callback);
-        node_walk(context, node->data.field->type, callback);
-        depth--;
-        break;
+        return "pointer_type";
+    case NODE_TYPE_FUNCTION:
+        return "function_type";
+    case NODE_TYPE_STRUCT:
+        return "struct_type";
+    case NODE_TYPE_UNION:
+        return "union_type";
+
     case NODE_STMT_VAL:
-        depth++;
-        node_walk(context, node->data.stmt_val->identifier, callback);
-        node_walk(context, node->data.stmt_val->type, callback);
-        node_walk(context, node->data.stmt_val->initializer, callback);
-        depth--;
-        break;
+        return "val_statement";
     case NODE_STMT_VAR:
-        depth++;
-        node_walk(context, node->data.stmt_var->identifier, callback);
-        node_walk(context, node->data.stmt_var->type, callback);
-        node_walk(context, node->data.stmt_var->initializer, callback);
-        depth--;
-        break;
+        return "var_statement";
     case NODE_STMT_DEF:
-        depth++;
-        node_walk(context, node->data.stmt_def->identifier, callback);
-        node_walk(context, node->data.stmt_def->type, callback);
-        depth--;
-        break;
-    case NODE_STMT_MOD:
-        depth++;
-        node_walk(context, node->data.stmt_mod->module_path, callback);
-        depth--;
-        break;
-    case NODE_STMT_USE:
-        depth++;
-        node_walk(context, node->data.stmt_use->alias, callback);
-        node_walk(context, node->data.stmt_use->module_path, callback);
-        depth--;
-        break;
-    case NODE_STMT_STR:
-        depth++;
-        node_walk(context, node->data.stmt_str->identifier, callback);
-        for (int i = 0; i < node_list_count(node->data.stmt_str->fields); i++)
-        {
-            node_walk(context, node->data.stmt_str->fields[i], callback);
-        }
-        depth--;
-        break;
-    case NODE_STMT_UNI:
-        depth++;
-        node_walk(context, node->data.stmt_uni->identifier, callback);
-        for (int i = 0; i < node_list_count(node->data.stmt_uni->fields); i++)
-        {
-            node_walk(context, node->data.stmt_uni->fields[i], callback);
-        }
-        depth--;
-        break;
-    case NODE_STMT_FUN:
-        depth++;
-        node_walk(context, node->data.stmt_fun->identifier, callback);
-        node_walk(context, node->data.stmt_fun->return_type, callback);
-        for (int i = 0; i < node_list_count(node->data.stmt_fun->parameters); i++)
-        {
-            node_walk(context, node->data.stmt_fun->parameters[i], callback);
-        }
-        node_walk(context, node->data.stmt_fun->body, callback);
-        depth--;
-        break;
-    case NODE_STMT_EXT:
-        depth++;
-        node_walk(context, node->data.stmt_ext->identifier, callback);
-        node_walk(context, node->data.stmt_ext->type, callback);
-        depth--;
-        break;
+        return "def_statement";
+    case NODE_STMT_FUNCTION:
+        return "function_statement";
+    case NODE_STMT_STRUCT:
+        return "struct_statement";
+    case NODE_STMT_UNION:
+        return "union_statement";
+    case NODE_STMT_EXTERNAL:
+        return "external_statement";
     case NODE_STMT_IF:
-        depth++;
-        node_walk(context, node->data.stmt_if->condition, callback);
-        node_walk(context, node->data.stmt_if->body, callback);
-        depth--;
-        break;
+        return "if_statement";
     case NODE_STMT_OR:
-        depth++;
-        node_walk(context, node->data.stmt_or->condition, callback);
-        node_walk(context, node->data.stmt_or->body, callback);
-        depth--;
-        break;
+        return "or_statement";
     case NODE_STMT_FOR:
-        depth++;
-        node_walk(context, node->data.stmt_for->condition, callback);
-        node_walk(context, node->data.stmt_for->body, callback);
-        depth--;
-        break;
-    case NODE_STMT_BRK:
-    case NODE_STMT_CNT:
-        break;
-    case NODE_STMT_RET:
-        depth++;
-        node_walk(context, node->data.stmt_return->value, callback);
-        depth--;
-        break;
-    case NODE_STMT_ASM:
-        depth++;
-        node_walk(context, node->data.stmt_asm->code, callback);
-        depth--;
-        break;
-    case NODE_STMT_BLOCK:
-        for (int i = 0; i < node_list_count(node->data.stmt_block->statements); i++)
-        {
-            depth++;
-            node_walk(context, node->data.stmt_block->statements[i], callback);
-            depth--;
-        }
-        break;
-    case NODE_STMT_EXPR:
-        depth++;
-        node_walk(context, node->data.stmt_expr->expression, callback);
-        depth--;
-        break;
-    }
-}
+        return "for_statement";
+    case NODE_STMT_BREAK:
+        return "break_statement";
+    case NODE_STMT_CONTINUE:
+        return "continue_statement";
+    case NODE_STMT_RETURN:
+        return "return_statement";
+    case NODE_STMT_EXPRESSION:
+        return "expression_statement";
 
-Node *node_find_parent(Node *node, NodeKind kind)
-{
-    if (node == NULL)
-    {
-        return NULL;
+    case NODE_COUNT:
+        return "count";
     }
 
-    if (node->parent == NULL)
-    {
-        return NULL;
-    }
-
-    if (node->parent->kind == kind)
-    {
-        return node->parent;
-    }
-
-    return node_find_parent(node->parent, kind);
+    return "unknown";
 }

@@ -8,6 +8,21 @@
 #include <llvm-c/TargetMachine.h>
 #include <stdbool.h>
 
+typedef enum SymbolKind
+{
+    SYMBOL_FUNCTION,  // function
+    SYMBOL_PARAMETER, // function parameter (immutable)
+    SYMBOL_CONST,     // val declaration (immutable)
+    SYMBOL_VARIABLE   // var declaration (mutable, alloca)
+} SymbolKind;
+
+typedef struct Symbol
+{
+    char        *name;
+    LLVMValueRef value;
+    SymbolKind   kind;
+} Symbol;
+
 typedef struct CodeGen
 {
     LLVMContextRef       context;
@@ -20,10 +35,9 @@ typedef struct CodeGen
     LLVMValueRef current_function;
 
     // symbol table for variables and functions
-    LLVMValueRef *symbols;
-    char        **symbol_names;
-    size_t        symbol_count;
-    size_t        symbol_capacity;
+    Symbol *symbols;
+    size_t  symbol_count;
+    size_t  symbol_capacity;
 
     bool has_error;
 } CodeGen;

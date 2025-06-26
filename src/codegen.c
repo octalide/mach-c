@@ -15,8 +15,9 @@ static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node);
 static void         codegen_statement(CodeGen *codegen, Node *stmt_node);
 
 // symbol table helpers
-static void         add_symbol(CodeGen *codegen, const char *name, LLVMValueRef value);
+static void         add_symbol(CodeGen *codegen, const char *name, LLVMValueRef value, SymbolKind kind);
 static LLVMValueRef get_symbol(CodeGen *codegen, const char *name);
+static SymbolKind   get_symbol_kind(CodeGen *codegen, const char *name);
 
 bool codegen_init(CodeGen *codegen, const char *module_name)
 {
@@ -73,10 +74,9 @@ bool codegen_init(CodeGen *codegen, const char *module_name)
 
     // initialize symbol table
     codegen->symbol_capacity = 64;
-    codegen->symbols         = malloc(sizeof(LLVMValueRef) * codegen->symbol_capacity);
-    codegen->symbol_names    = malloc(sizeof(char *) * codegen->symbol_capacity);
+    codegen->symbols         = malloc(sizeof(Symbol) * codegen->symbol_capacity);
 
-    if (!codegen->symbols || !codegen->symbol_names)
+    if (!codegen->symbols)
     {
         codegen_error(codegen, "Failed to allocate symbol table");
         return false;
@@ -91,15 +91,14 @@ void codegen_dnit(CodeGen *codegen)
         return;
 
     // cleanup symbol table
-    if (codegen->symbol_names)
+    if (codegen->symbols)
     {
         for (size_t i = 0; i < codegen->symbol_count; i++)
         {
-            free(codegen->symbol_names[i]);
+            free(codegen->symbols[i].name);
         }
-        free(codegen->symbol_names);
+        free(codegen->symbols);
     }
-    free(codegen->symbols);
 
     // cleanup LLVM objects
     if (codegen->target_machine)
@@ -201,17 +200,17 @@ void codegen_error(CodeGen *codegen, const char *message)
 }
 
 // symbol table helpers
-static void add_symbol(CodeGen *codegen, const char *name, LLVMValueRef value)
+static void add_symbol(CodeGen *codegen, const char *name, LLVMValueRef value, SymbolKind kind)
 {
     if (codegen->symbol_count >= codegen->symbol_capacity)
     {
         codegen->symbol_capacity *= 2;
-        codegen->symbols      = realloc(codegen->symbols, sizeof(LLVMValueRef) * codegen->symbol_capacity);
-        codegen->symbol_names = realloc(codegen->symbol_names, sizeof(char *) * codegen->symbol_capacity);
+        codegen->symbols = realloc(codegen->symbols, sizeof(Symbol) * codegen->symbol_capacity);
     }
 
-    codegen->symbols[codegen->symbol_count]      = value;
-    codegen->symbol_names[codegen->symbol_count] = strdup(name);
+    codegen->symbols[codegen->symbol_count].name  = strdup(name);
+    codegen->symbols[codegen->symbol_count].value = value;
+    codegen->symbols[codegen->symbol_count].kind  = kind;
     codegen->symbol_count++;
 }
 
@@ -219,12 +218,24 @@ static LLVMValueRef get_symbol(CodeGen *codegen, const char *name)
 {
     for (size_t i = 0; i < codegen->symbol_count; i++)
     {
-        if (strcmp(codegen->symbol_names[i], name) == 0)
+        if (strcmp(codegen->symbols[i].name, name) == 0)
         {
-            return codegen->symbols[i];
+            return codegen->symbols[i].value;
         }
     }
     return NULL;
+}
+
+static SymbolKind get_symbol_kind(CodeGen *codegen, const char *name)
+{
+    for (size_t i = 0; i < codegen->symbol_count; i++)
+    {
+        if (strcmp(codegen->symbols[i].name, name) == 0)
+        {
+            return codegen->symbols[i].kind;
+        }
+    }
+    return SYMBOL_FUNCTION; // default, but should not happen
 }
 
 // type conversion
@@ -385,7 +396,7 @@ static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node)
                 LLVMSetValueName(param_value, param_name);
 
                 // for now, just add to symbol table (later we'll create allocas for mutable params)
-                add_symbol(codegen, param_name, param_value);
+                add_symbol(codegen, param_name, param_value, SYMBOL_PARAMETER);
             }
         }
     }
@@ -426,7 +437,7 @@ static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node)
     // restore previous function
     codegen->current_function = prev_function;
 
-    add_symbol(codegen, func_name, function);
+    add_symbol(codegen, func_name, function, SYMBOL_FUNCTION);
     return function;
 }
 
@@ -448,6 +459,59 @@ static void codegen_statement(CodeGen *codegen, Node *stmt_node)
         }
         break;
 
+    case NODE_STMT_VAR:
+    case NODE_STMT_VAL:
+    {
+        // handle local variable declarations
+        if (!stmt_node->decl.name || stmt_node->decl.name->kind != NODE_IDENTIFIER)
+        {
+            codegen_error(codegen, "Invalid variable name");
+            return;
+        }
+
+        const char *var_name = stmt_node->decl.name->str_value;
+        LLVMTypeRef var_type = codegen_type(codegen, stmt_node->decl.type);
+
+        if (stmt_node->kind == NODE_STMT_VAL)
+        {
+            // handle const (val) variables
+            if (!stmt_node->decl.init)
+            {
+                codegen_error(codegen, "val declaration must have initializer");
+                return;
+            }
+
+            // evaluate the initializer
+            LLVMValueRef init_value = codegen_expression(codegen, stmt_node->decl.init);
+            if (!init_value)
+            {
+                return;
+            }
+
+            // for const variables, store the value directly in symbol table
+            add_symbol(codegen, var_name, init_value, SYMBOL_CONST);
+        }
+        else
+        {
+            // handle mutable (var) variables
+            // create alloca for the variable
+            LLVMValueRef alloca_inst = LLVMBuildAlloca(codegen->builder, var_type, var_name);
+
+            // if there's an initializer, store it
+            if (stmt_node->decl.init)
+            {
+                LLVMValueRef init_value = codegen_expression(codegen, stmt_node->decl.init);
+                if (init_value)
+                {
+                    LLVMBuildStore(codegen->builder, init_value, alloca_inst);
+                }
+            }
+
+            // add to symbol table as mutable variable
+            add_symbol(codegen, var_name, alloca_inst, SYMBOL_VARIABLE);
+        }
+    }
+    break;
     case NODE_STMT_RETURN:
     {
         if (stmt_node->single)
@@ -459,6 +523,45 @@ static void codegen_statement(CodeGen *codegen, Node *stmt_node)
         {
             LLVMBuildRetVoid(codegen->builder);
         }
+    }
+    break;
+
+    case NODE_STMT_IF:
+    {
+        // evaluate condition
+        LLVMValueRef condition = codegen_expression(codegen, stmt_node->conditional.condition);
+        if (!condition)
+        {
+            return;
+        }
+
+        // get current function
+        LLVMValueRef function = codegen->current_function;
+        if (!function)
+        {
+            codegen_error(codegen, "If statement outside function");
+            return;
+        }
+
+        // create basic blocks
+        LLVMBasicBlockRef then_block  = LLVMAppendBasicBlockInContext(codegen->context, function, "if_then");
+        LLVMBasicBlockRef merge_block = LLVMAppendBasicBlockInContext(codegen->context, function, "if_merge");
+
+        // conditional branch
+        LLVMBuildCondBr(codegen->builder, condition, then_block, merge_block);
+
+        // generate then block
+        LLVMPositionBuilderAtEnd(codegen->builder, then_block);
+        codegen_statement(codegen, stmt_node->conditional.body);
+
+        // if then block doesn't end with terminator, branch to merge
+        if (!LLVMGetLastInstruction(then_block) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(then_block)))
+        {
+            LLVMBuildBr(codegen->builder, merge_block);
+        }
+
+        // continue with merge block
+        LLVMPositionBuilderAtEnd(codegen->builder, merge_block);
     }
     break;
 
@@ -485,13 +588,25 @@ static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node)
 
     case NODE_LIT_FLOAT:
         return LLVMConstReal(LLVMDoubleTypeInContext(codegen->context), expr_node->float_value);
-
     case NODE_IDENTIFIER:
     {
         LLVMValueRef symbol = get_symbol(codegen, expr_node->str_value);
         if (symbol)
         {
-            return symbol;
+            SymbolKind kind = get_symbol_kind(codegen, expr_node->str_value);
+
+            switch (kind)
+            {
+            case SYMBOL_CONST:
+            case SYMBOL_PARAMETER:
+            case SYMBOL_FUNCTION:
+                // const values, parameters, and functions - return directly
+                return symbol;
+
+            case SYMBOL_VARIABLE:
+                // mutable variable (alloca) - load its value
+                return LLVMBuildLoad2(codegen->builder, LLVMGetAllocatedType(symbol), symbol, expr_node->str_value);
+            }
         }
         codegen_error(codegen, "Undefined symbol");
         return NULL;
@@ -520,6 +635,21 @@ static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node)
             return LLVMBuildSDiv(codegen->builder, left, right, "div_tmp");
         case OP_MOD:
             return LLVMBuildSRem(codegen->builder, left, right, "mod_tmp");
+
+        // comparison operators
+        case OP_EQUAL:
+            return LLVMBuildICmp(codegen->builder, LLVMIntEQ, left, right, "eq_tmp");
+        case OP_NOT_EQUAL:
+            return LLVMBuildICmp(codegen->builder, LLVMIntNE, left, right, "ne_tmp");
+        case OP_LESS:
+            return LLVMBuildICmp(codegen->builder, LLVMIntSLT, left, right, "lt_tmp");
+        case OP_GREATER:
+            return LLVMBuildICmp(codegen->builder, LLVMIntSGT, left, right, "gt_tmp");
+        case OP_LESS_EQUAL:
+            return LLVMBuildICmp(codegen->builder, LLVMIntSLE, left, right, "le_tmp");
+        case OP_GREATER_EQUAL:
+            return LLVMBuildICmp(codegen->builder, LLVMIntSGE, left, right, "ge_tmp");
+
         default:
             codegen_error(codegen, "Unsupported binary operator");
             return NULL;

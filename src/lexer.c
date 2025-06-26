@@ -1,19 +1,17 @@
 #include "lexer.h"
+#include "token.h"
 
-#include <stdlib.h>
 #include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
-Lexer *lexer_new(char *source)
+void lexer_init(Lexer *lexer, char *source)
 {
-    Lexer *lexer = calloc(1, sizeof(Lexer));
     lexer->source = strdup(source);
-    lexer->pos = 0;
-
-    return lexer;
+    lexer->pos    = 0;
 }
 
-void lexer_free(Lexer *lexer)
+void lexer_dnit(Lexer *lexer)
 {
     if (lexer == NULL)
     {
@@ -22,8 +20,7 @@ void lexer_free(Lexer *lexer)
 
     free(lexer->source);
     lexer->source = NULL;
-
-    free(lexer);
+    lexer->pos    = -1;
 }
 
 bool lexer_at_end(Lexer *lexer)
@@ -88,7 +85,7 @@ int lexer_get_pos_line_offset(Lexer *lexer, int pos)
 
 char *lexer_get_line_text(Lexer *lexer, int line)
 {
-    int line_start = 0;
+    int line_start   = 0;
     int current_line = 0;
 
     while (current_line < line && lexer->source[line_start] != '\0')
@@ -138,7 +135,12 @@ Token *lexer_parse_identifier(Lexer *lexer)
         lexer_advance(lexer);
     }
 
-    return token_new(TOKEN_IDENTIFIER, start, lexer->pos - start);
+    int       len  = lexer->pos - start;
+    TokenKind kind = token_kind_from_identifier(lexer->source + start, len);
+
+    Token *token = malloc(sizeof(Token));
+    token_init(token, kind, start, len);
+    return token;
 }
 
 // integer formatting rules:
@@ -190,19 +192,25 @@ Token *lexer_parse_lit_number(Lexer *lexer)
             {
                 lexer_advance(lexer);
             }
-            return token_new(TOKEN_LIT_INT, start, lexer->pos - start);
+            Token *token = malloc(sizeof(Token));
+            token_init(token, TOKEN_LIT_INT, start, lexer->pos - start);
+            return token;
         case 8:
             while (!lexer_at_end(lexer) && ((lexer_current(lexer) >= '0' && lexer_current(lexer) <= '7') || lexer_current(lexer) == '_'))
             {
                 lexer_advance(lexer);
             }
-            return token_new(TOKEN_LIT_INT, start, lexer->pos - start);
+            Token *octal_token = malloc(sizeof(Token));
+            token_init(octal_token, TOKEN_LIT_INT, start, lexer->pos - start);
+            return octal_token;
         case 16:
             while (!lexer_at_end(lexer) && (isxdigit(lexer_current(lexer)) || lexer_current(lexer) == '_'))
             {
                 lexer_advance(lexer);
             }
-            return token_new(TOKEN_LIT_INT, start, lexer->pos - start);
+            Token *hex_token = malloc(sizeof(Token));
+            token_init(hex_token, TOKEN_LIT_INT, start, lexer->pos - start);
+            return hex_token;
         default:
             lexer_advance(lexer);
             break;
@@ -223,10 +231,14 @@ Token *lexer_parse_lit_number(Lexer *lexer)
             lexer_advance(lexer);
         }
 
-        return token_new(TOKEN_LIT_FLOAT, start, lexer->pos - start);
+        Token *float_token = malloc(sizeof(Token));
+        token_init(float_token, TOKEN_LIT_FLOAT, start, lexer->pos - start);
+        return float_token;
     }
 
-    return token_new(TOKEN_LIT_INT, start, lexer->pos - start);
+    Token *int_token = malloc(sizeof(Token));
+    token_init(int_token, TOKEN_LIT_INT, start, lexer->pos - start);
+    return int_token;
 }
 
 // char formatting rules:
@@ -246,19 +258,25 @@ Token *lexer_parse_lit_char(Lexer *lexer)
 
     if (lexer_current(lexer) != '\'')
     {
-        return token_new(TOKEN_ERROR, start, 1);
+        Token *error_token = malloc(sizeof(Token));
+        token_init(error_token, TOKEN_ERROR, start, 1);
+        return error_token;
     }
 
     lexer_advance(lexer);
 
     if (lexer_at_end(lexer))
     {
-        return token_new(TOKEN_ERROR, start, 1);
+        Token *error_token = malloc(sizeof(Token));
+        token_init(error_token, TOKEN_ERROR, start, 1);
+        return error_token;
     }
 
     if (lexer_current(lexer) == '\\')
     {
         lexer_advance(lexer);
+
+        Token *error_token;
 
         switch (lexer_current(lexer))
         {
@@ -272,7 +290,9 @@ Token *lexer_parse_lit_char(Lexer *lexer)
             lexer_advance(lexer);
             break;
         default:
-            return token_new(TOKEN_ERROR, start, lexer->pos - start);
+            error_token = malloc(sizeof(Token));
+            token_init(error_token, TOKEN_ERROR, start, lexer->pos - start);
+            return error_token;
         }
     }
     else
@@ -282,12 +302,16 @@ Token *lexer_parse_lit_char(Lexer *lexer)
 
     if (lexer_at_end(lexer) || lexer_current(lexer) != '\'')
     {
-        return token_new(TOKEN_ERROR, start, lexer->pos - start);
+        Token *error_token = malloc(sizeof(Token));
+        token_init(error_token, TOKEN_ERROR, start, lexer->pos - start);
+        return error_token;
     }
 
     lexer_advance(lexer);
 
-    return token_new(TOKEN_LIT_CHAR, start, lexer->pos - start);
+    Token *char_token = malloc(sizeof(Token));
+    token_init(char_token, TOKEN_LIT_CHAR, start, lexer->pos - start);
+    return char_token;
 }
 
 // string formatting rules:
@@ -307,7 +331,9 @@ Token *lexer_parse_lit_string(Lexer *lexer)
 
     if (lexer_current(lexer) != '\"')
     {
-        return token_new(TOKEN_ERROR, start, 1);
+        Token *error_token = malloc(sizeof(Token));
+        token_init(error_token, TOKEN_ERROR, start, 1);
+        return error_token;
     }
 
     lexer_advance(lexer);
@@ -317,6 +343,8 @@ Token *lexer_parse_lit_string(Lexer *lexer)
         if (lexer_current(lexer) == '\\')
         {
             lexer_advance(lexer);
+
+            Token *error_token;
 
             switch (lexer_current(lexer))
             {
@@ -330,7 +358,9 @@ Token *lexer_parse_lit_string(Lexer *lexer)
                 lexer_advance(lexer);
                 break;
             default:
-                return token_new(TOKEN_ERROR, start, lexer->pos - start);
+                error_token = malloc(sizeof(Token));
+                token_init(error_token, TOKEN_ERROR, start, lexer->pos - start);
+                return error_token;
             }
         }
         else
@@ -341,19 +371,23 @@ Token *lexer_parse_lit_string(Lexer *lexer)
 
     if (lexer_at_end(lexer) || lexer_current(lexer) != '\"')
     {
-        return token_new(TOKEN_ERROR, start, lexer->pos - start);
+        Token *error_token = malloc(sizeof(Token));
+        token_init(error_token, TOKEN_ERROR, start, lexer->pos - start);
+        return error_token;
     }
 
     lexer_advance(lexer);
 
-    return token_new(TOKEN_LIT_STRING, start, lexer->pos - start);
+    Token *string_token = malloc(sizeof(Token));
+    token_init(string_token, TOKEN_LIT_STRING, start, lexer->pos - start);
+    return string_token;
 }
 
 unsigned long long lexer_eval_lit_int(Lexer *lexer, Token *token)
 {
-    int base = 10;
-    int skip = 0;
-    char *end = NULL;
+    int   base = 10;
+    int   skip = 0;
+    char *end  = NULL;
 
     if (lexer->source[token->pos] == '0')
     {
@@ -381,7 +415,7 @@ unsigned long long lexer_eval_lit_int(Lexer *lexer, Token *token)
     }
 
     char *cleaned = malloc(token->len + 1);
-    int j = 0;
+    int   j       = 0;
     for (int i = 0; i < token->len; i++)
     {
         if (lexer->source[token->pos + i] != '_')
@@ -402,7 +436,7 @@ double lexer_eval_lit_float(Lexer *lexer, Token *token)
     char *end = NULL;
 
     char *cleaned = malloc(token->len + 1);
-    int j = 0;
+    int   j       = 0;
     for (int i = 0; i < token->len; i++)
     {
         if (lexer->source[token->pos + i] != '_')
@@ -508,7 +542,9 @@ char *lexer_raw_value(Lexer *lexer, Token *token)
 
 Token *lexer_emit(Lexer *lexer, TokenKind kind, int len)
 {
-    Token *token = token_new(kind, lexer->pos, len);
+    Token *token = malloc(sizeof(Token));
+    token_init(token, kind, lexer->pos, len);
+
     for (int i = 0; i < len; i++)
     {
         lexer_advance(lexer);
@@ -529,13 +565,10 @@ Token *lexer_next(Lexer *lexer)
         {
             lexer_advance(lexer);
         }
-        return token_new(TOKEN_COMMENT, start, lexer->pos - start);
-    case 'a' ... 'z':
-    case 'A' ... 'Z':
-    case '_':
-        return lexer_parse_identifier(lexer);
-    case '0' ... '9':
-        return lexer_parse_lit_number(lexer);
+        Token *comment_token = malloc(sizeof(Token));
+        token_init(comment_token, TOKEN_COMMENT, start, lexer->pos - start);
+        lexer_advance(lexer); // consume the newline
+        return comment_token;
     case '\'':
         return lexer_parse_lit_char(lexer);
     case '\"':
@@ -644,10 +677,20 @@ Token *lexer_next(Lexer *lexer)
     case '/':
         return lexer_emit(lexer, TOKEN_SLASH, 1);
     case '\\':
-        return lexer_emit(lexer, TOKEN_BACKSLASH, 1);
+        return lexer_emit(lexer, TOKEN_SLASH, 1);
     case '\0':
         return lexer_emit(lexer, TOKEN_EOF, 1);
     default:
+        if (isdigit(lexer_current(lexer)))
+        {
+            return lexer_parse_lit_number(lexer);
+        }
+
+        if (isalpha(lexer_current(lexer)) || lexer_current(lexer) == '_')
+        {
+            return lexer_parse_identifier(lexer);
+        }
+
         return lexer_emit(lexer, TOKEN_ERROR, 1);
     }
 }

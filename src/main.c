@@ -3,6 +3,7 @@
 #include "ioutil.h"
 #include "lexer.h"
 #include "parser.h"
+#include "semantic.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,11 +94,44 @@ int main(int argc, char **argv)
     }
     else if (strcmp(command, "compile") == 0 || strcmp(command, "emit-ir") == 0 || strcmp(command, "build") == 0)
     {
+        // initialize semantic analyzer
+        SemanticAnalyzer analyzer;
+        if (!semantic_init(&analyzer))
+        {
+            fprintf(stderr, "Failed to initialize semantic analyzer\n");
+            node_dnit(program);
+            free(program);
+            parser_dnit(&parser);
+            lexer_dnit(&lexer);
+            free(source);
+            return 1;
+        }
+
+        // perform semantic analysis
+        if (!semantic_analyze(&analyzer, program))
+        {
+            fprintf(stderr, "Semantic analysis failed\n");
+            if (analyzer.error_buffer_pos > 0)
+            {
+                fprintf(stderr, "%s", analyzer.error_messages);
+            }
+            semantic_dnit(&analyzer);
+            node_dnit(program);
+            free(program);
+            parser_dnit(&parser);
+            lexer_dnit(&lexer);
+            free(source);
+            return 1;
+        }
+
+        printf("Semantic analysis passed\n");
+
         // initialize codegen
         CodeGen codegen;
         if (!codegen_init(&codegen, "mach_program"))
         {
             fprintf(stderr, "Failed to initialize code generator\n");
+            semantic_dnit(&analyzer);
             node_dnit(program);
             free(program);
             parser_dnit(&parser);
@@ -111,6 +145,8 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "Code generation failed\n");
             codegen_dnit(&codegen);
+            semantic_dnit(&analyzer);
+            semantic_dnit(&analyzer);
             node_dnit(program);
             free(program);
             parser_dnit(&parser);
@@ -127,6 +163,8 @@ int main(int argc, char **argv)
             {
                 fprintf(stderr, "Failed to write object file\n");
                 codegen_dnit(&codegen);
+                semantic_dnit(&analyzer);
+                semantic_dnit(&analyzer);
                 node_dnit(program);
                 free(program);
                 parser_dnit(&parser);
@@ -143,6 +181,8 @@ int main(int argc, char **argv)
             {
                 fprintf(stderr, "Failed to write IR file\n");
                 codegen_dnit(&codegen);
+                semantic_dnit(&analyzer);
+                semantic_dnit(&analyzer);
                 node_dnit(program);
                 free(program);
                 parser_dnit(&parser);
@@ -160,6 +200,7 @@ int main(int argc, char **argv)
             {
                 fprintf(stderr, "Failed to write object file\n");
                 codegen_dnit(&codegen);
+                semantic_dnit(&analyzer);
                 node_dnit(program);
                 free(program);
                 parser_dnit(&parser);
@@ -181,6 +222,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Failed to link executable\n");
                 remove(obj_file);
                 codegen_dnit(&codegen);
+                semantic_dnit(&analyzer);
                 node_dnit(program);
                 free(program);
                 parser_dnit(&parser);
@@ -195,6 +237,7 @@ int main(int argc, char **argv)
         }
 
         codegen_dnit(&codegen);
+        semantic_dnit(&analyzer);
     }
 
     // cleanup

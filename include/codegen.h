@@ -58,6 +58,10 @@ typedef struct CodeGen
 bool codegen_init(CodeGen *codegen, const char *module_name);
 void codegen_dnit(CodeGen *codegen);
 
+// helper functions
+bool is_float_type(LLVMTypeRef type);
+bool is_unsigned_type(const char *type_name);
+
 // main generation function
 bool codegen_generate(CodeGen *codegen, Node *program);
 

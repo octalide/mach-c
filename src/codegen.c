@@ -886,16 +886,67 @@ static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node)
         switch (expr_node->binary.op)
         {
         case OP_ADD:
-            return LLVMBuildAdd(codegen->builder, left, right, "add_tmp");
+        {
+            LLVMTypeRef left_type = LLVMTypeOf(left);
+            if (is_float_type(left_type))
+            {
+                return LLVMBuildFAdd(codegen->builder, left, right, "fadd_tmp");
+            }
+            else
+            {
+                return LLVMBuildAdd(codegen->builder, left, right, "add_tmp");
+            }
+        }
         case OP_SUB:
-            return LLVMBuildSub(codegen->builder, left, right, "sub_tmp");
+        {
+            LLVMTypeRef left_type = LLVMTypeOf(left);
+            if (is_float_type(left_type))
+            {
+                return LLVMBuildFSub(codegen->builder, left, right, "fsub_tmp");
+            }
+            else
+            {
+                return LLVMBuildSub(codegen->builder, left, right, "sub_tmp");
+            }
+        }
         case OP_MUL:
-            return LLVMBuildMul(codegen->builder, left, right, "mul_tmp");
+        {
+            LLVMTypeRef left_type = LLVMTypeOf(left);
+            if (is_float_type(left_type))
+            {
+                return LLVMBuildFMul(codegen->builder, left, right, "fmul_tmp");
+            }
+            else
+            {
+                return LLVMBuildMul(codegen->builder, left, right, "mul_tmp");
+            }
+        }
         case OP_DIV:
-            // assume signed division for now
-            return LLVMBuildSDiv(codegen->builder, left, right, "div_tmp");
+        {
+            LLVMTypeRef left_type = LLVMTypeOf(left);
+            if (is_float_type(left_type))
+            {
+                return LLVMBuildFDiv(codegen->builder, left, right, "fdiv_tmp");
+            }
+            else
+            {
+                // TODO: need to track signedness for udiv vs sdiv
+                return LLVMBuildSDiv(codegen->builder, left, right, "div_tmp");
+            }
+        }
         case OP_MOD:
-            return LLVMBuildSRem(codegen->builder, left, right, "mod_tmp");
+        {
+            LLVMTypeRef left_type = LLVMTypeOf(left);
+            if (is_float_type(left_type))
+            {
+                return LLVMBuildFRem(codegen->builder, left, right, "fmod_tmp");
+            }
+            else
+            {
+                // TODO: need to track signedness for urem vs srem
+                return LLVMBuildSRem(codegen->builder, left, right, "mod_tmp");
+            }
+        }
 
         // bitwise operators
         case OP_BITWISE_AND:
@@ -1059,4 +1110,11 @@ static void end_if_chain(CodeGen *codegen)
         codegen->in_if_chain          = false;
         codegen->if_chain_merge_block = NULL;
     }
+}
+
+// helper function to check if a type is floating point
+bool is_float_type(LLVMTypeRef type)
+{
+    LLVMTypeKind kind = LLVMGetTypeKind(type);
+    return kind == LLVMFloatTypeKind || kind == LLVMDoubleTypeKind;
 }

@@ -21,6 +21,7 @@ typedef struct Symbol
     char        *name;
     LLVMValueRef value;
     SymbolKind   kind;
+    size_t       scope_level; // 0 = global, 1+ = local scopes
 } Symbol;
 
 typedef struct CodeGen
@@ -34,10 +35,21 @@ typedef struct CodeGen
     // current function being generated
     LLVMValueRef current_function;
 
+    // if-or chain tracking
+    LLVMBasicBlockRef if_chain_merge_block;
+    bool              in_if_chain;
+
+    // loop context tracking
+    LLVMBasicBlockRef current_loop_header;
+    LLVMBasicBlockRef current_loop_exit;
+
     // symbol table for variables and functions
     Symbol *symbols;
     size_t  symbol_count;
     size_t  symbol_capacity;
+
+    // scope management
+    size_t current_scope_level;
 
     bool has_error;
 } CodeGen;

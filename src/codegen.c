@@ -13,11 +13,14 @@ static LLVMTypeRef  codegen_type(CodeGen *codegen, Node *type_node);
 static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node);
 static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node);
 static void         codegen_statement(CodeGen *codegen, Node *stmt_node);
+static void         end_if_chain(CodeGen *codegen);
 
 // symbol table helpers
 static void         add_symbol(CodeGen *codegen, const char *name, LLVMValueRef value, SymbolKind kind);
 static LLVMValueRef get_symbol(CodeGen *codegen, const char *name);
 static SymbolKind   get_symbol_kind(CodeGen *codegen, const char *name);
+static void         push_scope(CodeGen *codegen);
+static void         pop_scope(CodeGen *codegen);
 
 bool codegen_init(CodeGen *codegen, const char *module_name)
 {
@@ -64,6 +67,19 @@ bool codegen_init(CodeGen *codegen, const char *module_name)
     // create target machine
     codegen->target_machine = LLVMCreateTargetMachine(codegen->target, triple, "generic", "", LLVMCodeGenLevelDefault, LLVMRelocDefault, LLVMCodeModelDefault);
 
+    if (!codegen->target_machine)
+    {
+        LLVMDisposeMessage(triple);
+        codegen_error(codegen, "Failed to create target machine");
+        return false;
+    }
+
+    // set target triple and data layout for better optimization
+    LLVMSetTarget(codegen->module, triple);
+    char *data_layout = LLVMCopyStringRepOfTargetData(LLVMCreateTargetDataLayout(codegen->target_machine));
+    LLVMSetDataLayout(codegen->module, data_layout);
+    LLVMDisposeMessage(data_layout);
+
     LLVMDisposeMessage(triple);
 
     if (!codegen->target_machine)
@@ -73,8 +89,9 @@ bool codegen_init(CodeGen *codegen, const char *module_name)
     }
 
     // initialize symbol table
-    codegen->symbol_capacity = 64;
-    codegen->symbols         = malloc(sizeof(Symbol) * codegen->symbol_capacity);
+    codegen->symbol_capacity     = 64;
+    codegen->symbols             = malloc(sizeof(Symbol) * codegen->symbol_capacity);
+    codegen->current_scope_level = 0; // start at global scope
 
     if (!codegen->symbols)
     {
@@ -208,15 +225,17 @@ static void add_symbol(CodeGen *codegen, const char *name, LLVMValueRef value, S
         codegen->symbols = realloc(codegen->symbols, sizeof(Symbol) * codegen->symbol_capacity);
     }
 
-    codegen->symbols[codegen->symbol_count].name  = strdup(name);
-    codegen->symbols[codegen->symbol_count].value = value;
-    codegen->symbols[codegen->symbol_count].kind  = kind;
+    codegen->symbols[codegen->symbol_count].name        = strdup(name);
+    codegen->symbols[codegen->symbol_count].value       = value;
+    codegen->symbols[codegen->symbol_count].kind        = kind;
+    codegen->symbols[codegen->symbol_count].scope_level = codegen->current_scope_level;
     codegen->symbol_count++;
 }
 
 static LLVMValueRef get_symbol(CodeGen *codegen, const char *name)
 {
-    for (size_t i = 0; i < codegen->symbol_count; i++)
+    // search from most recent (highest scope) to oldest (global scope)
+    for (int i = (int)codegen->symbol_count - 1; i >= 0; i--)
     {
         if (strcmp(codegen->symbols[i].name, name) == 0)
         {
@@ -228,7 +247,8 @@ static LLVMValueRef get_symbol(CodeGen *codegen, const char *name)
 
 static SymbolKind get_symbol_kind(CodeGen *codegen, const char *name)
 {
-    for (size_t i = 0; i < codegen->symbol_count; i++)
+    // search from most recent (highest scope) to oldest (global scope)
+    for (int i = (int)codegen->symbol_count - 1; i >= 0; i--)
     {
         if (strcmp(codegen->symbols[i].name, name) == 0)
         {
@@ -236,6 +256,32 @@ static SymbolKind get_symbol_kind(CodeGen *codegen, const char *name)
         }
     }
     return SYMBOL_FUNCTION; // default, but should not happen
+}
+
+static void push_scope(CodeGen *codegen)
+{
+    codegen->current_scope_level++;
+}
+
+static void pop_scope(CodeGen *codegen)
+{
+    // remove all symbols from current scope
+    size_t symbols_to_remove = 0;
+    for (int i = (int)codegen->symbol_count - 1; i >= 0; i--)
+    {
+        if (codegen->symbols[i].scope_level == codegen->current_scope_level)
+        {
+            free(codegen->symbols[i].name);
+            symbols_to_remove++;
+        }
+        else
+        {
+            break; // we've hit a symbol from an outer scope
+        }
+    }
+
+    codegen->symbol_count -= symbols_to_remove;
+    codegen->current_scope_level--;
 }
 
 // type conversion
@@ -383,6 +429,9 @@ static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node)
     LLVMValueRef prev_function = codegen->current_function;
     codegen->current_function  = function;
 
+    // push new scope for function parameters and local variables
+    push_scope(codegen);
+
     // create local variables for parameters
     if (func_node->function.params && param_count > 0)
     {
@@ -395,7 +444,7 @@ static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node)
                 LLVMValueRef param_value = LLVMGetParam(function, i);
                 LLVMSetValueName(param_value, param_name);
 
-                // for now, just add to symbol table (later we'll create allocas for mutable params)
+                // add parameter to local scope
                 add_symbol(codegen, param_name, param_value, SYMBOL_PARAMETER);
             }
         }
@@ -434,9 +483,13 @@ static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node)
         }
     }
 
+    // pop function scope (removes parameters and local variables)
+    pop_scope(codegen);
+
     // restore previous function
     codegen->current_function = prev_function;
 
+    // add function to global scope
     add_symbol(codegen, func_name, function, SYMBOL_FUNCTION);
     return function;
 }
@@ -454,7 +507,33 @@ static void codegen_statement(CodeGen *codegen, Node *stmt_node)
         {
             for (size_t i = 0; i < node_list_count(stmt_node->children); i++)
             {
-                codegen_statement(codegen, stmt_node->children[i]);
+                Node *current = stmt_node->children[i];
+
+                // process the current statement
+                codegen_statement(codegen, current);
+
+                // if we just processed an if or or statement, check if the next statement is also an or
+                if (codegen->in_if_chain && (current->kind == NODE_STMT_IF || current->kind == NODE_STMT_OR))
+                {
+                    // look ahead to see if next statement is or
+                    size_t next_i     = i + 1;
+                    bool   next_is_or = false;
+
+                    if (next_i < node_list_count(stmt_node->children))
+                    {
+                        Node *next = stmt_node->children[next_i];
+                        if (next && next->kind == NODE_STMT_OR)
+                        {
+                            next_is_or = true;
+                        }
+                    }
+
+                    // if next statement is not or, end the if-chain
+                    if (!next_is_or)
+                    {
+                        end_if_chain(codegen);
+                    }
+                }
             }
         }
         break;
@@ -544,30 +623,171 @@ static void codegen_statement(CodeGen *codegen, Node *stmt_node)
         }
 
         // create basic blocks
-        LLVMBasicBlockRef then_block  = LLVMAppendBasicBlockInContext(codegen->context, function, "if_then");
-        LLVMBasicBlockRef merge_block = LLVMAppendBasicBlockInContext(codegen->context, function, "if_merge");
+        LLVMBasicBlockRef then_bb  = LLVMAppendBasicBlockInContext(codegen->context, function, "if.then");
+        LLVMBasicBlockRef else_bb  = LLVMAppendBasicBlockInContext(codegen->context, function, "if.else");
+        LLVMBasicBlockRef merge_bb = LLVMAppendBasicBlockInContext(codegen->context, function, "if.end");
+
+        // start if-chain tracking
+        codegen->if_chain_merge_block = merge_bb;
+        codegen->in_if_chain          = true;
 
         // conditional branch
-        LLVMBuildCondBr(codegen->builder, condition, then_block, merge_block);
+        LLVMBuildCondBr(codegen->builder, condition, then_bb, else_bb);
 
         // generate then block
-        LLVMPositionBuilderAtEnd(codegen->builder, then_block);
+        LLVMPositionBuilderAtEnd(codegen->builder, then_bb);
         codegen_statement(codegen, stmt_node->conditional.body);
 
-        // if then block doesn't end with terminator, branch to merge
-        if (!LLVMGetLastInstruction(then_block) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(then_block)))
+        // branch to merge if no terminator
+        LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(codegen->builder);
+        if (current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb))))
         {
-            LLVMBuildBr(codegen->builder, merge_block);
+            LLVMBuildBr(codegen->builder, merge_bb);
         }
 
-        // continue with merge block
-        LLVMPositionBuilderAtEnd(codegen->builder, merge_block);
+        // position at else block for potential or statements
+        LLVMPositionBuilderAtEnd(codegen->builder, else_bb);
+    }
+    break;
+
+    case NODE_STMT_OR:
+    {
+        // get current function
+        LLVMValueRef function = codegen->current_function;
+        if (!function)
+        {
+            codegen_error(codegen, "Or statement outside function");
+            return;
+        }
+
+        // must be in if-chain
+        if (!codegen->in_if_chain)
+        {
+            codegen_error(codegen, "Or statement must follow if statement");
+            return;
+        }
+
+        if (stmt_node->conditional.condition)
+        {
+            // or with condition (else if)
+            LLVMValueRef condition = codegen_expression(codegen, stmt_node->conditional.condition);
+            if (!condition)
+            {
+                return;
+            }
+
+            // create blocks for this or clause
+            LLVMBasicBlockRef then_bb = LLVMAppendBasicBlockInContext(codegen->context, function, "or.then");
+            LLVMBasicBlockRef else_bb = LLVMAppendBasicBlockInContext(codegen->context, function, "or.else");
+
+            // conditional branch
+            LLVMBuildCondBr(codegen->builder, condition, then_bb, else_bb);
+
+            // generate then block
+            LLVMPositionBuilderAtEnd(codegen->builder, then_bb);
+            codegen_statement(codegen, stmt_node->conditional.body);
+
+            // branch to final merge if no terminator
+            LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(codegen->builder);
+            if (current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb))))
+            {
+                LLVMBuildBr(codegen->builder, codegen->if_chain_merge_block);
+            }
+
+            // position at else block for next or statement
+            LLVMPositionBuilderAtEnd(codegen->builder, else_bb);
+        }
+        else
+        {
+            // or without condition (else) - execute body directly
+            codegen_statement(codegen, stmt_node->conditional.body);
+
+            // branch to final merge if no terminator
+            LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(codegen->builder);
+            if (current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb))))
+            {
+                LLVMBuildBr(codegen->builder, codegen->if_chain_merge_block);
+            }
+
+            // end if-chain since unconditional or is final
+            codegen->in_if_chain = false;
+            LLVMPositionBuilderAtEnd(codegen->builder, codegen->if_chain_merge_block);
+            codegen->if_chain_merge_block = NULL;
+        }
     }
     break;
 
     case NODE_STMT_EXPRESSION:
         codegen_expression(codegen, stmt_node->single);
         break;
+
+    case NODE_STMT_FOR:
+    {
+        // get current function
+        LLVMValueRef function = codegen->current_function;
+        if (!function)
+        {
+            codegen_error(codegen, "For statement outside function");
+            return;
+        }
+
+        // create basic blocks
+        LLVMBasicBlockRef loop_cond = LLVMAppendBasicBlockInContext(codegen->context, function, "for.cond");
+        LLVMBasicBlockRef loop_body = LLVMAppendBasicBlockInContext(codegen->context, function, "for.body");
+        LLVMBasicBlockRef loop_end  = LLVMAppendBasicBlockInContext(codegen->context, function, "for.end");
+
+        // save previous loop context
+        LLVMBasicBlockRef prev_loop_header = codegen->current_loop_header;
+        LLVMBasicBlockRef prev_loop_exit   = codegen->current_loop_exit;
+
+        // set new loop context
+        codegen->current_loop_header = loop_cond;
+        codegen->current_loop_exit   = loop_end;
+
+        // branch to condition check
+        LLVMBuildBr(codegen->builder, loop_cond);
+
+        // generate condition block
+        LLVMPositionBuilderAtEnd(codegen->builder, loop_cond);
+
+        if (stmt_node->conditional.condition)
+        {
+            // conditional loop
+            LLVMValueRef condition = codegen_expression(codegen, stmt_node->conditional.condition);
+            if (!condition)
+            {
+                // restore previous context and return
+                codegen->current_loop_header = prev_loop_header;
+                codegen->current_loop_exit   = prev_loop_exit;
+                return;
+            }
+            LLVMBuildCondBr(codegen->builder, condition, loop_body, loop_end);
+        }
+        else
+        {
+            // infinite loop
+            LLVMBuildBr(codegen->builder, loop_body);
+        }
+
+        // generate loop body
+        LLVMPositionBuilderAtEnd(codegen->builder, loop_body);
+        codegen_statement(codegen, stmt_node->conditional.body);
+
+        // branch back to condition if no terminator
+        LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(codegen->builder);
+        if (current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb))))
+        {
+            LLVMBuildBr(codegen->builder, loop_cond);
+        }
+
+        // restore previous loop context
+        codegen->current_loop_header = prev_loop_header;
+        codegen->current_loop_exit   = prev_loop_exit;
+
+        // continue with loop end
+        LLVMPositionBuilderAtEnd(codegen->builder, loop_end);
+    }
+    break;
 
     default:
         // ignore other statements for now
@@ -677,6 +897,24 @@ static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node)
         case OP_MOD:
             return LLVMBuildSRem(codegen->builder, left, right, "mod_tmp");
 
+        // bitwise operators
+        case OP_BITWISE_AND:
+            return LLVMBuildAnd(codegen->builder, left, right, "and_tmp");
+        case OP_BITWISE_OR:
+            return LLVMBuildOr(codegen->builder, left, right, "or_tmp");
+        case OP_BITWISE_XOR:
+            return LLVMBuildXor(codegen->builder, left, right, "xor_tmp");
+        case OP_BITWISE_SHL:
+            return LLVMBuildShl(codegen->builder, left, right, "shl_tmp");
+        case OP_BITWISE_SHR:
+            return LLVMBuildAShr(codegen->builder, left, right, "shr_tmp");
+
+        // logical operators
+        case OP_LOGICAL_AND:
+            return LLVMBuildAnd(codegen->builder, left, right, "land_tmp");
+        case OP_LOGICAL_OR:
+            return LLVMBuildOr(codegen->builder, left, right, "lor_tmp");
+
         // comparison operators
         case OP_EQUAL:
             return LLVMBuildICmp(codegen->builder, LLVMIntEQ, left, right, "eq_tmp");
@@ -748,8 +986,77 @@ static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node)
         return result;
     }
 
+    case NODE_EXPR_UNARY:
+    {
+        LLVMValueRef operand = codegen_expression(codegen, expr_node->unary.target);
+        if (!operand)
+        {
+            return NULL;
+        }
+
+        switch (expr_node->unary.op)
+        {
+        case OP_LOGICAL_NOT:
+        {
+            // logical not - compare with zero
+            LLVMValueRef zero = LLVMConstInt(LLVMTypeOf(operand), 0, false);
+            return LLVMBuildICmp(codegen->builder, LLVMIntEQ, operand, zero, "not_tmp");
+        }
+        case OP_BITWISE_NOT:
+            return LLVMBuildNot(codegen->builder, operand, "bnot_tmp");
+        case OP_SUB:
+            // unary minus
+            return LLVMBuildNeg(codegen->builder, operand, "neg_tmp");
+        case OP_ADD:
+            // unary plus - no-op
+            return operand;
+        default:
+            codegen_error(codegen, "Unsupported unary operator");
+            return NULL;
+        }
+    }
+
     default:
         codegen_error(codegen, "Unsupported expression");
         return NULL;
+    }
+}
+
+// helper function to end an if-chain
+static void end_if_chain(CodeGen *codegen)
+{
+    if (codegen->in_if_chain && codegen->if_chain_merge_block)
+    {
+        LLVMBasicBlockRef merge_bb = codegen->if_chain_merge_block;
+
+        // check if current block would branch to merge
+        LLVMBasicBlockRef current_bb   = LLVMGetInsertBlock(codegen->builder);
+        bool              needs_branch = current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb)));
+
+        // check if merge block has any predecessors by checking for branches to it
+        LLVMValueRef merge_value      = LLVMBasicBlockAsValue(merge_bb);
+        LLVMUseRef   first_use        = LLVMGetFirstUse(merge_value);
+        bool         has_predecessors = (first_use != NULL) || needs_branch;
+
+        if (!has_predecessors)
+        {
+            // no predecessors - delete the unreachable merge block
+            LLVMDeleteBasicBlock(merge_bb);
+        }
+        else
+        {
+            // has predecessors - branch from current block if needed
+            if (needs_branch)
+            {
+                LLVMBuildBr(codegen->builder, merge_bb);
+            }
+
+            // position at merge block
+            LLVMPositionBuilderAtEnd(codegen->builder, merge_bb);
+        }
+
+        // reset state
+        codegen->in_if_chain          = false;
+        codegen->if_chain_merge_block = NULL;
     }
 }

@@ -85,11 +85,11 @@ int main(int argc, char **argv)
 
     // semantic analysis required for other commands
     SemanticAnalyzer analyzer;
-    semantic_init(&analyzer, program);
+    semantic_init(&analyzer, program, &lexer, filename);
 
     if (!semantic_analyze(&analyzer))
     {
-        fprintf(stderr, "Semantic analysis failed\n");
+        semantic_error_print_all(&analyzer);
         semantic_dnit(&analyzer);
         node_dnit(program);
         free(program);

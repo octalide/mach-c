@@ -181,6 +181,7 @@ Node *parser_parse_identifier(Parser *parser)
 
     char *value = lexer_raw_value(parser->lexer, &parser->current);
     Node *node  = node_identifier(value);
+    node->token = &parser->current; // set token for error reporting
     free(value);
     parser_advance(parser);
     return node;
@@ -197,6 +198,7 @@ Node *parser_parse_lit_int(Parser *parser)
 
     unsigned long long value = lexer_eval_lit_int(parser->lexer, &parser->current);
     Node              *node  = node_int(value);
+    node->token              = &parser->current; // set token for error reporting
     parser_advance(parser);
     return node;
 }
@@ -225,6 +227,7 @@ Node *parser_parse_lit_char(Parser *parser)
 
     char  value = lexer_eval_lit_char(parser->lexer, &parser->current);
     Node *node  = node_char(value);
+    node->token = &parser->current; // set token for error reporting
     parser_advance(parser);
     return node;
 }
@@ -239,6 +242,7 @@ Node *parser_parse_lit_string(Parser *parser)
 
     char *value = lexer_eval_lit_string(parser->lexer, &parser->current);
     Node *node  = node_string(value);
+    node->token = &parser->current; // set token for error reporting
     free(value);
     parser_advance(parser);
     return node;
@@ -1120,7 +1124,8 @@ Node *parser_parse_stmt_use(Parser *parser)
 
 Node *parser_parse_stmt_val(Parser *parser)
 {
-    parser_advance(parser); // consume 'val'
+    Token val_token = parser->current; // save token before advancing
+    parser_advance(parser);            // consume 'val'
 
     Node *identifier = parser_parse_identifier(parser);
     if (identifier == NULL)
@@ -1181,6 +1186,8 @@ Node *parser_parse_stmt_val(Parser *parser)
     }
 
     node_init(node, NODE_STMT_VAL);
+    node->token     = malloc(sizeof(Token));
+    *node->token    = val_token; // copy token for error reporting
     node->decl.name = identifier;
     node->decl.type = type;
     node->decl.init = init;

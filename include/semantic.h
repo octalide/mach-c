@@ -9,6 +9,27 @@ typedef struct Type             Type;
 typedef struct Symbol           Symbol;
 typedef struct Scope            Scope;
 typedef struct SemanticAnalyzer SemanticAnalyzer;
+typedef struct SemanticError    SemanticError;
+typedef struct Lexer            Lexer;
+
+// semantic error structure
+struct SemanticError
+{
+    char *message;
+    char *filename;
+    int   line;
+    int   column;
+    char *line_text;
+    Node *node; // optional node reference
+};
+
+// error collection
+typedef struct ErrorList
+{
+    SemanticError **errors;
+    size_t          count;
+    size_t          capacity;
+} ErrorList;
 
 // type kinds
 typedef enum TypeKind
@@ -109,15 +130,18 @@ struct Scope
 // semantic analyzer
 struct SemanticAnalyzer
 {
-    Scope *global;  // global scope
-    Scope *current; // current scope
-    Type **types;   // registered types
-    Node  *ast;     // ast root
-    bool   has_errors;
+    Scope    *global;  // global scope
+    Scope    *current; // current scope
+    Type    **types;   // registered types
+    Node     *ast;     // ast root
+    bool      has_errors;
+    ErrorList errors;   // collected errors
+    Lexer    *lexer;    // for line/column info
+    char     *filename; // source filename
 };
 
 // core functions
-void semantic_init(SemanticAnalyzer *analyzer, Node *ast);
+void semantic_init(SemanticAnalyzer *analyzer, Node *ast, Lexer *lexer, const char *filename);
 void semantic_dnit(SemanticAnalyzer *analyzer);
 bool semantic_analyze(SemanticAnalyzer *analyzer);
 
@@ -145,5 +169,10 @@ Symbol *scope_define(Scope *scope, const char *name, SymbolKind kind, Type *type
 // symbol management
 Symbol *symbol_new(const char *name, SymbolKind kind, Type *type);
 void    symbol_free(Symbol *symbol);
+
+// error management
+void semantic_error_add(SemanticAnalyzer *analyzer, Node *node, const char *fmt, ...);
+void semantic_error_print_all(SemanticAnalyzer *analyzer);
+void semantic_error_free_all(SemanticAnalyzer *analyzer);
 
 #endif

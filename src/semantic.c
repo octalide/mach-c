@@ -1,5 +1,7 @@
 #include "semantic.h"
+#include "lexer.h"
 #include "operator.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +17,120 @@ static struct
 } builtin_types[] = {{"void", TYPE_VOID, 0, 0, false}, {"any", TYPE_VOID, 0, 0, false}, // any is void in C
                      {"u8", TYPE_INT, 1, 1, false},    {"u16", TYPE_INT, 2, 2, false},  {"u32", TYPE_INT, 4, 4, false},  {"u64", TYPE_INT, 8, 8, false},  {"i8", TYPE_INT, 1, 1, true},   {"i16", TYPE_INT, 2, 2, true},
                      {"i32", TYPE_INT, 4, 4, true},    {"i64", TYPE_INT, 8, 8, true},   {"f32", TYPE_FLOAT, 4, 4, true}, {"f64", TYPE_FLOAT, 8, 8, true}, {NULL, TYPE_ERROR, 0, 0, false}};
+
+// error management functions
+void semantic_error_add(SemanticAnalyzer *analyzer, Node *node, const char *fmt, ...)
+{
+    if (!analyzer || !fmt)
+        return;
+
+    // initialize error list if needed
+    if (!analyzer->errors.errors)
+    {
+        analyzer->errors.capacity = 10;
+        analyzer->errors.errors   = calloc(analyzer->errors.capacity, sizeof(SemanticError *));
+        analyzer->errors.count    = 0;
+    }
+
+    // expand error list if needed
+    if (analyzer->errors.count >= analyzer->errors.capacity)
+    {
+        analyzer->errors.capacity *= 2;
+        analyzer->errors.errors = realloc(analyzer->errors.errors, analyzer->errors.capacity * sizeof(SemanticError *));
+    }
+
+    // format the error message
+    va_list args;
+    va_start(args, fmt);
+
+    char message[1024];
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    // create the error
+    SemanticError *error = calloc(1, sizeof(SemanticError));
+    error->message       = strdup(message);
+    error->node          = node;
+
+    // set location info from token and lexer
+    if (node && node->token && analyzer->lexer)
+    {
+        error->filename  = strdup(analyzer->filename);
+        error->line      = lexer_get_pos_line(analyzer->lexer, node->token->pos);
+        error->column    = lexer_get_pos_line_offset(analyzer->lexer, node->token->pos);
+        error->line_text = lexer_get_line_text(analyzer->lexer, error->line);
+    }
+    else
+    {
+        error->filename  = strdup(analyzer->filename ? analyzer->filename : "<unknown>");
+        error->line      = 1;
+        error->column    = 1;
+        error->line_text = NULL;
+    }
+
+    analyzer->errors.errors[analyzer->errors.count] = error;
+    analyzer->errors.count++;
+    analyzer->has_errors = true;
+}
+
+void semantic_error_print_all(SemanticAnalyzer *analyzer)
+{
+    if (!analyzer || analyzer->errors.count == 0)
+        return;
+
+    for (size_t i = 0; i < analyzer->errors.count; i++)
+    {
+        SemanticError *error = analyzer->errors.errors[i];
+        if (!error)
+            continue;
+
+        // print error with location
+        if (error->line > 0)
+        {
+            fprintf(stderr, "%s:%d:%d: error: %s\n", error->filename, error->line, error->column, error->message);
+
+            // print line context if available
+            if (error->line_text)
+            {
+                fprintf(stderr, "%s\n", error->line_text);
+
+                // print caret pointing to column
+                for (int j = 1; j < error->column; j++)
+                {
+                    fprintf(stderr, " ");
+                }
+                fprintf(stderr, "^\n");
+            }
+        }
+        else
+        {
+            fprintf(stderr, "error: %s\n", error->message);
+        }
+    }
+}
+
+void semantic_error_free_all(SemanticAnalyzer *analyzer)
+{
+    if (!analyzer || !analyzer->errors.errors)
+        return;
+
+    for (size_t i = 0; i < analyzer->errors.count; i++)
+    {
+        SemanticError *error = analyzer->errors.errors[i];
+        if (error)
+        {
+            free(error->message);
+            free(error->filename);
+            free(error->line_text);
+            free(error);
+        }
+    }
+
+    free(analyzer->errors.errors);
+    analyzer->errors.errors   = NULL;
+    analyzer->errors.count    = 0;
+    analyzer->errors.capacity = 0;
+}
 
 // type management
 Type *type_new(TypeKind kind)
@@ -334,12 +450,19 @@ void symbol_free(Symbol *symbol)
     free(symbol);
 }
 
-void semantic_init(SemanticAnalyzer *analyzer, Node *ast)
+void semantic_init(SemanticAnalyzer *analyzer, Node *ast, Lexer *lexer, const char *filename)
 {
     analyzer->ast        = ast;
     analyzer->global     = scope_new(NULL);
     analyzer->current    = analyzer->global;
     analyzer->has_errors = false;
+    analyzer->lexer      = lexer;
+    analyzer->filename   = filename ? strdup(filename) : strdup("<unknown>");
+
+    // initialize error list
+    analyzer->errors.errors   = NULL;
+    analyzer->errors.count    = 0;
+    analyzer->errors.capacity = 0;
 
     // register builtin types
     for (int i = 0; builtin_types[i].name != NULL; i++)
@@ -358,11 +481,15 @@ void semantic_dnit(SemanticAnalyzer *analyzer)
         return;
 
     scope_free(analyzer->global);
+    semantic_error_free_all(analyzer);
+    free(analyzer->filename);
 
-    analyzer->ast     = NULL;
-    analyzer->global  = NULL;
-    analyzer->current = NULL;
-    analyzer->types   = NULL;
+    analyzer->ast      = NULL;
+    analyzer->global   = NULL;
+    analyzer->current  = NULL;
+    analyzer->types    = NULL;
+    analyzer->lexer    = NULL;
+    analyzer->filename = NULL;
 }
 
 // forward declarations for analysis functions
@@ -382,16 +509,14 @@ static Type *analyze_type(SemanticAnalyzer *analyzer, Node *node)
     {
         if (!node->str_value)
         {
-            fprintf(stderr, "error: identifier node missing string value\n");
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "identifier node missing string value");
             return NULL;
         }
 
         Symbol *sym = scope_lookup(analyzer->current, node->str_value);
         if (!sym || sym->kind != SYMBOL_TYPE)
         {
-            fprintf(stderr, "error: unknown type '%s'\n", node->str_value);
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "unknown type '%s'", node->str_value);
             return NULL;
         }
         return sym->type;
@@ -401,8 +526,7 @@ static Type *analyze_type(SemanticAnalyzer *analyzer, Node *node)
     {
         if (!node->single)
         {
-            fprintf(stderr, "error: pointer type missing base type\n");
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "pointer type missing base type");
             return NULL;
         }
         Type *base = analyze_type(analyzer, node->single);
@@ -413,8 +537,7 @@ static Type *analyze_type(SemanticAnalyzer *analyzer, Node *node)
     {
         if (!node->binary.right)
         {
-            fprintf(stderr, "error: array type missing element type\n");
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "array type missing element type");
             return NULL;
         }
 
@@ -431,8 +554,7 @@ static Type *analyze_type(SemanticAnalyzer *analyzer, Node *node)
     }
 
     default:
-        fprintf(stderr, "error: unhandled type node kind %d\n", node->kind);
-        analyzer->has_errors = true;
+        semantic_error_add(analyzer, node, "unhandled type node kind %d", node->kind);
         return NULL;
     }
 }
@@ -450,20 +572,28 @@ static Type *analyze_expression(SemanticAnalyzer *analyzer, Node *node)
         type = type_builtin("i32");
         break;
 
+    case NODE_LIT_CHAR:
+        // characters are u8
+        type = type_builtin("u8");
+        break;
+
+    case NODE_LIT_STRING:
+        // strings are dynamic arrays of u8: [_]u8
+        type = type_array(type_builtin("u8"), 0); // 0 size indicates dynamic array
+        break;
+
     case NODE_IDENTIFIER:
     {
         if (!node->str_value)
         {
-            fprintf(stderr, "error: identifier node missing string value\n");
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "identifier node missing string value");
             return NULL;
         }
 
         Symbol *sym = scope_lookup(analyzer->current, node->str_value);
         if (!sym)
         {
-            fprintf(stderr, "error: undefined identifier '%s'\n", node->str_value);
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "undefined identifier '%s'", node->str_value);
             return NULL;
         }
         type = sym->type;
@@ -474,8 +604,7 @@ static Type *analyze_expression(SemanticAnalyzer *analyzer, Node *node)
     {
         if (!node->binary.left || !node->binary.right)
         {
-            fprintf(stderr, "error: binary expression missing operands\n");
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "binary expression missing operands");
             return NULL;
         }
 
@@ -489,8 +618,7 @@ static Type *analyze_expression(SemanticAnalyzer *analyzer, Node *node)
         case OP_ASSIGN:
             if (!type_compatible(left_type, right_type))
             {
-                fprintf(stderr, "error: incompatible types in assignment\n");
-                analyzer->has_errors = true;
+                semantic_error_add(analyzer, node, "incompatible types in assignment");
                 return NULL;
             }
             type = left_type;
@@ -500,8 +628,7 @@ static Type *analyze_expression(SemanticAnalyzer *analyzer, Node *node)
         case OP_SUB:
             if (!type_compatible(left_type, right_type))
             {
-                fprintf(stderr, "error: incompatible types in arithmetic\n");
-                analyzer->has_errors = true;
+                semantic_error_add(analyzer, node, "incompatible types in arithmetic");
                 return NULL;
             }
             type = left_type;
@@ -512,16 +639,14 @@ static Type *analyze_expression(SemanticAnalyzer *analyzer, Node *node)
             break;
 
         default:
-            fprintf(stderr, "error: unhandled binary operator %d\n", node->binary.op);
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "unhandled binary operator %d", node->binary.op);
             return NULL;
         }
         break;
     }
 
     default:
-        fprintf(stderr, "error: unhandled expression node kind %d\n", node->kind);
-        analyzer->has_errors = true;
+        semantic_error_add(analyzer, node, "unhandled expression node kind %d", node->kind);
         return NULL;
     }
 
@@ -542,57 +667,61 @@ static bool analyze_statement(SemanticAnalyzer *analyzer, Node *node)
     {
         if (!node->decl.name || !node->decl.name->str_value)
         {
-            fprintf(stderr, "error: declaration missing name\n");
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "declaration missing name");
             return false;
         }
 
-        char *name = node->decl.name->str_value;
-        Type *type = NULL;
+        char *name    = node->decl.name->str_value;
+        Type *type    = NULL;
+        bool  success = true;
 
         if (node->decl.type)
         {
             type = analyze_type(analyzer, node->decl.type);
+            if (!type)
+                success = false;
         }
         else if (node->decl.init)
         {
             type = analyze_expression(analyzer, node->decl.init);
+            if (!type)
+                success = false;
         }
 
         if (!type)
         {
-            fprintf(stderr, "error: cannot determine type for '%s'\n", name);
-            analyzer->has_errors = true;
-            return false;
+            semantic_error_add(analyzer, node, "cannot determine type for '%s'", name);
+            success = false;
         }
 
-        if (node->decl.init)
+        if (node->decl.init && type)
         {
             Type *init_type = analyze_expression(analyzer, node->decl.init);
             if (!init_type || !type_compatible(type, init_type))
             {
-                fprintf(stderr, "error: incompatible types in initialization\n");
-                analyzer->has_errors = true;
-                return false;
+                semantic_error_add(analyzer, node, "incompatible types in initialization");
+                success = false;
             }
         }
 
-        SymbolKind kind = node->kind == NODE_STMT_VAL ? SYMBOL_CONSTANT : SYMBOL_VARIABLE;
-        if (!scope_define(analyzer->current, name, kind, type))
+        if (type)
         {
-            fprintf(stderr, "error: redefinition of '%s'\n", name);
-            analyzer->has_errors = true;
-            return false;
+            SymbolKind kind = node->kind == NODE_STMT_VAL ? SYMBOL_CONSTANT : SYMBOL_VARIABLE;
+            if (!scope_define(analyzer->current, name, kind, type))
+            {
+                semantic_error_add(analyzer, node, "redefinition of '%s'", name);
+                success = false;
+            }
         }
-        return true;
+
+        return success;
     }
 
     case NODE_STMT_FUNCTION:
     {
         if (!node->function.name || !node->function.name->str_value)
         {
-            fprintf(stderr, "error: function missing name\n");
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "function missing name");
             return false;
         }
 
@@ -624,8 +753,7 @@ static bool analyze_statement(SemanticAnalyzer *analyzer, Node *node)
         Type *func_type = type_function(return_type, param_types, node->function.is_variadic);
         if (!scope_define(analyzer->current, name, SYMBOL_FUNCTION, func_type))
         {
-            fprintf(stderr, "error: redefinition of function '%s'\n", name);
-            analyzer->has_errors = true;
+            semantic_error_add(analyzer, node, "redefinition of function '%s'", name);
             return false;
         }
 
@@ -664,21 +792,25 @@ static bool analyze_statement(SemanticAnalyzer *analyzer, Node *node)
 
     case NODE_STMT_IF:
     {
+        bool success = true;
+
         if (node->conditional.condition)
         {
             Type *cond_type = analyze_expression(analyzer, node->conditional.condition);
             if (!cond_type)
-                return false;
+                success = false;
         }
 
-        bool result = analyze_node(analyzer, node->conditional.body);
+        if (!analyze_node(analyzer, node->conditional.body))
+            success = false;
 
         if (node->conditional.else_body)
         {
-            result = result && analyze_node(analyzer, node->conditional.else_body);
+            if (!analyze_node(analyzer, node->conditional.else_body))
+                success = false;
         }
 
-        return result;
+        return success;
     }
 
     case NODE_STMT_EXPRESSION:
@@ -717,8 +849,7 @@ static bool analyze_statement(SemanticAnalyzer *analyzer, Node *node)
         return true;
 
     default:
-        fprintf(stderr, "error: unhandled statement node kind %d (%s)\n", node->kind, node_kind_name(node->kind));
-        analyzer->has_errors = true;
+        semantic_error_add(analyzer, node, "unhandled statement node kind %d (%s)", node->kind, node_kind_name(node->kind));
         return false;
     }
 }
@@ -728,6 +859,8 @@ static bool analyze_node(SemanticAnalyzer *analyzer, Node *node)
     if (!node || !analyzer)
         return false;
 
+    bool success = true;
+
     switch (node->kind)
     {
     case NODE_PROGRAM:
@@ -736,11 +869,12 @@ static bool analyze_node(SemanticAnalyzer *analyzer, Node *node)
         {
             for (int i = 0; node->children[i]; i++)
             {
+                // continue analyzing even if individual nodes fail
                 if (!analyze_node(analyzer, node->children[i]))
-                    return false;
+                    success = false;
             }
         }
-        return true;
+        return success;
 
     default:
         return analyze_statement(analyzer, node);

@@ -1,215 +1,142 @@
 #include "semantic.h"
-
+#include "operator.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// forward declarations
-static Type *resolve_type_node(SemanticAnalyzer *analyzer, Node *type_node);
-static bool  check_function(SemanticAnalyzer *analyzer, Node *func_node);
-static Type *check_binary_expression(SemanticAnalyzer *analyzer, Node *expr);
-static Type *check_unary_expression(SemanticAnalyzer *analyzer, Node *expr);
-static Type *check_call_expression(SemanticAnalyzer *analyzer, Node *expr);
-
-bool semantic_init(SemanticAnalyzer *analyzer)
+// builtin type sizes and alignments
+static struct
 {
-    memset(analyzer, 0, sizeof(SemanticAnalyzer));
+    const char *name;
+    TypeKind    kind;
+    unsigned    size;
+    unsigned    align;
+    bool        is_signed;
+} builtin_types[] = {{"void", TYPE_VOID, 0, 0, false}, {"any", TYPE_VOID, 0, 0, false}, // any is void in C
+                     {"u8", TYPE_INT, 1, 1, false},    {"u16", TYPE_INT, 2, 2, false},  {"u32", TYPE_INT, 4, 4, false},  {"u64", TYPE_INT, 8, 8, false},  {"i8", TYPE_INT, 1, 1, true},   {"i16", TYPE_INT, 2, 2, true},
+                     {"i32", TYPE_INT, 4, 4, true},    {"i64", TYPE_INT, 8, 8, true},   {"f32", TYPE_FLOAT, 4, 4, true}, {"f64", TYPE_FLOAT, 8, 8, true}, {NULL, TYPE_ERROR, 0, 0, false}};
 
-    analyzer->symbol_capacity = 64;
-    analyzer->symbols         = malloc(sizeof(SemanticSymbol) * analyzer->symbol_capacity);
-    if (!analyzer->symbols)
-    {
-        return false;
-    }
-
-    analyzer->current_scope_level = 0;
-    return true;
-}
-
-void semantic_dnit(SemanticAnalyzer *analyzer)
-{
-    if (!analyzer)
-        return;
-
-    // free all symbols
-    for (size_t i = 0; i < analyzer->symbol_count; i++)
-    {
-        free(analyzer->symbols[i].name);
-        type_destroy(analyzer->symbols[i].type);
-    }
-    free(analyzer->symbols);
-
-    memset(analyzer, 0, sizeof(SemanticAnalyzer));
-}
-
-bool semantic_analyze(SemanticAnalyzer *analyzer, Node *program)
-{
-    if (!analyzer || !program)
-    {
-        semantic_error(analyzer, "Invalid parameters");
-        return false;
-    }
-
-    if (program->kind != NODE_PROGRAM)
-    {
-        semantic_error(analyzer, "Expected program node");
-        return false;
-    }
-
-    // analyze all top-level declarations
-    if (program->children)
-    {
-        for (size_t i = 0; i < node_list_count(program->children); i++)
-        {
-            Node *stmt = program->children[i];
-
-            switch (stmt->kind)
-            {
-            case NODE_STMT_FUNCTION:
-                check_function(analyzer, stmt);
-                break;
-
-            case NODE_STMT_VAL:
-            case NODE_STMT_VAR:
-                check_statement(analyzer, stmt);
-                break;
-
-            default:
-                semantic_error_node(analyzer, stmt, "Unexpected top-level statement");
-                break;
-            }
-        }
-    }
-
-    return !analyzer->has_error;
-}
-
-// type system implementation
-Type *type_create_void(void)
+// type management
+Type *type_new(TypeKind kind)
 {
     Type *type = calloc(1, sizeof(Type));
-    type->kind = TYPE_VOID;
+    type->kind = kind;
     return type;
 }
 
-Type *type_create_int(size_t bit_width, bool is_unsigned)
-{
-    Type *type        = calloc(1, sizeof(Type));
-    type->kind        = TYPE_INT;
-    type->bit_width   = bit_width;
-    type->is_unsigned = is_unsigned;
-    return type;
-}
-
-Type *type_create_float(size_t bit_width)
-{
-    Type *type      = calloc(1, sizeof(Type));
-    type->kind      = TYPE_FLOAT;
-    type->bit_width = bit_width;
-    return type;
-}
-
-Type *type_create_pointer(Type *base_type)
-{
-    Type *type      = calloc(1, sizeof(Type));
-    type->kind      = TYPE_POINTER;
-    type->base_type = base_type;
-    return type;
-}
-
-Type *type_create_array(Type *element_type, size_t size)
-{
-    Type *type       = calloc(1, sizeof(Type));
-    type->kind       = TYPE_ARRAY;
-    type->base_type  = element_type;
-    type->array_size = size;
-    return type;
-}
-
-Type *type_create_function(Type *return_type, Type **param_types, size_t param_count, bool is_variadic)
-{
-    Type *type        = calloc(1, sizeof(Type));
-    type->kind        = TYPE_FUNCTION;
-    type->return_type = return_type;
-    type->param_count = param_count;
-    type->is_variadic = is_variadic;
-
-    if (param_count > 0 && param_types)
-    {
-        type->param_types = malloc(sizeof(Type *) * param_count);
-        for (size_t i = 0; i < param_count; i++)
-        {
-            type->param_types[i] = param_types[i];
-        }
-    }
-
-    return type;
-}
-
-void type_destroy(Type *type)
+void type_free(Type *type)
 {
     if (!type)
         return;
-
-    if (type->base_type)
-        type_destroy(type->base_type);
-    if (type->return_type)
-        type_destroy(type->return_type);
-
-    if (type->param_types)
-    {
-        for (size_t i = 0; i < type->param_count; i++)
-        {
-            type_destroy(type->param_types[i]);
-        }
-        free(type->param_types);
-    }
-
-    free(type);
-}
-
-Type *type_clone(Type *type)
-{
-    if (!type)
-        return NULL;
 
     switch (type->kind)
     {
-    case TYPE_VOID:
-        return type_create_void();
-    case TYPE_INT:
-        return type_create_int(type->bit_width, type->is_unsigned);
-    case TYPE_FLOAT:
-        return type_create_float(type->bit_width);
-    case TYPE_POINTER:
-        return type_create_pointer(type_clone(type->base_type));
     case TYPE_ARRAY:
-        return type_create_array(type_clone(type->base_type), type->array_size);
+    case TYPE_POINTER:
+        // base types are shared, don't free
+        break;
     case TYPE_FUNCTION:
-    {
-        Type **cloned_params = NULL;
-        if (type->param_count > 0)
-        {
-            cloned_params = malloc(sizeof(Type *) * type->param_count);
-            for (size_t i = 0; i < type->param_count; i++)
-            {
-                cloned_params[i] = type_clone(type->param_types[i]);
-            }
-        }
-        Type *result = type_create_function(type_clone(type->return_type), cloned_params, type->param_count, type->is_variadic);
-        free(cloned_params); // the function makes its own copy
-        return result;
-    }
-    case TYPE_ERROR:
+        free(type->function.params);
+        break;
+    case TYPE_STRUCT:
+    case TYPE_UNION:
+        free(type->composite.name);
+        free(type->composite.fields);
+        break;
+    case TYPE_ALIAS:
+        free(type->alias.name);
+        break;
     default:
-        return NULL;
+        break;
     }
+    free(type);
 }
 
-bool type_equals(Type *a, Type *b)
+Type *type_builtin(const char *name)
+{
+    for (int i = 0; builtin_types[i].name != NULL; i++)
+    {
+        if (strcmp(builtin_types[i].name, name) == 0)
+        {
+            Type *type      = type_new(builtin_types[i].kind);
+            type->size      = builtin_types[i].size;
+            type->align     = builtin_types[i].align;
+            type->is_signed = builtin_types[i].is_signed;
+            return type;
+        }
+    }
+    return NULL;
+}
+
+Type *type_pointer(Type *base)
+{
+    Type *type         = type_new(TYPE_POINTER);
+    type->pointer.base = base;
+    type->size         = 8; // 64-bit pointers
+    type->align        = 8;
+    return type;
+}
+
+Type *type_array(Type *element, size_t size)
+{
+    Type *type          = type_new(TYPE_ARRAY);
+    type->array.element = element;
+    type->array.size    = size;
+    type->size          = size ? size * element->size : 0;
+    type->align         = element->align;
+    return type;
+}
+
+Type *type_function(Type *return_type, Type **params, bool is_variadic)
+{
+    Type *type                 = type_new(TYPE_FUNCTION);
+    type->function.return_type = return_type;
+    type->function.params      = params;
+    type->function.is_variadic = is_variadic;
+    type->size                 = 8; // function pointer size
+    type->align                = 8;
+    return type;
+}
+
+Type *type_struct(const char *name)
+{
+    Type *type             = type_new(TYPE_STRUCT);
+    type->composite.name   = name ? strdup(name) : NULL;
+    type->composite.fields = NULL;
+    return type;
+}
+
+Type *type_union(const char *name)
+{
+    Type *type             = type_new(TYPE_UNION);
+    type->composite.name   = name ? strdup(name) : NULL;
+    type->composite.fields = NULL;
+    return type;
+}
+
+Type *type_alias(const char *name, Type *base)
+{
+    Type *type       = type_new(TYPE_ALIAS);
+    type->alias.name = strdup(name);
+    type->alias.base = base;
+    type->size       = base->size;
+    type->align      = base->align;
+    type->is_signed  = base->is_signed;
+    return type;
+}
+
+bool type_equal(Type *a, Type *b)
 {
     if (!a || !b)
-        return a == b;
+        return false;
+    if (a == b)
+        return true;
+
+    // resolve aliases
+    while (a->kind == TYPE_ALIAS)
+        a = a->alias.base;
+    while (b->kind == TYPE_ALIAS)
+        b = b->alias.base;
 
     if (a->kind != b->kind)
         return false;
@@ -217,682 +144,617 @@ bool type_equals(Type *a, Type *b)
     switch (a->kind)
     {
     case TYPE_VOID:
-        return true;
+    case TYPE_BOOL:
     case TYPE_INT:
-        return a->bit_width == b->bit_width && a->is_unsigned == b->is_unsigned;
     case TYPE_FLOAT:
-        return a->bit_width == b->bit_width;
+        return a->size == b->size && a->is_signed == b->is_signed;
     case TYPE_POINTER:
-        return type_equals(a->base_type, b->base_type);
+        return type_equal(a->pointer.base, b->pointer.base);
     case TYPE_ARRAY:
-        return a->array_size == b->array_size && type_equals(a->base_type, b->base_type);
+        return a->array.size == b->array.size && type_equal(a->array.element, b->array.element);
     case TYPE_FUNCTION:
-        if (!type_equals(a->return_type, b->return_type) || a->param_count != b->param_count || a->is_variadic != b->is_variadic)
+        if (!type_equal(a->function.return_type, b->function.return_type))
             return false;
-
-        for (size_t i = 0; i < a->param_count; i++)
+        if (a->function.is_variadic != b->function.is_variadic)
+            return false;
+        // compare params
+        size_t count_a = 0, count_b = 0;
+        if (a->function.params)
         {
-            if (!type_equals(a->param_types[i], b->param_types[i]))
+            while (a->function.params[count_a])
+                count_a++;
+        }
+        if (b->function.params)
+        {
+            while (b->function.params[count_b])
+                count_b++;
+        }
+        if (count_a != count_b)
+            return false;
+        for (size_t i = 0; i < count_a; i++)
+        {
+            if (!type_equal(a->function.params[i], b->function.params[i]))
                 return false;
         }
         return true;
-    case TYPE_ERROR:
+    case TYPE_STRUCT:
+    case TYPE_UNION:
+        return a == b; // structural types by reference
     default:
         return false;
     }
 }
 
-bool type_is_assignable(Type *from, Type *to)
+bool type_compatible(Type *a, Type *b)
 {
-    if (type_equals(from, to))
+    if (type_equal(a, b))
         return true;
 
-    // allow some implicit conversions
-    if (from->kind == TYPE_INT && to->kind == TYPE_INT)
+    // resolve aliases
+    while (a->kind == TYPE_ALIAS)
+        a = a->alias.base;
+    while (b->kind == TYPE_ALIAS)
+        b = b->alias.base;
+
+    // check for :: cast compatibility (same size)
+    if (a->size == b->size && a->size > 0)
     {
-        // allow smaller to larger int types
-        return from->bit_width <= to->bit_width;
+        // allow casting between same-size types
+        return true;
     }
 
-    if (from->kind == TYPE_INT && to->kind == TYPE_FLOAT)
+    // pointer to void* compatibility
+    if (a->kind == TYPE_POINTER && b->kind == TYPE_POINTER)
     {
-        // allow int to float conversion
+        if (a->pointer.base->kind == TYPE_VOID || b->pointer.base->kind == TYPE_VOID)
+            return true;
+    }
+
+    // allow literal integers to be assigned to any integer type
+    // this handles cases like: var x: i32 = 42;
+    // where 42 is analyzed as u8 but needs to be assigned to i32
+    if (a->kind == TYPE_INT && b->kind == TYPE_INT)
+    {
         return true;
     }
 
     return false;
 }
 
-const char *type_to_string(Type *type)
+size_t type_sizeof(Type *type)
 {
-    if (!type)
-        return "null";
-
-    // this is a simple implementation - in practice you'd want a proper string buffer
-    static char buffer[256];
-
-    switch (type->kind)
+    while (type && type->kind == TYPE_ALIAS)
     {
-    case TYPE_VOID:
-        return "void";
-    case TYPE_INT:
-        snprintf(buffer, sizeof(buffer), "%s%zu", type->is_unsigned ? "u" : "i", type->bit_width);
-        return buffer;
-    case TYPE_FLOAT:
-        snprintf(buffer, sizeof(buffer), "f%zu", type->bit_width);
-        return buffer;
-    case TYPE_POINTER:
-        snprintf(buffer, sizeof(buffer), "*%s", type_to_string(type->base_type));
-        return buffer;
-    case TYPE_ARRAY:
-        snprintf(buffer, sizeof(buffer), "[%zu]%s", type->array_size, type_to_string(type->base_type));
-        return buffer;
-    case TYPE_FUNCTION:
-        return "function";
-    case TYPE_ERROR:
-    default:
-        return "error";
+        type = type->alias.base;
     }
+    return type ? type->size : 0;
 }
 
-// resolve AST type node to semantic type
-static Type *resolve_type_node(SemanticAnalyzer *analyzer, Node *type_node)
+size_t type_alignof(Type *type)
 {
-    if (!type_node)
-        return type_create_void();
-
-    switch (type_node->kind)
+    while (type && type->kind == TYPE_ALIAS)
     {
-    case NODE_IDENTIFIER:
-    {
-        const char *type_name = type_node->str_value;
-
-        // basic integer types
-        if (strcmp(type_name, "i8") == 0)
-            return type_create_int(8, false);
-        if (strcmp(type_name, "i16") == 0)
-            return type_create_int(16, false);
-        if (strcmp(type_name, "i32") == 0)
-            return type_create_int(32, false);
-        if (strcmp(type_name, "i64") == 0)
-            return type_create_int(64, false);
-        if (strcmp(type_name, "u8") == 0)
-            return type_create_int(8, true);
-        if (strcmp(type_name, "u16") == 0)
-            return type_create_int(16, true);
-        if (strcmp(type_name, "u32") == 0)
-            return type_create_int(32, true);
-        if (strcmp(type_name, "u64") == 0)
-            return type_create_int(64, true);
-
-        // float types
-        if (strcmp(type_name, "f32") == 0)
-            return type_create_float(32);
-        if (strcmp(type_name, "f64") == 0)
-            return type_create_float(64);
-
-        // void type
-        if (strcmp(type_name, "void") == 0)
-            return type_create_void();
-
-        semantic_error(analyzer, "Unknown type");
-        return NULL;
+        type = type->alias.base;
     }
-
-    case NODE_TYPE_POINTER:
-    {
-        Type *base_type = resolve_type_node(analyzer, type_node->single);
-        if (!base_type)
-            return NULL;
-        return type_create_pointer(base_type);
-    }
-
-    case NODE_TYPE_ARRAY:
-    {
-        Type *element_type = resolve_type_node(analyzer, type_node->binary.right);
-        if (!element_type)
-            return NULL;
-
-        // for now, assume dynamic arrays (size 0)
-        return type_create_array(element_type, 0);
-    }
-
-    default:
-        semantic_error(analyzer, "Unsupported type");
-        return NULL;
-    }
+    return type ? type->align : 0;
 }
 
-// symbol table implementation
-void push_scope(SemanticAnalyzer *analyzer)
+// scope management
+Scope *scope_new(Scope *parent)
 {
-    analyzer->current_scope_level++;
+    Scope *scope   = calloc(1, sizeof(Scope));
+    scope->parent  = parent;
+    scope->symbols = calloc(1, sizeof(Symbol *));
+    scope->level   = parent ? parent->level + 1 : 0;
+    return scope;
 }
 
-void pop_scope(SemanticAnalyzer *analyzer)
+void scope_free(Scope *scope)
 {
-    // remove symbols from current scope
-    size_t symbols_to_remove = 0;
-    for (int i = (int)analyzer->symbol_count - 1; i >= 0; i--)
+    if (!scope)
+        return;
+
+    if (scope->symbols)
     {
-        if (analyzer->symbols[i].scope_level == analyzer->current_scope_level)
+        for (int i = 0; scope->symbols[i]; i++)
         {
-            free(analyzer->symbols[i].name);
-            type_destroy(analyzer->symbols[i].type);
-            symbols_to_remove++;
+            symbol_free(scope->symbols[i]);
         }
-        else
-        {
-            break;
-        }
+        free(scope->symbols);
     }
-
-    analyzer->symbol_count -= symbols_to_remove;
-    analyzer->current_scope_level--;
+    free(scope);
 }
 
-SemanticSymbol *add_symbol(SemanticAnalyzer *analyzer, const char *name, SymbolType symbol_type, Type *type, bool is_mutable, Node *declaration)
+Symbol *scope_lookup(Scope *scope, const char *name)
 {
-    // check for duplicate in current scope
-    for (size_t i = 0; i < analyzer->symbol_count; i++)
+    while (scope)
     {
-        if (analyzer->symbols[i].scope_level == analyzer->current_scope_level && strcmp(analyzer->symbols[i].name, name) == 0)
+        if (scope->symbols)
         {
-            semantic_error(analyzer, "Symbol already defined in current scope");
-            return NULL;
+            for (int i = 0; scope->symbols[i]; i++)
+            {
+                if (strcmp(scope->symbols[i]->name, name) == 0)
+                {
+                    return scope->symbols[i];
+                }
+            }
         }
-    }
-
-    // expand symbol table if needed
-    if (analyzer->symbol_count >= analyzer->symbol_capacity)
-    {
-        analyzer->symbol_capacity *= 2;
-        analyzer->symbols = realloc(analyzer->symbols, sizeof(SemanticSymbol) * analyzer->symbol_capacity);
-    }
-
-    SemanticSymbol *symbol = &analyzer->symbols[analyzer->symbol_count++];
-    symbol->name           = strdup(name);
-    symbol->symbol_type    = symbol_type;
-    symbol->type           = type;
-    symbol->is_mutable     = is_mutable;
-    symbol->scope_level    = analyzer->current_scope_level;
-    symbol->declaration    = declaration;
-
-    return symbol;
-}
-
-SemanticSymbol *find_symbol(SemanticAnalyzer *analyzer, const char *name)
-{
-    // search from most recent to oldest
-    for (int i = (int)analyzer->symbol_count - 1; i >= 0; i--)
-    {
-        if (strcmp(analyzer->symbols[i].name, name) == 0)
-        {
-            return &analyzer->symbols[i];
-        }
+        scope = scope->parent;
     }
     return NULL;
 }
 
-// statement checking
-bool check_statement(SemanticAnalyzer *analyzer, Node *stmt)
+Symbol *scope_define(Scope *scope, const char *name, SymbolKind kind, Type *type)
 {
-    if (!stmt)
-        return true;
-
-    switch (stmt->kind)
+    // check for redefinition in current scope
+    if (scope->symbols)
     {
-    case NODE_BLOCK:
-        if (stmt->children)
+        for (int i = 0; scope->symbols[i]; i++)
         {
-            for (size_t i = 0; i < node_list_count(stmt->children); i++)
+            if (strcmp(scope->symbols[i]->name, name) == 0)
             {
-                if (!check_statement(analyzer, stmt->children[i]))
-                    return false;
+                return NULL; // already defined
             }
         }
-        return true;
-
-    case NODE_STMT_VAL:
-    case NODE_STMT_VAR:
-    {
-        if (!stmt->decl.name || stmt->decl.name->kind != NODE_IDENTIFIER)
-        {
-            semantic_error_node(analyzer, stmt, "Invalid variable name");
-            return false;
-        }
-
-        const char *var_name = stmt->decl.name->str_value;
-        Type       *var_type = resolve_type_node(analyzer, stmt->decl.type);
-        if (!var_type)
-            return false;
-
-        // check initializer if present
-        if (stmt->decl.init)
-        {
-            Type *init_type = check_expression_type(analyzer, stmt->decl.init);
-            if (!init_type)
-                return false;
-
-            if (!type_is_assignable(init_type, var_type))
-            {
-                semantic_error_node(analyzer, stmt, "Type mismatch in variable initialization");
-                type_destroy(init_type);
-                type_destroy(var_type);
-                return false;
-            }
-
-            type_destroy(init_type);
-        }
-        else if (stmt->kind == NODE_STMT_VAL)
-        {
-            semantic_error_node(analyzer, stmt, "val declaration must have initializer");
-            type_destroy(var_type);
-            return false;
-        }
-
-        bool is_mutable = (stmt->kind == NODE_STMT_VAR);
-        add_symbol(analyzer, var_name, SYMBOL_TYPE_VARIABLE, var_type, is_mutable, stmt);
-        return true;
     }
 
-    case NODE_STMT_RETURN:
+    Symbol *symbol = symbol_new(name, kind, type);
+    symbol->scope  = scope;
+
+    // add to scope
+    size_t count = 0;
+    if (scope->symbols)
     {
-        if (stmt->single)
-        {
-            Type *return_type = check_expression_type(analyzer, stmt->single);
-            if (!return_type)
-                return false;
-
-            if (analyzer->current_function_return_type)
-            {
-                if (!type_is_assignable(return_type, analyzer->current_function_return_type))
-                {
-                    semantic_error_node(analyzer, stmt, "Return type mismatch");
-                    type_destroy(return_type);
-                    return false;
-                }
-            }
-
-            type_destroy(return_type);
-        }
-        return true;
+        while (scope->symbols[count])
+            count++;
     }
 
-    case NODE_STMT_EXPRESSION:
-        return check_expression_type(analyzer, stmt->single) != NULL;
+    scope->symbols            = realloc(scope->symbols, (count + 2) * sizeof(Symbol *));
+    scope->symbols[count]     = symbol;
+    scope->symbols[count + 1] = NULL;
 
-    default:
-        // other statements like if, for, etc. - implement as needed
-        return true;
+    return symbol;
+}
+
+// symbol management
+Symbol *symbol_new(const char *name, SymbolKind kind, Type *type)
+{
+    Symbol *symbol = calloc(1, sizeof(Symbol));
+    symbol->name   = strdup(name);
+    symbol->kind   = kind;
+    symbol->type   = type;
+    return symbol;
+}
+
+void symbol_free(Symbol *symbol)
+{
+    if (!symbol)
+        return;
+    free(symbol->name);
+    free(symbol);
+}
+
+void semantic_init(SemanticAnalyzer *analyzer, Node *ast)
+{
+    analyzer->ast        = ast;
+    analyzer->global     = scope_new(NULL);
+    analyzer->current    = analyzer->global;
+    analyzer->has_errors = false;
+
+    // register builtin types
+    for (int i = 0; builtin_types[i].name != NULL; i++)
+    {
+        Type *type      = type_new(builtin_types[i].kind);
+        type->size      = builtin_types[i].size;
+        type->align     = builtin_types[i].align;
+        type->is_signed = builtin_types[i].is_signed;
+        scope_define(analyzer->global, builtin_types[i].name, SYMBOL_TYPE, type);
     }
 }
 
-static bool check_function(SemanticAnalyzer *analyzer, Node *func_node)
+void semantic_dnit(SemanticAnalyzer *analyzer)
 {
-    if (func_node->kind != NODE_STMT_FUNCTION)
-        return false;
+    if (!analyzer)
+        return;
 
-    const char *func_name = "unknown";
-    if (func_node->function.name && func_node->function.name->kind == NODE_IDENTIFIER)
+    scope_free(analyzer->global);
+
+    analyzer->ast     = NULL;
+    analyzer->global  = NULL;
+    analyzer->current = NULL;
+    analyzer->types   = NULL;
+}
+
+// forward declarations for analysis functions
+static Type *analyze_type(SemanticAnalyzer *analyzer, Node *node);
+static Type *analyze_expression(SemanticAnalyzer *analyzer, Node *node);
+static bool  analyze_statement(SemanticAnalyzer *analyzer, Node *node);
+static bool  analyze_node(SemanticAnalyzer *analyzer, Node *node);
+
+static Type *analyze_type(SemanticAnalyzer *analyzer, Node *node)
+{
+    if (!node || !analyzer)
+        return NULL;
+
+    switch (node->kind)
     {
-        func_name = func_node->function.name->str_value;
+    case NODE_IDENTIFIER:
+    {
+        if (!node->str_value)
+        {
+            fprintf(stderr, "error: identifier node missing string value\n");
+            analyzer->has_errors = true;
+            return NULL;
+        }
+
+        Symbol *sym = scope_lookup(analyzer->current, node->str_value);
+        if (!sym || sym->kind != SYMBOL_TYPE)
+        {
+            fprintf(stderr, "error: unknown type '%s'\n", node->str_value);
+            analyzer->has_errors = true;
+            return NULL;
+        }
+        return sym->type;
     }
 
-    // resolve return type
-    Type *return_type = resolve_type_node(analyzer, func_node->function.return_type);
-    if (!return_type)
+    case NODE_TYPE_POINTER:
+    {
+        if (!node->single)
+        {
+            fprintf(stderr, "error: pointer type missing base type\n");
+            analyzer->has_errors = true;
+            return NULL;
+        }
+        Type *base = analyze_type(analyzer, node->single);
+        return base ? type_pointer(base) : NULL;
+    }
+
+    case NODE_TYPE_ARRAY:
+    {
+        if (!node->binary.right)
+        {
+            fprintf(stderr, "error: array type missing element type\n");
+            analyzer->has_errors = true;
+            return NULL;
+        }
+
+        Type *element = analyze_type(analyzer, node->binary.right);
+        if (!element)
+            return NULL;
+
+        size_t size = 0;
+        if (node->binary.left && node->binary.left->kind == NODE_LIT_INT)
+        {
+            size = node->binary.left->int_value;
+        }
+        return type_array(element, size);
+    }
+
+    default:
+        fprintf(stderr, "error: unhandled type node kind %d\n", node->kind);
+        analyzer->has_errors = true;
+        return NULL;
+    }
+}
+
+static Type *analyze_expression(SemanticAnalyzer *analyzer, Node *node)
+{
+    if (!node || !analyzer)
+        return NULL;
+
+    Type *type = NULL;
+
+    switch (node->kind)
+    {
+    case NODE_LIT_INT:
+        type = type_builtin("i32");
+        break;
+
+    case NODE_IDENTIFIER:
+    {
+        if (!node->str_value)
+        {
+            fprintf(stderr, "error: identifier node missing string value\n");
+            analyzer->has_errors = true;
+            return NULL;
+        }
+
+        Symbol *sym = scope_lookup(analyzer->current, node->str_value);
+        if (!sym)
+        {
+            fprintf(stderr, "error: undefined identifier '%s'\n", node->str_value);
+            analyzer->has_errors = true;
+            return NULL;
+        }
+        type = sym->type;
+        break;
+    }
+
+    case NODE_EXPR_BINARY:
+    {
+        if (!node->binary.left || !node->binary.right)
+        {
+            fprintf(stderr, "error: binary expression missing operands\n");
+            analyzer->has_errors = true;
+            return NULL;
+        }
+
+        Type *left_type  = analyze_expression(analyzer, node->binary.left);
+        Type *right_type = analyze_expression(analyzer, node->binary.right);
+        if (!left_type || !right_type)
+            return NULL;
+
+        switch (node->binary.op)
+        {
+        case OP_ASSIGN:
+            if (!type_compatible(left_type, right_type))
+            {
+                fprintf(stderr, "error: incompatible types in assignment\n");
+                analyzer->has_errors = true;
+                return NULL;
+            }
+            type = left_type;
+            break;
+
+        case OP_ADD:
+        case OP_SUB:
+            if (!type_compatible(left_type, right_type))
+            {
+                fprintf(stderr, "error: incompatible types in arithmetic\n");
+                analyzer->has_errors = true;
+                return NULL;
+            }
+            type = left_type;
+            break;
+
+        case OP_GREATER:
+            type = type_builtin("u8");
+            break;
+
+        default:
+            fprintf(stderr, "error: unhandled binary operator %d\n", node->binary.op);
+            analyzer->has_errors = true;
+            return NULL;
+        }
+        break;
+    }
+
+    default:
+        fprintf(stderr, "error: unhandled expression node kind %d\n", node->kind);
+        analyzer->has_errors = true;
+        return NULL;
+    }
+
+    if (type)
+        node->type = type;
+    return type;
+}
+
+static bool analyze_statement(SemanticAnalyzer *analyzer, Node *node)
+{
+    if (!node || !analyzer)
         return false;
 
-    // resolve parameter types
-    Type **param_types = NULL;
-    size_t param_count = 0;
-
-    if (func_node->function.params)
+    switch (node->kind)
     {
-        param_count = node_list_count(func_node->function.params);
-        if (param_count > 0)
+    case NODE_STMT_VAL:
+    case NODE_STMT_VAR:
+    {
+        if (!node->decl.name || !node->decl.name->str_value)
         {
-            param_types = malloc(sizeof(Type *) * param_count);
-            for (size_t i = 0; i < param_count; i++)
+            fprintf(stderr, "error: declaration missing name\n");
+            analyzer->has_errors = true;
+            return false;
+        }
+
+        char *name = node->decl.name->str_value;
+        Type *type = NULL;
+
+        if (node->decl.type)
+        {
+            type = analyze_type(analyzer, node->decl.type);
+        }
+        else if (node->decl.init)
+        {
+            type = analyze_expression(analyzer, node->decl.init);
+        }
+
+        if (!type)
+        {
+            fprintf(stderr, "error: cannot determine type for '%s'\n", name);
+            analyzer->has_errors = true;
+            return false;
+        }
+
+        if (node->decl.init)
+        {
+            Type *init_type = analyze_expression(analyzer, node->decl.init);
+            if (!init_type || !type_compatible(type, init_type))
             {
-                Node *param = func_node->function.params[i];
-                if (param && param->kind == NODE_STMT_VAL && param->decl.type)
+                fprintf(stderr, "error: incompatible types in initialization\n");
+                analyzer->has_errors = true;
+                return false;
+            }
+        }
+
+        SymbolKind kind = node->kind == NODE_STMT_VAL ? SYMBOL_CONSTANT : SYMBOL_VARIABLE;
+        if (!scope_define(analyzer->current, name, kind, type))
+        {
+            fprintf(stderr, "error: redefinition of '%s'\n", name);
+            analyzer->has_errors = true;
+            return false;
+        }
+        return true;
+    }
+
+    case NODE_STMT_FUNCTION:
+    {
+        if (!node->function.name || !node->function.name->str_value)
+        {
+            fprintf(stderr, "error: function missing name\n");
+            analyzer->has_errors = true;
+            return false;
+        }
+
+        char *name        = node->function.name->str_value;
+        Type *return_type = analyze_type(analyzer, node->function.return_type);
+        if (!return_type)
+            return false;
+
+        // analyze parameters to build function type
+        Type **param_types = NULL;
+        if (node->function.params)
+        {
+            size_t count = 0;
+            while (node->function.params[count])
+                count++;
+
+            param_types = calloc(count + 1, sizeof(Type *));
+            for (size_t i = 0; i < count; i++)
+            {
+                param_types[i] = analyze_type(analyzer, node->function.params[i]->decl.type);
+                if (!param_types[i])
                 {
-                    param_types[i] = resolve_type_node(analyzer, param->decl.type);
-                    if (!param_types[i])
-                    {
-                        // cleanup and return
-                        for (size_t j = 0; j < i; j++)
-                        {
-                            type_destroy(param_types[j]);
-                        }
-                        free(param_types);
-                        type_destroy(return_type);
-                        return false;
-                    }
-                }
-                else
-                {
-                    semantic_error_node(analyzer, func_node, "Invalid parameter declaration");
-                    type_destroy(return_type);
                     free(param_types);
                     return false;
                 }
             }
         }
-    }
 
-    // create function type
-    Type *func_type = type_create_function(return_type, param_types, param_count, func_node->function.is_variadic);
-
-    // add function to symbol table
-    add_symbol(analyzer, func_name, SYMBOL_TYPE_FUNCTION, func_type, false, func_node);
-
-    // check function body in new scope
-    push_scope(analyzer);
-
-    // add parameters to local scope
-    if (func_node->function.params && param_count > 0)
-    {
-        for (size_t i = 0; i < param_count; i++)
+        Type *func_type = type_function(return_type, param_types, node->function.is_variadic);
+        if (!scope_define(analyzer->current, name, SYMBOL_FUNCTION, func_type))
         {
-            Node *param = func_node->function.params[i];
-            if (param && param->decl.name && param->decl.name->kind == NODE_IDENTIFIER)
+            fprintf(stderr, "error: redefinition of function '%s'\n", name);
+            analyzer->has_errors = true;
+            return false;
+        }
+
+        if (node->function.body)
+        {
+            Scope *func_scope = scope_new(analyzer->current);
+            Scope *old_scope  = analyzer->current;
+            analyzer->current = func_scope;
+
+            // define parameters in function scope
+            if (node->function.params)
             {
-                const char *param_name = param->decl.name->str_value;
-                add_symbol(analyzer, param_name, SYMBOL_TYPE_VARIABLE, type_clone(param_types[i]), false, param);
-            }
-        }
-    }
-
-    // set current function context
-    Type *prev_return_type                 = analyzer->current_function_return_type;
-    analyzer->current_function_return_type = return_type;
-
-    // check function body
-    bool result = true;
-    if (func_node->function.body)
-    {
-        result = check_statement(analyzer, func_node->function.body);
-    }
-
-    // restore context
-    analyzer->current_function_return_type = prev_return_type;
-    pop_scope(analyzer);
-
-    // cleanup param_types
-    if (param_types)
-    {
-        for (size_t i = 0; i < param_count; i++)
-        {
-            type_destroy(param_types[i]);
-        }
-        free(param_types);
-    }
-
-    return result;
-}
-
-// expression type checking
-Type *check_expression_type(SemanticAnalyzer *analyzer, Node *expr)
-{
-    if (!expr)
-        return NULL;
-
-    switch (expr->kind)
-    {
-    case NODE_LIT_INT:
-        // for now, assume i32 for integer literals
-        return type_create_int(32, false);
-
-    case NODE_LIT_FLOAT:
-        // assume f64 for float literals
-        return type_create_float(64);
-
-    case NODE_IDENTIFIER:
-    {
-        SemanticSymbol *symbol = find_symbol(analyzer, expr->str_value);
-        if (!symbol)
-        {
-            semantic_error_node(analyzer, expr, "Undefined symbol");
-            return NULL;
-        }
-        return type_clone(symbol->type);
-    }
-
-    case NODE_EXPR_BINARY:
-        return check_binary_expression(analyzer, expr);
-
-    case NODE_EXPR_UNARY:
-        return check_unary_expression(analyzer, expr);
-
-    case NODE_EXPR_CALL:
-        return check_call_expression(analyzer, expr);
-
-    default:
-        semantic_error_node(analyzer, expr, "Unsupported expression");
-        return NULL;
-    }
-}
-
-static Type *check_binary_expression(SemanticAnalyzer *analyzer, Node *expr)
-{
-    // handle assignment specially
-    if (expr->binary.op == OP_ASSIGN)
-    {
-        if (expr->binary.left->kind != NODE_IDENTIFIER)
-        {
-            semantic_error_node(analyzer, expr, "Left side of assignment must be a variable");
-            return NULL;
-        }
-
-        SemanticSymbol *symbol = find_symbol(analyzer, expr->binary.left->str_value);
-        if (!symbol)
-        {
-            semantic_error_node(analyzer, expr, "Undefined variable");
-            return NULL;
-        }
-
-        if (!symbol->is_mutable)
-        {
-            semantic_error_node(analyzer, expr, "Cannot assign to immutable variable");
-            return NULL;
-        }
-
-        Type *right_type = check_expression_type(analyzer, expr->binary.right);
-        if (!right_type)
-            return NULL;
-
-        if (!type_is_assignable(right_type, symbol->type))
-        {
-            semantic_error_node(analyzer, expr, "Type mismatch in assignment");
-            type_destroy(right_type);
-            return NULL;
-        }
-
-        type_destroy(right_type);
-        return type_clone(symbol->type);
-    }
-
-    // handle other binary operators
-    Type *left_type  = check_expression_type(analyzer, expr->binary.left);
-    Type *right_type = check_expression_type(analyzer, expr->binary.right);
-
-    if (!left_type || !right_type)
-    {
-        if (left_type)
-            type_destroy(left_type);
-        if (right_type)
-            type_destroy(right_type);
-        return NULL;
-    }
-
-    // for now, require exact type match for binary operations
-    // in a real compiler, you'd implement type promotion rules
-    if (!type_equals(left_type, right_type))
-    {
-        semantic_error_node(analyzer, expr, "Type mismatch in binary operation");
-        type_destroy(left_type);
-        type_destroy(right_type);
-        return NULL;
-    }
-
-    // determine result type based on operator
-    Type *result_type = type_clone(left_type);
-
-    switch (expr->binary.op)
-    {
-    case OP_EQUAL:
-    case OP_NOT_EQUAL:
-    case OP_LESS:
-    case OP_GREATER:
-    case OP_LESS_EQUAL:
-    case OP_GREATER_EQUAL:
-    case OP_LOGICAL_AND:
-    case OP_LOGICAL_OR:
-        // comparison and logical operators return boolean (i32 for now)
-        type_destroy(result_type);
-        result_type = type_create_int(32, false);
-        break;
-
-    default:
-        // arithmetic operators return the same type as operands
-        break;
-    }
-
-    type_destroy(left_type);
-    type_destroy(right_type);
-    return result_type;
-}
-
-static Type *check_unary_expression(SemanticAnalyzer *analyzer, Node *expr)
-{
-    Type *operand_type = check_expression_type(analyzer, expr->unary.target);
-    if (!operand_type)
-        return NULL;
-
-    switch (expr->unary.op)
-    {
-    case OP_LOGICAL_NOT:
-        // logical not returns boolean
-        type_destroy(operand_type);
-        return type_create_int(32, false);
-
-    case OP_SUB:
-    case OP_ADD:
-    case OP_BITWISE_NOT:
-        // these return the same type as operand
-        return operand_type;
-
-    default:
-        semantic_error_node(analyzer, expr, "Unsupported unary operator");
-        type_destroy(operand_type);
-        return NULL;
-    }
-}
-
-static Type *check_call_expression(SemanticAnalyzer *analyzer, Node *expr)
-{
-    if (!expr->call.target || expr->call.target->kind != NODE_IDENTIFIER)
-    {
-        semantic_error_node(analyzer, expr, "Invalid function call target");
-        return NULL;
-    }
-
-    const char     *func_name   = expr->call.target->str_value;
-    SemanticSymbol *func_symbol = find_symbol(analyzer, func_name);
-
-    if (!func_symbol || func_symbol->symbol_type != SYMBOL_TYPE_FUNCTION)
-    {
-        semantic_error_node(analyzer, expr, "Undefined function");
-        return NULL;
-    }
-
-    Type *func_type = func_symbol->type;
-    if (func_type->kind != TYPE_FUNCTION)
-    {
-        semantic_error_node(analyzer, expr, "Symbol is not a function");
-        return NULL;
-    }
-
-    // check argument count
-    size_t arg_count = 0;
-    if (expr->call.args)
-    {
-        arg_count = node_list_count(expr->call.args);
-    }
-
-    if (!func_type->is_variadic && arg_count != func_type->param_count)
-    {
-        semantic_error_node(analyzer, expr, "Wrong number of arguments");
-        return NULL;
-    }
-
-    // check argument types
-    for (size_t i = 0; i < arg_count && i < func_type->param_count; i++)
-    {
-        Type *arg_type = check_expression_type(analyzer, expr->call.args[i]);
-        if (!arg_type)
-            return NULL;
-
-        if (!type_is_assignable(arg_type, func_type->param_types[i]))
-        {
-            semantic_error_node(analyzer, expr, "Argument type mismatch");
-            type_destroy(arg_type);
-            return NULL;
-        }
-
-        type_destroy(arg_type);
-    }
-
-    return type_clone(func_type->return_type);
-}
-
-// error handling
-void semantic_error(SemanticAnalyzer *analyzer, const char *message)
-{
-    if (analyzer)
-    {
-        analyzer->has_error = true;
-
-        // append to error buffer
-        size_t remaining = sizeof(analyzer->error_messages) - analyzer->error_buffer_pos;
-        int    written   = snprintf(analyzer->error_messages + analyzer->error_buffer_pos, remaining, "Semantic error: %s\n", message);
-        if (written > 0 && (size_t)written < remaining)
-        {
-            analyzer->error_buffer_pos += written;
-        }
-    }
-    fprintf(stderr, "Semantic error: %s\n", message);
-}
-
-void semantic_error_node(SemanticAnalyzer *analyzer, Node *node, const char *message)
-{
-    if (analyzer)
-    {
-        analyzer->has_error = true;
-
-        // format error with position info if available
-        if (node && node->token)
-        {
-            size_t remaining = sizeof(analyzer->error_messages) - analyzer->error_buffer_pos;
-            int    written   = snprintf(analyzer->error_messages + analyzer->error_buffer_pos, remaining, "Semantic error at position %d: %s\n", node->token->pos, message);
-            if (written > 0 && (size_t)written < remaining)
-            {
-                analyzer->error_buffer_pos += written;
+                for (int i = 0; node->function.params[i]; i++)
+                {
+                    Node *param      = node->function.params[i];
+                    char *param_name = param->decl.name->str_value;
+                    Type *param_type = analyze_type(analyzer, param->decl.type);
+                    if (!param_type || !scope_define(func_scope, param_name, SYMBOL_VARIABLE, param_type))
+                    {
+                        analyzer->has_errors = true;
+                    }
+                }
             }
 
-            fprintf(stderr, "Semantic error at position %d: %s\n", node->token->pos, message);
+            bool result = analyze_node(analyzer, node->function.body);
+
+            analyzer->current = old_scope;
+            // store function scope for codegen to use
+            node->function.scope = func_scope;
+
+            if (!result)
+                return false;
         }
-        else
-        {
-            // fallback to simple error if no location info
-            semantic_error(analyzer, message);
-        }
+        return true;
     }
-    else
+
+    case NODE_STMT_IF:
     {
-        fprintf(stderr, "Semantic error: %s\n", message);
+        if (node->conditional.condition)
+        {
+            Type *cond_type = analyze_expression(analyzer, node->conditional.condition);
+            if (!cond_type)
+                return false;
+        }
+
+        bool result = analyze_node(analyzer, node->conditional.body);
+
+        if (node->conditional.else_body)
+        {
+            result = result && analyze_node(analyzer, node->conditional.else_body);
+        }
+
+        return result;
     }
+
+    case NODE_STMT_EXPRESSION:
+    {
+        if (node->single)
+        {
+            analyze_expression(analyzer, node->single);
+        }
+        return true;
+    }
+
+    case NODE_STMT_RETURN:
+    {
+        if (node->single)
+        {
+            analyze_expression(analyzer, node->single);
+        }
+        return true;
+    }
+
+    case NODE_BLOCK:
+    {
+        if (node->children)
+        {
+            for (int i = 0; node->children[i]; i++)
+            {
+                if (!analyze_node(analyzer, node->children[i]))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    case NODE_STMT_BREAK:
+    case NODE_STMT_CONTINUE:
+        return true;
+
+    default:
+        fprintf(stderr, "error: unhandled statement node kind %d (%s)\n", node->kind, node_kind_name(node->kind));
+        analyzer->has_errors = true;
+        return false;
+    }
+}
+
+static bool analyze_node(SemanticAnalyzer *analyzer, Node *node)
+{
+    if (!node || !analyzer)
+        return false;
+
+    switch (node->kind)
+    {
+    case NODE_PROGRAM:
+    case NODE_BLOCK:
+        if (node->children)
+        {
+            for (int i = 0; node->children[i]; i++)
+            {
+                if (!analyze_node(analyzer, node->children[i]))
+                    return false;
+            }
+        }
+        return true;
+
+    default:
+        return analyze_statement(analyzer, node);
+    }
+}
+
+// main analysis function
+bool semantic_analyze(SemanticAnalyzer *analyzer)
+{
+    if (!analyzer || !analyzer->ast)
+        return false;
+
+    analyzer->has_errors = false;
+    analyze_node(analyzer, analyzer->ast);
+
+    return !analyzer->has_errors;
 }

@@ -651,10 +651,10 @@ Node *parser_parse_expr_unary(Parser *parser)
         {
         case TOKEN_MINUS:
             op = OP_SUB;
-            break; // use SUB for unary minus
+            break;
         case TOKEN_PLUS:
             op = OP_ADD;
-            break; // use ADD for unary plus
+            break;
         case TOKEN_BANG:
             op = OP_LOGICAL_NOT;
             break;
@@ -739,6 +739,7 @@ Node *parser_parse_expr_primary(Parser *parser)
     case TOKEN_TYPE_U16:
     case TOKEN_TYPE_U32:
     case TOKEN_TYPE_U64:
+    case TOKEN_TYPE_F16:
     case TOKEN_TYPE_F32:
     case TOKEN_TYPE_F64:
     {
@@ -943,7 +944,49 @@ Node *parser_parse_stmt_block(Parser *parser)
         Node *stmt = parser_parse_stmt(parser);
         if (stmt != NULL)
         {
-            node_list_add(&statements, stmt);
+            // check if this is an if statement followed by an or statement
+            if (stmt->kind == NODE_STMT_IF && parser_check(parser, TOKEN_KW_OR))
+            {
+                // parse the or statement
+                Node *or_stmt = parser_parse_stmt(parser);
+                if (or_stmt && or_stmt->kind == NODE_STMT_OR)
+                {
+                    // convert the if statement to have an else clause
+                    // create a new if-else node
+                    Node *if_else = malloc(sizeof(Node));
+                    if (if_else)
+                    {
+                        node_init(if_else, NODE_STMT_IF);
+                        if_else->conditional.condition = stmt->conditional.condition;
+
+                        // create block with if body and else body
+                        Node *if_body   = stmt->conditional.body;
+                        Node *else_body = or_stmt->conditional.body;
+
+                        // store the if body
+                        if_else->conditional.body = if_body;
+
+                        // for now, store else body in a custom way
+                        // we need to extend the AST to support else clauses
+                        if_else->conditional.else_body = else_body;
+
+                        node_list_add(&statements, if_else);
+
+                        // free the temporary nodes
+                        free(stmt);
+                        free(or_stmt);
+                    }
+                }
+                else
+                {
+                    // if or parsing failed, just add the if statement
+                    node_list_add(&statements, stmt);
+                }
+            }
+            else
+            {
+                node_list_add(&statements, stmt);
+            }
         }
         else
         {
@@ -965,34 +1008,31 @@ Node *parser_parse_stmt_block(Parser *parser)
     return node_block(statements);
 }
 
-// rest of statement parsing functions
-
 Node *parser_parse_stmt_use(Parser *parser)
 {
     parser_advance(parser); // consume 'use'
 
-    // first parse identifier (could be alias or module)
     Node *first = parser_parse_identifier(parser);
     if (first == NULL)
-    {
         return NULL;
-    }
 
-    // check for alias syntax: use alias: module
+    Node *node = malloc(sizeof(Node));
+    if (node == NULL)
+        return NULL;
+
     if (parser_check(parser, TOKEN_COLON))
     {
         parser_advance(parser); // consume ':'
 
-        // first was alias, now parse module (can be dotted)
         Node *module = parser_parse_identifier(parser);
         if (module == NULL)
         {
             node_dnit(first);
             free(first);
+            free(node);
             return NULL;
         }
 
-        // handle dotted module names like std.math
         while (parser_check(parser, TOKEN_DOT))
         {
             parser_advance(parser); // consume '.'
@@ -1004,10 +1044,10 @@ Node *parser_parse_stmt_use(Parser *parser)
                 free(first);
                 node_dnit(module);
                 free(module);
+                free(node);
                 return NULL;
             }
 
-            // create a member access node for the dotted name
             Node *dotted = malloc(sizeof(Node));
             if (dotted == NULL)
             {
@@ -1017,6 +1057,7 @@ Node *parser_parse_stmt_use(Parser *parser)
                 free(module);
                 node_dnit(next_part);
                 free(next_part);
+                free(node);
                 return NULL;
             }
 
@@ -1026,68 +1067,46 @@ Node *parser_parse_stmt_use(Parser *parser)
             module               = dotted;
         }
 
-        // create use node with alias and module
-        Node *node = malloc(sizeof(Node));
-        if (node == NULL)
+        node_init(node, NODE_STMT_USE);
+        node->binary.left  = first;
+        node->binary.right = module;
+    }
+    else
+    {
+        Node *module = first;
+        while (parser_check(parser, TOKEN_DOT))
         {
-            return NULL;
+            parser_advance(parser); // consume '.'
+
+            Node *next_part = parser_parse_identifier(parser);
+            if (next_part == NULL)
+            {
+                node_dnit(module);
+                free(module);
+                free(node);
+                return NULL;
+            }
+
+            Node *dotted = malloc(sizeof(Node));
+            if (dotted == NULL)
+            {
+                node_dnit(module);
+                free(module);
+                node_dnit(next_part);
+                free(next_part);
+                free(node);
+                return NULL;
+            }
+
+            node_init(dotted, NODE_EXPR_MEMBER);
+            dotted->binary.left  = module;
+            dotted->binary.right = next_part;
+            module               = dotted;
         }
 
         node_init(node, NODE_STMT_USE);
-        node->binary.left  = first;  // alias
-        node->binary.right = module; // module
-
-        if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after use statement"))
-        {
-            node_dnit(node);
-            free(node);
-            return NULL;
-        }
-
-        return node;
+        node->single = module;
     }
-
-    // no colon, so first is the module - handle dotted names
-    Node *module = first;
-    while (parser_check(parser, TOKEN_DOT))
-    {
-        parser_advance(parser); // consume '.'
-
-        Node *next_part = parser_parse_identifier(parser);
-        if (next_part == NULL)
-        {
-            node_dnit(module);
-            free(module);
-            return NULL;
-        }
-
-        // create a member access node for the dotted name
-        Node *dotted = malloc(sizeof(Node));
-        if (dotted == NULL)
-        {
-            node_dnit(module);
-            free(module);
-            node_dnit(next_part);
-            free(next_part);
-            return NULL;
-        }
-
-        node_init(dotted, NODE_EXPR_MEMBER);
-        dotted->binary.left  = module;
-        dotted->binary.right = next_part;
-        module               = dotted;
-    }
-
-    // simple use statement (no alias)
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_USE);
-    node->binary.left  = NULL;   // no alias
-    node->binary.right = module; // module
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after use statement"))
     {
@@ -1378,18 +1397,16 @@ Node *parser_parse_stmt_fun(Parser *parser)
     return node;
 }
 
+// simplify struct statement parsing
 Node *parser_parse_stmt_str(Parser *parser)
 {
     parser_advance(parser); // consume 'str'
 
-    // check if this is direct struct definition: str name { ... }
     if (parser_check(parser, TOKEN_IDENTIFIER))
     {
         Node *name = parser_parse_identifier(parser);
         if (name == NULL)
-        {
             return NULL;
-        }
 
         if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after struct name"))
         {
@@ -1416,50 +1433,24 @@ Node *parser_parse_stmt_str(Parser *parser)
             return NULL;
         }
 
-        // create struct type node
-        Node *struct_type = malloc(sizeof(Node));
-        if (struct_type == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            if (fields)
-            {
-                for (size_t i = 0; i < node_list_count(fields); i++)
-                {
-                    node_dnit(fields[i]);
-                    free(fields[i]);
-                }
-                free(fields);
-            }
-            return NULL;
-        }
-
-        node_init(struct_type, NODE_STMT_STRUCT);
-        struct_type->composite.fields = fields;
-
-        // create def statement node (same AST as def name: str { ... };)
         Node *node = malloc(sizeof(Node));
         if (node == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            node_dnit(struct_type);
-            free(struct_type);
             return NULL;
-        }
 
-        node_init(node, NODE_STMT_DEF);
-        node->decl.name = name;
-        node->decl.type = struct_type;
-        node->decl.init = NULL;
+        node_init(node, NODE_STMT_STRUCT);
+        node->composite.fields    = malloc((node_list_count(fields) + 2) * sizeof(Node *));
+        node->composite.fields[0] = name;
+        for (size_t i = 0; i < node_list_count(fields); i++)
+        {
+            node->composite.fields[i + 1] = fields[i];
+        }
+        node->composite.fields[node_list_count(fields) + 1] = NULL;
+        free(fields);
         return node;
     }
 
-    // anonymous struct definition for type context: str { ... }
     if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after str"))
-    {
         return NULL;
-    }
 
     Node **fields = parser_parse_field_list(parser);
 
@@ -1479,11 +1470,9 @@ Node *parser_parse_stmt_str(Parser *parser)
 
     Node *node = malloc(sizeof(Node));
     if (node == NULL)
-    {
         return NULL;
-    }
 
-    node_init(node, NODE_STMT_STRUCT);
+    node_init(node, NODE_TYPE_STRUCT);
     node->composite.fields = fields;
     return node;
 }
@@ -1492,14 +1481,11 @@ Node *parser_parse_stmt_uni(Parser *parser)
 {
     parser_advance(parser); // consume 'uni'
 
-    // check if this is direct union definition: uni name { ... }
     if (parser_check(parser, TOKEN_IDENTIFIER))
     {
         Node *name = parser_parse_identifier(parser);
         if (name == NULL)
-        {
             return NULL;
-        }
 
         if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after union name"))
         {
@@ -1526,50 +1512,24 @@ Node *parser_parse_stmt_uni(Parser *parser)
             return NULL;
         }
 
-        // create union type node
-        Node *union_type = malloc(sizeof(Node));
-        if (union_type == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            if (fields)
-            {
-                for (size_t i = 0; i < node_list_count(fields); i++)
-                {
-                    node_dnit(fields[i]);
-                    free(fields[i]);
-                }
-                free(fields);
-            }
-            return NULL;
-        }
-
-        node_init(union_type, NODE_STMT_UNION);
-        union_type->composite.fields = fields;
-
-        // create def statement node (same AST as def name: uni { ... };)
         Node *node = malloc(sizeof(Node));
         if (node == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            node_dnit(union_type);
-            free(union_type);
             return NULL;
-        }
 
-        node_init(node, NODE_STMT_DEF);
-        node->decl.name = name;
-        node->decl.type = union_type;
-        node->decl.init = NULL;
+        node_init(node, NODE_STMT_UNION);
+        node->composite.fields    = malloc((node_list_count(fields) + 2) * sizeof(Node *));
+        node->composite.fields[0] = name;
+        for (size_t i = 0; i < node_list_count(fields); i++)
+        {
+            node->composite.fields[i + 1] = fields[i];
+        }
+        node->composite.fields[node_list_count(fields) + 1] = NULL;
+        free(fields);
         return node;
     }
 
-    // anonymous union definition for type context: uni { ... }
     if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after uni"))
-    {
         return NULL;
-    }
 
     Node **fields = parser_parse_field_list(parser);
 
@@ -1589,59 +1549,62 @@ Node *parser_parse_stmt_uni(Parser *parser)
 
     Node *node = malloc(sizeof(Node));
     if (node == NULL)
-    {
         return NULL;
-    }
 
-    node_init(node, NODE_STMT_UNION);
+    node_init(node, NODE_TYPE_UNION);
     node->composite.fields = fields;
     return node;
 }
 
+// ensure external statement uses single field consistently
 Node *parser_parse_stmt_ext(Parser *parser)
 {
     parser_advance(parser); // consume 'ext'
 
-    Node *name = parser_parse_identifier(parser);
-    if (name == NULL)
+    Node *decl = malloc(sizeof(Node));
+    if (decl == NULL)
+        return NULL;
+
+    node_init(decl, NODE_STMT_VAR);
+
+    decl->decl.name = parser_parse_identifier(parser);
+    if (decl->decl.name == NULL)
     {
+        node_dnit(decl);
+        free(decl);
         return NULL;
     }
 
     if (!parser_consume(parser, TOKEN_COLON, "Expected ':' after external name"))
     {
-        node_dnit(name);
-        free(name);
+        node_dnit(decl);
+        free(decl);
         return NULL;
     }
 
-    Node *type = parser_parse_type(parser);
-    if (type == NULL)
+    decl->decl.type = parser_parse_type(parser);
+    if (decl->decl.type == NULL)
     {
-        node_dnit(name);
-        free(name);
+        node_dnit(decl);
+        free(decl);
         return NULL;
     }
+
+    decl->decl.init = NULL;
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after external declaration"))
     {
-        node_dnit(name);
-        free(name);
-        node_dnit(type);
-        free(type);
+        node_dnit(decl);
+        free(decl);
         return NULL;
     }
 
     Node *node = malloc(sizeof(Node));
     if (node == NULL)
-    {
         return NULL;
-    }
 
     node_init(node, NODE_STMT_EXTERNAL);
-    node->decl.name = name;
-    node->decl.type = type;
-    node->decl.init = NULL;
+    node->single = decl;
     return node;
 }
 

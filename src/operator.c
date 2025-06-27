@@ -87,3 +87,58 @@ bool op_is_right_associative(Operator op)
 
     return false;
 }
+
+const char *op_to_string(Operator op)
+{
+    switch (op)
+    {
+    case OP_ADD:
+        return "+";
+    case OP_SUB:
+        return "-";
+    case OP_MUL:
+        return "*";
+    case OP_DIV:
+        return "/";
+    case OP_MOD:
+        return "%";
+    case OP_BITWISE_AND:
+        return "&";
+    case OP_BITWISE_OR:
+        return "|";
+    case OP_BITWISE_XOR:
+        return "^";
+    case OP_BITWISE_NOT:
+        return "~";
+    case OP_BITWISE_SHL:
+        return "<<";
+    case OP_BITWISE_SHR:
+        return ">>";
+    case OP_LOGICAL_AND:
+        return "&&";
+    case OP_LOGICAL_OR:
+        return "||";
+    case OP_LOGICAL_NOT:
+        return "!";
+    case OP_EQUAL:
+        return "==";
+    case OP_NOT_EQUAL:
+        return "!=";
+    case OP_LESS:
+        return "<";
+    case OP_GREATER:
+        return ">";
+    case OP_LESS_EQUAL:
+        return "<=";
+    case OP_GREATER_EQUAL:
+        return ">=";
+    case OP_ASSIGN:
+        return "=";
+    case OP_REFERENCE:
+        return "?";
+    case OP_DEREFERENCE:
+        return "@";
+    default:
+        return "UNK";
+    }
+}

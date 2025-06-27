@@ -41,6 +41,7 @@ typedef enum TokenKind
     TOKEN_TYPE_U16, // u16
     TOKEN_TYPE_U32, // u32
     TOKEN_TYPE_U64, // u64
+    TOKEN_TYPE_F16, // f16
     TOKEN_TYPE_F32, // f32
     TOKEN_TYPE_F64, // f64
 

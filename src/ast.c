@@ -12,22 +12,24 @@ void node_init(Node *node, NodeKind kind)
 
 void node_dnit(Node *node)
 {
-    if (node == NULL)
-    {
+    if (!node)
         return;
-    }
 
     switch (node->kind)
     {
     case NODE_ERROR:
+        free(node->error.message);
         break;
+
     case NODE_IDENTIFIER:
     case NODE_LIT_STRING:
         free(node->str_value);
-        node->str_value = NULL;
         break;
 
     case NODE_EXPR_BINARY:
+    case NODE_EXPR_INDEX:
+    case NODE_EXPR_MEMBER:
+    case NODE_EXPR_CAST:
         node_dnit(node->binary.left);
         free(node->binary.left);
         node_dnit(node->binary.right);
@@ -145,10 +147,13 @@ void node_dnit(Node *node)
         break;
 
     case NODE_TYPE_ARRAY:
+        node_dnit(node->binary.left);
+        free(node->binary.left);
+        node_dnit(node->binary.right);
+        free(node->binary.right);
+        break;
+
     case NODE_TYPE_POINTER:
-    case NODE_EXPR_INDEX:
-    case NODE_EXPR_MEMBER:
-    case NODE_EXPR_CAST:
     case NODE_STMT_USE:
     case NODE_STMT_EXTERNAL:
     case NODE_STMT_RETURN:
@@ -166,8 +171,8 @@ void node_dnit(Node *node)
     case NODE_STMT_BREAK:
     case NODE_STMT_CONTINUE:
         break;
-
-    case NODE_COUNT:
+    default:
+        fprintf(stderr, "error: unknown node kind %d\n", node->kind);
         break;
     }
 

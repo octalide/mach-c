@@ -2,104 +2,148 @@
 #define SEMANTIC_H
 
 #include "ast.h"
-
 #include <stdbool.h>
-#include <stddef.h>
 
-// type system
+// forward declarations
+typedef struct Type             Type;
+typedef struct Symbol           Symbol;
+typedef struct Scope            Scope;
+typedef struct SemanticAnalyzer SemanticAnalyzer;
+
+// type kinds
 typedef enum TypeKind
 {
     TYPE_VOID,
+    TYPE_BOOL,
     TYPE_INT,
     TYPE_FLOAT,
     TYPE_POINTER,
     TYPE_ARRAY,
     TYPE_FUNCTION,
-    TYPE_ERROR // for error recovery
+    TYPE_STRUCT,
+    TYPE_UNION,
+    TYPE_ALIAS,
+    TYPE_ERROR
 } TypeKind;
 
-typedef struct Type
+// type structure
+struct Type
 {
     TypeKind kind;
-    bool     is_unsigned; // for integer types
-    size_t   bit_width;   // 8, 16, 32, 64 for integers and floats
+    unsigned size;      // size in bytes
+    unsigned align;     // alignment requirement
+    bool     is_signed; // for numeric types
+    bool     is_const;  // immutability
 
-    // for composite types
-    struct Type  *base_type;   // pointer/array element type
-    struct Type  *return_type; // function return type
-    struct Type **param_types; // function parameter types
-    size_t        param_count;
-    bool          is_variadic; // function is variadic
-    size_t        array_size;  // array size (0 for unknown/dynamic)
-} Type;
+    union
+    {
+        // pointer type
+        struct
+        {
+            Type *base;
+        } pointer;
 
-// symbol table entry
-typedef enum SymbolType
+        // array type
+        struct
+        {
+            Type  *element;
+            size_t size; // 0 for dynamic arrays [_]
+        } array;
+
+        // function type
+        struct
+        {
+            Type **params;
+            Type  *return_type;
+            bool   is_variadic;
+        } function;
+
+        // struct/union type
+        struct
+        {
+            Symbol **fields;
+            char    *name;
+        } composite;
+
+        // alias type
+        struct
+        {
+            Type *base;
+            char *name;
+        } alias;
+    };
+};
+
+// symbol kinds
+typedef enum SymbolKind
 {
-    SYMBOL_TYPE_VARIABLE,
-    SYMBOL_TYPE_FUNCTION,
-    SYMBOL_TYPE_TYPE
-} SymbolType;
+    SYMBOL_VARIABLE,
+    SYMBOL_CONSTANT,
+    SYMBOL_FUNCTION,
+    SYMBOL_TYPE,
+    SYMBOL_STRUCT,
+    SYMBOL_UNION,
+    SYMBOL_FIELD
+} SymbolKind;
 
-typedef struct SemanticSymbol
+// symbol structure
+struct Symbol
 {
     char      *name;
-    SymbolType symbol_type;
+    SymbolKind kind;
     Type      *type;
-    bool       is_mutable; // false for val declarations
-    size_t     scope_level;
-    Node      *declaration; // reference to AST node
-} SemanticSymbol;
+    Node      *node;        // ast node reference
+    Scope     *scope;       // owning scope
+    bool       is_external; // external declaration
+    size_t     offset;      // for struct fields
+};
+
+// scope structure
+struct Scope
+{
+    Scope   *parent;
+    Symbol **symbols; // null-terminated array
+    int      level;   // nesting level
+};
 
 // semantic analyzer
-typedef struct SemanticAnalyzer
+struct SemanticAnalyzer
 {
-    // symbol table
-    SemanticSymbol *symbols;
-    size_t          symbol_count;
-    size_t          symbol_capacity;
-    size_t          current_scope_level;
-
-    // current context
-    Type *current_function_return_type;
-    bool  in_loop;
-
-    // error tracking
-    bool   has_error;
-    char   error_messages[4096]; // buffer for multiple errors
-    size_t error_buffer_pos;
-} SemanticAnalyzer;
+    Scope *global;  // global scope
+    Scope *current; // current scope
+    Type **types;   // registered types
+    Node  *ast;     // ast root
+    bool   has_errors;
+};
 
 // core functions
-bool semantic_init(SemanticAnalyzer *analyzer);
+void semantic_init(SemanticAnalyzer *analyzer, Node *ast);
 void semantic_dnit(SemanticAnalyzer *analyzer);
-bool semantic_analyze(SemanticAnalyzer *analyzer, Node *program);
+bool semantic_analyze(SemanticAnalyzer *analyzer);
 
-// type system functions
-Type       *type_create_void(void);
-Type       *type_create_int(size_t bit_width, bool is_unsigned);
-Type       *type_create_float(size_t bit_width);
-Type       *type_create_pointer(Type *base_type);
-Type       *type_create_array(Type *element_type, size_t size);
-Type       *type_create_function(Type *return_type, Type **param_types, size_t param_count, bool is_variadic);
-void        type_destroy(Type *type);
-Type       *type_clone(Type *type);
-bool        type_equals(Type *a, Type *b);
-bool        type_is_assignable(Type *from, Type *to);
-const char *type_to_string(Type *type);
+// type management
+Type  *type_new(TypeKind kind);
+void   type_free(Type *type);
+Type  *type_builtin(const char *name);
+Type  *type_pointer(Type *base);
+Type  *type_array(Type *element, size_t size);
+Type  *type_function(Type *return_type, Type **params, bool is_variadic);
+Type  *type_struct(const char *name);
+Type  *type_union(const char *name);
+Type  *type_alias(const char *name, Type *base);
+bool   type_equal(Type *a, Type *b);
+bool   type_compatible(Type *a, Type *b);
+size_t type_sizeof(Type *type);
+size_t type_alignof(Type *type);
 
-// type checking
-Type *check_expression_type(SemanticAnalyzer *analyzer, Node *expr);
-bool  check_statement(SemanticAnalyzer *analyzer, Node *stmt);
+// scope management
+Scope  *scope_new(Scope *parent);
+void    scope_free(Scope *scope);
+Symbol *scope_lookup(Scope *scope, const char *name);
+Symbol *scope_define(Scope *scope, const char *name, SymbolKind kind, Type *type);
 
-// symbol table
-void            push_scope(SemanticAnalyzer *analyzer);
-void            pop_scope(SemanticAnalyzer *analyzer);
-SemanticSymbol *add_symbol(SemanticAnalyzer *analyzer, const char *name, SymbolType symbol_type, Type *type, bool is_mutable, Node *declaration);
-SemanticSymbol *find_symbol(SemanticAnalyzer *analyzer, const char *name);
-
-// error handling
-void semantic_error(SemanticAnalyzer *analyzer, const char *message);
-void semantic_error_node(SemanticAnalyzer *analyzer, Node *node, const char *message);
+// symbol management
+Symbol *symbol_new(const char *name, SymbolKind kind, Type *type);
+void    symbol_free(Symbol *symbol);
 
 #endif

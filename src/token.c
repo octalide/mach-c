@@ -99,6 +99,8 @@ char *token_kind_to_string(TokenKind kind)
         return "u32";
     case TOKEN_TYPE_U64:
         return "u64";
+    case TOKEN_TYPE_F16:
+        return "f16";
     case TOKEN_TYPE_F32:
         return "f32";
     case TOKEN_TYPE_F64:
@@ -297,6 +299,10 @@ TokenKind token_kind_from_identifier(const char *text, int len)
         if (strncmp(text, "u64", 3) == 0)
         {
             return TOKEN_TYPE_U64;
+        }
+        if (strncmp(text, "f16", 3) == 0)
+        {
+            return TOKEN_TYPE_F16;
         }
         if (strncmp(text, "f32", 3) == 0)
         {

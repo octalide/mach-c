@@ -42,17 +42,17 @@ typedef enum Operator
 
 typedef struct OpTokenKinds
 {
-    Operator op;
+    Operator  op;
     TokenKind kind;
 } OpTokenKinds;
 
 struct OpInfo
 {
-    Operator op;
-    int precedence;
-    bool right_associative;
-    bool unary;
-    bool binary;
+    Operator  op;
+    int       precedence;
+    bool      right_associative;
+    bool      unary;
+    bool      binary;
     TokenKind token_kind;
 };
 
@@ -82,11 +82,12 @@ static const struct OpInfo op_info[] = {
     {OP_GREATER_EQUAL, 5, false, false, true, TOKEN_GREATER_EQUAL},
 };
 
-Operator op_from_token_kind(TokenKind kind);
-TokenKind op_to_token_kind(Operator op);
-bool op_is_unary(Operator op);
-bool op_is_binary(Operator op);
-int op_precedence(Operator op);
-bool op_is_right_associative(Operator op);
+Operator    op_from_token_kind(TokenKind kind);
+TokenKind   op_to_token_kind(Operator op);
+bool        op_is_unary(Operator op);
+bool        op_is_binary(Operator op);
+int         op_precedence(Operator op);
+bool        op_is_right_associative(Operator op);
+const char *op_to_string(Operator op);
 
 #endif

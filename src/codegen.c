@@ -1,1120 +1,840 @@
 #include "codegen.h"
-
-#include <llvm-c/Analysis.h>
-#include <llvm-c/IRReader.h>
-#include <llvm-c/Object.h>
+#include <llvm-c/TargetMachine.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// forward declarations
-static LLVMValueRef codegen_node(CodeGen *codegen, Node *node);
-static LLVMTypeRef  codegen_type(CodeGen *codegen, Node *type_node);
-static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node);
-static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node);
-static void         codegen_statement(CodeGen *codegen, Node *stmt_node);
-static void         end_if_chain(CodeGen *codegen);
+static LLVMTypeRef  get_llvm_type(CodeGenerator *gen, Type *type);
+static CodegenValue codegen_expression(CodeGenerator *gen, Node *node);
+static bool         codegen_statement(CodeGenerator *gen, Node *node);
+static bool         codegen_node(CodeGenerator *gen, Node *node);
 
-// symbol table helpers
-static void         add_symbol(CodeGen *codegen, const char *name, LLVMValueRef value, SymbolKind kind);
-static LLVMValueRef get_symbol(CodeGen *codegen, const char *name);
-static SymbolKind   get_symbol_kind(CodeGen *codegen, const char *name);
-static void         push_scope(CodeGen *codegen);
-static void         pop_scope(CodeGen *codegen);
-
-bool codegen_init(CodeGen *codegen, const char *module_name)
+void codegen_init(CodeGenerator *gen, SemanticAnalyzer *analyzer, const char *module_name)
 {
-    memset(codegen, 0, sizeof(CodeGen));
+    gen->context = LLVMContextCreate();
+    gen->module  = LLVMModuleCreateWithNameInContext(module_name, gen->context);
+    gen->builder = LLVMCreateBuilderInContext(gen->context);
 
-    // initialize LLVM
-    LLVMInitializeNativeTarget();
-    LLVMInitializeNativeAsmPrinter();
+    gen->current_function = NULL;
+    gen->loop_continue    = NULL;
+    gen->loop_break       = NULL;
+    gen->current_scope    = NULL;
 
-    // create context and module
-    codegen->context = LLVMContextCreate();
-    if (!codegen->context)
+    gen->symbols    = calloc(1, sizeof(Symbol *));
+    gen->values     = calloc(1, sizeof(LLVMValueRef));
+    gen->types      = calloc(1, sizeof(Type *));
+    gen->llvm_types = calloc(1, sizeof(LLVMTypeRef));
+
+    gen->analyzer = analyzer;
+
+    LLVMInitializeAllTargetInfos();
+    LLVMInitializeAllTargets();
+    LLVMInitializeAllTargetMCs();
+    LLVMInitializeAllAsmParsers();
+    LLVMInitializeAllAsmPrinters();
+
+    // set target triple and data layout
+    char *triple = LLVMGetDefaultTargetTriple();
+    LLVMSetTarget(gen->module, triple);
+
+    LLVMTargetRef target;
+    char         *error = NULL;
+    if (LLVMGetTargetFromTriple(triple, &target, &error) == 0)
     {
-        codegen_error(codegen, "Failed to create LLVM context");
-        return false;
-    }
+        LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, "generic", "", LLVMCodeGenLevelDefault, LLVMRelocDefault, LLVMCodeModelDefault);
 
-    codegen->module = LLVMModuleCreateWithNameInContext(module_name, codegen->context);
-    if (!codegen->module)
+        LLVMTargetDataRef data_layout     = LLVMCreateTargetDataLayout(machine);
+        char             *data_layout_str = LLVMCopyStringRepOfTargetData(data_layout);
+        LLVMSetDataLayout(gen->module, data_layout_str);
+
+        LLVMDisposeMessage(data_layout_str);
+        LLVMDisposeTargetData(data_layout);
+        LLVMDisposeTargetMachine(machine);
+    }
+    else
     {
-        codegen_error(codegen, "Failed to create LLVM module");
-        return false;
+        fprintf(stderr, "Warning: Could not set target: %s\n", error);
+        LLVMDisposeMessage(error);
     }
-
-    // create builder
-    codegen->builder = LLVMCreateBuilderInContext(codegen->context);
-    if (!codegen->builder)
-    {
-        codegen_error(codegen, "Failed to create LLVM builder");
-        return false;
-    }
-
-    // get native target
-    char *error_msg = NULL;
-    char *triple    = LLVMGetDefaultTargetTriple();
-    if (LLVMGetTargetFromTriple(triple, &codegen->target, &error_msg) != 0)
-    {
-        printf("Failed to get target: %s\n", error_msg);
-        LLVMDisposeMessage(error_msg);
-        LLVMDisposeMessage(triple);
-        return false;
-    }
-
-    // create target machine
-    codegen->target_machine = LLVMCreateTargetMachine(codegen->target, triple, "generic", "", LLVMCodeGenLevelDefault, LLVMRelocDefault, LLVMCodeModelDefault);
-
-    if (!codegen->target_machine)
-    {
-        LLVMDisposeMessage(triple);
-        codegen_error(codegen, "Failed to create target machine");
-        return false;
-    }
-
-    // set target triple and data layout for better optimization
-    LLVMSetTarget(codegen->module, triple);
-    char *data_layout = LLVMCopyStringRepOfTargetData(LLVMCreateTargetDataLayout(codegen->target_machine));
-    LLVMSetDataLayout(codegen->module, data_layout);
-    LLVMDisposeMessage(data_layout);
 
     LLVMDisposeMessage(triple);
-
-    if (!codegen->target_machine)
-    {
-        codegen_error(codegen, "Failed to create target machine");
-        return false;
-    }
-
-    // initialize symbol table
-    codegen->symbol_capacity     = 64;
-    codegen->symbols             = malloc(sizeof(Symbol) * codegen->symbol_capacity);
-    codegen->current_scope_level = 0; // start at global scope
-
-    if (!codegen->symbols)
-    {
-        codegen_error(codegen, "Failed to allocate symbol table");
-        return false;
-    }
-
-    return true;
 }
 
-void codegen_dnit(CodeGen *codegen)
+void codegen_dnit(CodeGenerator *gen)
 {
-    if (!codegen)
+    if (!gen)
         return;
 
-    // cleanup symbol table
-    if (codegen->symbols)
+    free(gen->symbols);
+    free(gen->values);
+    free(gen->types);
+    free(gen->llvm_types);
+
+    LLVMDisposeBuilder(gen->builder);
+    LLVMDisposeModule(gen->module);
+    LLVMContextDispose(gen->context);
+}
+
+static void register_value(CodeGenerator *gen, Symbol *symbol, LLVMValueRef value)
+{
+    size_t count = 0;
+    while (gen->symbols[count])
+        count++;
+
+    gen->symbols = realloc(gen->symbols, (count + 2) * sizeof(Symbol *));
+    gen->values  = realloc(gen->values, (count + 2) * sizeof(LLVMValueRef));
+
+    gen->symbols[count]     = symbol;
+    gen->values[count]      = value;
+    gen->symbols[count + 1] = NULL;
+}
+
+static LLVMValueRef lookup_value(CodeGenerator *gen, Symbol *symbol)
+{
+    for (size_t i = 0; gen->symbols[i]; i++)
     {
-        for (size_t i = 0; i < codegen->symbol_count; i++)
+        if (gen->symbols[i] == symbol)
         {
-            free(codegen->symbols[i].name);
-        }
-        free(codegen->symbols);
-    }
-
-    // cleanup LLVM objects
-    if (codegen->target_machine)
-        LLVMDisposeTargetMachine(codegen->target_machine);
-    if (codegen->builder)
-        LLVMDisposeBuilder(codegen->builder);
-    if (codegen->module)
-        LLVMDisposeModule(codegen->module);
-    if (codegen->context)
-        LLVMContextDispose(codegen->context);
-
-    memset(codegen, 0, sizeof(CodeGen));
-}
-
-bool codegen_generate(CodeGen *codegen, Node *program)
-{
-    if (!codegen || !program)
-    {
-        codegen_error(codegen, "Invalid parameters");
-        return false;
-    }
-
-    if (program->kind != NODE_PROGRAM)
-    {
-        codegen_error(codegen, "Expected program node");
-        return false;
-    }
-
-    // generate code for all top-level statements
-    if (program->children)
-    {
-        for (size_t i = 0; i < node_list_count(program->children); i++)
-        {
-            Node *stmt = program->children[i];
-            codegen_node(codegen, stmt);
-
-            if (codegen->has_error)
-            {
-                return false;
-            }
-        }
-    }
-
-    // verify module
-    char *error_msg = NULL;
-    if (LLVMVerifyModule(codegen->module, LLVMReturnStatusAction, &error_msg) != 0)
-    {
-        printf("Module verification failed: %s\n", error_msg);
-        LLVMDisposeMessage(error_msg);
-        return false;
-    }
-
-    return true;
-}
-
-bool codegen_write_object(CodeGen *codegen, const char *filename)
-{
-    if (!codegen || !filename)
-    {
-        return false;
-    }
-
-    char *error_msg = NULL;
-    if (LLVMTargetMachineEmitToFile(codegen->target_machine, codegen->module, (char *)filename, LLVMObjectFile, &error_msg) != 0)
-    {
-        printf("Failed to emit object file: %s\n", error_msg);
-        LLVMDisposeMessage(error_msg);
-        return false;
-    }
-
-    return true;
-}
-
-bool codegen_write_ir(CodeGen *codegen, const char *filename)
-{
-    if (!codegen || !filename)
-    {
-        return false;
-    }
-
-    char *error_msg = NULL;
-    if (LLVMPrintModuleToFile(codegen->module, filename, &error_msg) != 0)
-    {
-        printf("Failed to write IR file: %s\n", error_msg);
-        LLVMDisposeMessage(error_msg);
-        return false;
-    }
-
-    return true;
-}
-
-void codegen_error(CodeGen *codegen, const char *message)
-{
-    if (codegen)
-    {
-        codegen->has_error = true;
-    }
-    fprintf(stderr, "Codegen error: %s\n", message);
-}
-
-// symbol table helpers
-static void add_symbol(CodeGen *codegen, const char *name, LLVMValueRef value, SymbolKind kind)
-{
-    if (codegen->symbol_count >= codegen->symbol_capacity)
-    {
-        codegen->symbol_capacity *= 2;
-        codegen->symbols = realloc(codegen->symbols, sizeof(Symbol) * codegen->symbol_capacity);
-    }
-
-    codegen->symbols[codegen->symbol_count].name        = strdup(name);
-    codegen->symbols[codegen->symbol_count].value       = value;
-    codegen->symbols[codegen->symbol_count].kind        = kind;
-    codegen->symbols[codegen->symbol_count].scope_level = codegen->current_scope_level;
-    codegen->symbol_count++;
-}
-
-static LLVMValueRef get_symbol(CodeGen *codegen, const char *name)
-{
-    // search from most recent (highest scope) to oldest (global scope)
-    for (int i = (int)codegen->symbol_count - 1; i >= 0; i--)
-    {
-        if (strcmp(codegen->symbols[i].name, name) == 0)
-        {
-            return codegen->symbols[i].value;
+            return gen->values[i];
         }
     }
     return NULL;
 }
 
-static SymbolKind get_symbol_kind(CodeGen *codegen, const char *name)
+static void cache_llvm_type(CodeGenerator *gen, Type *type, LLVMTypeRef llvm_type)
 {
-    // search from most recent (highest scope) to oldest (global scope)
-    for (int i = (int)codegen->symbol_count - 1; i >= 0; i--)
+    size_t count = 0;
+    while (gen->types[count])
+        count++;
+
+    gen->types      = realloc(gen->types, (count + 2) * sizeof(Type *));
+    gen->llvm_types = realloc(gen->llvm_types, (count + 2) * sizeof(LLVMTypeRef));
+
+    gen->types[count]      = type;
+    gen->llvm_types[count] = llvm_type;
+    gen->types[count + 1]  = NULL;
+}
+
+static LLVMTypeRef lookup_llvm_type(CodeGenerator *gen, Type *type)
+{
+    for (size_t i = 0; gen->types[i]; i++)
     {
-        if (strcmp(codegen->symbols[i].name, name) == 0)
+        if (gen->types[i] == type)
         {
-            return codegen->symbols[i].kind;
+            return gen->llvm_types[i];
         }
     }
-    return SYMBOL_FUNCTION; // default, but should not happen
+    return NULL;
 }
 
-static void push_scope(CodeGen *codegen)
+static LLVMTypeRef get_llvm_type(CodeGenerator *gen, Type *type)
 {
-    codegen->current_scope_level++;
-}
+    if (!type)
+        return LLVMVoidTypeInContext(gen->context);
 
-static void pop_scope(CodeGen *codegen)
-{
-    // remove all symbols from current scope
-    size_t symbols_to_remove = 0;
-    for (int i = (int)codegen->symbol_count - 1; i >= 0; i--)
+    LLVMTypeRef cached = lookup_llvm_type(gen, type);
+    if (cached)
+        return cached;
+
+    while (type->kind == TYPE_ALIAS)
     {
-        if (codegen->symbols[i].scope_level == codegen->current_scope_level)
+        type = type->alias.base;
+    }
+
+    LLVMTypeRef llvm_type = NULL;
+
+    switch (type->kind)
+    {
+    case TYPE_VOID:
+        llvm_type = LLVMVoidTypeInContext(gen->context);
+        break;
+
+    case TYPE_INT:
+        if (type->size == 1)
+            llvm_type = LLVMInt8TypeInContext(gen->context);
+        else if (type->size == 2)
+            llvm_type = LLVMInt16TypeInContext(gen->context);
+        else if (type->size == 4)
+            llvm_type = LLVMInt32TypeInContext(gen->context);
+        else if (type->size == 8)
+            llvm_type = LLVMInt64TypeInContext(gen->context);
+        break;
+
+    case TYPE_FLOAT:
+        if (type->size == 4)
+            llvm_type = LLVMFloatTypeInContext(gen->context);
+        else if (type->size == 8)
+            llvm_type = LLVMDoubleTypeInContext(gen->context);
+        break;
+
+    case TYPE_POINTER:
+        llvm_type = LLVMPointerType(get_llvm_type(gen, type->pointer.base), 0);
+        break;
+
+    case TYPE_ARRAY:
+        if (type->array.size > 0)
         {
-            free(codegen->symbols[i].name);
-            symbols_to_remove++;
+            llvm_type = LLVMArrayType(get_llvm_type(gen, type->array.element), type->array.size);
         }
         else
         {
-            break; // we've hit a symbol from an outer scope
+            llvm_type = LLVMPointerType(get_llvm_type(gen, type->array.element), 0);
         }
+        break;
+
+    case TYPE_FUNCTION:
+    {
+        LLVMTypeRef return_type = get_llvm_type(gen, type->function.return_type);
+
+        size_t param_count = 0;
+        if (type->function.params)
+        {
+            while (type->function.params[param_count])
+                param_count++;
+        }
+
+        LLVMTypeRef *param_types = calloc(param_count, sizeof(LLVMTypeRef));
+        for (size_t i = 0; i < param_count; i++)
+        {
+            param_types[i] = get_llvm_type(gen, type->function.params[i]);
+        }
+
+        llvm_type = LLVMFunctionType(return_type, param_types, param_count, type->function.is_variadic);
+        free(param_types);
+        break;
     }
 
-    codegen->symbol_count -= symbols_to_remove;
-    codegen->current_scope_level--;
-}
-
-// type conversion
-static LLVMTypeRef codegen_type(CodeGen *codegen, Node *type_node)
-{
-    if (!type_node)
+    case TYPE_STRUCT:
     {
-        return LLVMVoidTypeInContext(codegen->context);
+        llvm_type = LLVMStructCreateNamed(gen->context, type->composite.name);
+        cache_llvm_type(gen, type, llvm_type);
+
+        if (type->composite.fields)
+        {
+            size_t field_count = 0;
+            while (type->composite.fields[field_count])
+                field_count++;
+
+            LLVMTypeRef *field_types = calloc(field_count, sizeof(LLVMTypeRef));
+            for (size_t i = 0; i < field_count; i++)
+            {
+                field_types[i] = get_llvm_type(gen, type->composite.fields[i]->type);
+            }
+
+            LLVMStructSetBody(llvm_type, field_types, field_count, 0);
+            free(field_types);
+        }
+        return llvm_type;
     }
 
-    switch (type_node->kind)
+    case TYPE_UNION:
     {
-    case NODE_IDENTIFIER:
-        // basic types
-        if (strcmp(type_node->str_value, "i8") == 0)
-            return LLVMInt8TypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "i16") == 0)
-            return LLVMInt16TypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "i32") == 0)
-            return LLVMInt32TypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "i64") == 0)
-            return LLVMInt64TypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "u8") == 0)
-            return LLVMInt8TypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "u16") == 0)
-            return LLVMInt16TypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "u32") == 0)
-            return LLVMInt32TypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "u64") == 0)
-            return LLVMInt64TypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "f32") == 0)
-            return LLVMFloatTypeInContext(codegen->context);
-        if (strcmp(type_node->str_value, "f64") == 0)
-            return LLVMDoubleTypeInContext(codegen->context);
+        llvm_type = LLVMStructCreateNamed(gen->context, type->composite.name);
+        cache_llvm_type(gen, type, llvm_type);
 
-        // unknown type, default to i32
-        codegen_error(codegen, "Unknown type");
-        return LLVMInt32TypeInContext(codegen->context);
-
-    case NODE_TYPE_POINTER:
-    {
-        LLVMTypeRef base_type = codegen_type(codegen, type_node->single);
-        return LLVMPointerType(base_type, 0);
-    }
-
-    case NODE_TYPE_ARRAY:
-    {
-        LLVMTypeRef element_type = codegen_type(codegen, type_node->binary.right);
-        // for now, treat all arrays as pointers
-        return LLVMPointerType(element_type, 0);
+        if (type->size > 0)
+        {
+            LLVMTypeRef array_type = LLVMArrayType(LLVMInt8TypeInContext(gen->context), type->size);
+            LLVMStructSetBody(llvm_type, &array_type, 1, 0);
+        }
+        return llvm_type;
     }
 
     default:
-        codegen_error(codegen, "Unsupported type");
-        return LLVMInt32TypeInContext(codegen->context);
+        return LLVMVoidTypeInContext(gen->context);
     }
+
+    if (llvm_type)
+    {
+        cache_llvm_type(gen, type, llvm_type);
+    }
+
+    return llvm_type;
 }
 
-// main code generation dispatch
-static LLVMValueRef codegen_node(CodeGen *codegen, Node *node)
+static CodegenValue codegen_literal(CodeGenerator *gen, Node *node)
 {
-    if (!node)
-        return NULL;
+    CodegenValue result = {0};
 
     switch (node->kind)
     {
-    case NODE_STMT_FUNCTION:
-        return codegen_function(codegen, node);
-
-    case NODE_STMT_DEF:
-        // type definitions - for now just ignore
-        return NULL;
-
-    case NODE_STMT_VAL:
-    case NODE_STMT_VAR:
-        // global variables - TODO
-        return NULL;
-
-    default:
-        // treat as expression
-        return codegen_expression(codegen, node);
-    }
-}
-
-// function generation
-static LLVMValueRef codegen_function(CodeGen *codegen, Node *func_node)
-{
-    if (func_node->kind != NODE_STMT_FUNCTION)
-    {
-        codegen_error(codegen, "Expected function node");
-        return NULL;
-    }
-
-    // get function name
-    const char *func_name = "unknown";
-    if (func_node->function.name && func_node->function.name->kind == NODE_IDENTIFIER)
-    {
-        func_name = func_node->function.name->str_value;
-    }
-
-    // create function type
-    LLVMTypeRef return_type = codegen_type(codegen, func_node->function.return_type);
-
-    // handle parameters
-    LLVMTypeRef *param_types = NULL;
-    unsigned     param_count = 0;
-
-    if (func_node->function.params)
-    {
-        param_count = node_list_count(func_node->function.params);
-        if (param_count > 0)
-        {
-            param_types = malloc(sizeof(LLVMTypeRef) * param_count);
-            for (unsigned i = 0; i < param_count; i++)
-            {
-                Node *param = func_node->function.params[i];
-                if (param && param->kind == NODE_STMT_VAL && param->decl.type)
-                {
-                    param_types[i] = codegen_type(codegen, param->decl.type);
-                }
-                else
-                {
-                    param_types[i] = LLVMInt32TypeInContext(codegen->context); // default
-                }
-            }
-        }
-    }
-
-    LLVMTypeRef func_type = LLVMFunctionType(return_type, param_types, param_count, func_node->function.is_variadic);
-
-    // create function
-    LLVMValueRef function = LLVMAddFunction(codegen->module, func_name, func_type);
-
-    // cleanup param_types
-    if (param_types)
-    {
-        free(param_types);
-    }
-
-    // create entry block
-    LLVMBasicBlockRef entry_block = LLVMAppendBasicBlockInContext(codegen->context, function, "entry");
-    LLVMPositionBuilderAtEnd(codegen->builder, entry_block);
-
-    // set current function
-    LLVMValueRef prev_function = codegen->current_function;
-    codegen->current_function  = function;
-
-    // push new scope for function parameters and local variables
-    push_scope(codegen);
-
-    // create local variables for parameters
-    if (func_node->function.params && param_count > 0)
-    {
-        for (unsigned i = 0; i < param_count; i++)
-        {
-            Node *param = func_node->function.params[i];
-            if (param && param->kind == NODE_STMT_VAL && param->decl.name && param->decl.name->kind == NODE_IDENTIFIER)
-            {
-                const char  *param_name  = param->decl.name->str_value;
-                LLVMValueRef param_value = LLVMGetParam(function, i);
-                LLVMSetValueName(param_value, param_name);
-
-                // add parameter to local scope
-                add_symbol(codegen, param_name, param_value, SYMBOL_PARAMETER);
-            }
-        }
-    }
-
-    // generate function body
-    bool has_terminator = false;
-    if (func_node->function.body)
-    {
-        codegen_statement(codegen, func_node->function.body);
-
-        // check if current block has a terminator
-        LLVMBasicBlockRef current_block = LLVMGetInsertBlock(codegen->builder);
-        if (current_block)
-        {
-            LLVMValueRef last_instr = LLVMGetLastInstruction(current_block);
-            if (last_instr && LLVMIsATerminatorInst(last_instr))
-            {
-                has_terminator = true;
-            }
-        }
-    }
-
-    // add return if no terminator was generated
-    if (!has_terminator)
-    {
-        if (return_type == LLVMVoidTypeInContext(codegen->context))
-        {
-            LLVMBuildRetVoid(codegen->builder);
-        }
-        else
-        {
-            // return zero for non-void functions without explicit return
-            LLVMValueRef zero = LLVMConstInt(return_type, 0, false);
-            LLVMBuildRet(codegen->builder, zero);
-        }
-    }
-
-    // pop function scope (removes parameters and local variables)
-    pop_scope(codegen);
-
-    // restore previous function
-    codegen->current_function = prev_function;
-
-    // add function to global scope
-    add_symbol(codegen, func_name, function, SYMBOL_FUNCTION);
-    return function;
-}
-
-// statement generation
-static void codegen_statement(CodeGen *codegen, Node *stmt_node)
-{
-    if (!stmt_node)
-        return;
-
-    switch (stmt_node->kind)
-    {
-    case NODE_BLOCK:
-        if (stmt_node->children)
-        {
-            for (size_t i = 0; i < node_list_count(stmt_node->children); i++)
-            {
-                Node *current = stmt_node->children[i];
-
-                // process the current statement
-                codegen_statement(codegen, current);
-
-                // if we just processed an if or or statement, check if the next statement is also an or
-                if (codegen->in_if_chain && (current->kind == NODE_STMT_IF || current->kind == NODE_STMT_OR))
-                {
-                    // look ahead to see if next statement is or
-                    size_t next_i     = i + 1;
-                    bool   next_is_or = false;
-
-                    if (next_i < node_list_count(stmt_node->children))
-                    {
-                        Node *next = stmt_node->children[next_i];
-                        if (next && next->kind == NODE_STMT_OR)
-                        {
-                            next_is_or = true;
-                        }
-                    }
-
-                    // if next statement is not or, end the if-chain
-                    if (!next_is_or)
-                    {
-                        end_if_chain(codegen);
-                    }
-                }
-            }
-        }
-        break;
-
-    case NODE_STMT_VAR:
-    case NODE_STMT_VAL:
-    {
-        // handle local variable declarations
-        if (!stmt_node->decl.name || stmt_node->decl.name->kind != NODE_IDENTIFIER)
-        {
-            codegen_error(codegen, "Invalid variable name");
-            return;
-        }
-
-        const char *var_name = stmt_node->decl.name->str_value;
-        LLVMTypeRef var_type = codegen_type(codegen, stmt_node->decl.type);
-
-        if (stmt_node->kind == NODE_STMT_VAL)
-        {
-            // handle const (val) variables
-            if (!stmt_node->decl.init)
-            {
-                codegen_error(codegen, "val declaration must have initializer");
-                return;
-            }
-
-            // evaluate the initializer
-            LLVMValueRef init_value = codegen_expression(codegen, stmt_node->decl.init);
-            if (!init_value)
-            {
-                return;
-            }
-
-            // for const variables, store the value directly in symbol table
-            add_symbol(codegen, var_name, init_value, SYMBOL_CONST);
-        }
-        else
-        {
-            // handle mutable (var) variables
-            // create alloca for the variable
-            LLVMValueRef alloca_inst = LLVMBuildAlloca(codegen->builder, var_type, var_name);
-
-            // if there's an initializer, store it
-            if (stmt_node->decl.init)
-            {
-                LLVMValueRef init_value = codegen_expression(codegen, stmt_node->decl.init);
-                if (init_value)
-                {
-                    LLVMBuildStore(codegen->builder, init_value, alloca_inst);
-                }
-            }
-
-            // add to symbol table as mutable variable
-            add_symbol(codegen, var_name, alloca_inst, SYMBOL_VARIABLE);
-        }
-    }
-    break;
-    case NODE_STMT_RETURN:
-    {
-        if (stmt_node->single)
-        {
-            LLVMValueRef return_val = codegen_expression(codegen, stmt_node->single);
-            LLVMBuildRet(codegen->builder, return_val);
-        }
-        else
-        {
-            LLVMBuildRetVoid(codegen->builder);
-        }
-    }
-    break;
-
-    case NODE_STMT_IF:
-    {
-        // evaluate condition
-        LLVMValueRef condition = codegen_expression(codegen, stmt_node->conditional.condition);
-        if (!condition)
-        {
-            return;
-        }
-
-        // get current function
-        LLVMValueRef function = codegen->current_function;
-        if (!function)
-        {
-            codegen_error(codegen, "If statement outside function");
-            return;
-        }
-
-        // create basic blocks
-        LLVMBasicBlockRef then_bb  = LLVMAppendBasicBlockInContext(codegen->context, function, "if.then");
-        LLVMBasicBlockRef else_bb  = LLVMAppendBasicBlockInContext(codegen->context, function, "if.else");
-        LLVMBasicBlockRef merge_bb = LLVMAppendBasicBlockInContext(codegen->context, function, "if.end");
-
-        // start if-chain tracking
-        codegen->if_chain_merge_block = merge_bb;
-        codegen->in_if_chain          = true;
-
-        // conditional branch
-        LLVMBuildCondBr(codegen->builder, condition, then_bb, else_bb);
-
-        // generate then block
-        LLVMPositionBuilderAtEnd(codegen->builder, then_bb);
-        codegen_statement(codegen, stmt_node->conditional.body);
-
-        // branch to merge if no terminator
-        LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(codegen->builder);
-        if (current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb))))
-        {
-            LLVMBuildBr(codegen->builder, merge_bb);
-        }
-
-        // position at else block for potential or statements
-        LLVMPositionBuilderAtEnd(codegen->builder, else_bb);
-    }
-    break;
-
-    case NODE_STMT_OR:
-    {
-        // get current function
-        LLVMValueRef function = codegen->current_function;
-        if (!function)
-        {
-            codegen_error(codegen, "Or statement outside function");
-            return;
-        }
-
-        // must be in if-chain
-        if (!codegen->in_if_chain)
-        {
-            codegen_error(codegen, "Or statement must follow if statement");
-            return;
-        }
-
-        if (stmt_node->conditional.condition)
-        {
-            // or with condition (else if)
-            LLVMValueRef condition = codegen_expression(codegen, stmt_node->conditional.condition);
-            if (!condition)
-            {
-                return;
-            }
-
-            // create blocks for this or clause
-            LLVMBasicBlockRef then_bb = LLVMAppendBasicBlockInContext(codegen->context, function, "or.then");
-            LLVMBasicBlockRef else_bb = LLVMAppendBasicBlockInContext(codegen->context, function, "or.else");
-
-            // conditional branch
-            LLVMBuildCondBr(codegen->builder, condition, then_bb, else_bb);
-
-            // generate then block
-            LLVMPositionBuilderAtEnd(codegen->builder, then_bb);
-            codegen_statement(codegen, stmt_node->conditional.body);
-
-            // branch to final merge if no terminator
-            LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(codegen->builder);
-            if (current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb))))
-            {
-                LLVMBuildBr(codegen->builder, codegen->if_chain_merge_block);
-            }
-
-            // position at else block for next or statement
-            LLVMPositionBuilderAtEnd(codegen->builder, else_bb);
-        }
-        else
-        {
-            // or without condition (else) - execute body directly
-            codegen_statement(codegen, stmt_node->conditional.body);
-
-            // branch to final merge if no terminator
-            LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(codegen->builder);
-            if (current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb))))
-            {
-                LLVMBuildBr(codegen->builder, codegen->if_chain_merge_block);
-            }
-
-            // end if-chain since unconditional or is final
-            codegen->in_if_chain = false;
-            LLVMPositionBuilderAtEnd(codegen->builder, codegen->if_chain_merge_block);
-            codegen->if_chain_merge_block = NULL;
-        }
-    }
-    break;
-
-    case NODE_STMT_EXPRESSION:
-        codegen_expression(codegen, stmt_node->single);
-        break;
-
-    case NODE_STMT_FOR:
-    {
-        // get current function
-        LLVMValueRef function = codegen->current_function;
-        if (!function)
-        {
-            codegen_error(codegen, "For statement outside function");
-            return;
-        }
-
-        // create basic blocks
-        LLVMBasicBlockRef loop_cond = LLVMAppendBasicBlockInContext(codegen->context, function, "for.cond");
-        LLVMBasicBlockRef loop_body = LLVMAppendBasicBlockInContext(codegen->context, function, "for.body");
-        LLVMBasicBlockRef loop_end  = LLVMAppendBasicBlockInContext(codegen->context, function, "for.end");
-
-        // save previous loop context
-        LLVMBasicBlockRef prev_loop_header = codegen->current_loop_header;
-        LLVMBasicBlockRef prev_loop_exit   = codegen->current_loop_exit;
-
-        // set new loop context
-        codegen->current_loop_header = loop_cond;
-        codegen->current_loop_exit   = loop_end;
-
-        // branch to condition check
-        LLVMBuildBr(codegen->builder, loop_cond);
-
-        // generate condition block
-        LLVMPositionBuilderAtEnd(codegen->builder, loop_cond);
-
-        if (stmt_node->conditional.condition)
-        {
-            // conditional loop
-            LLVMValueRef condition = codegen_expression(codegen, stmt_node->conditional.condition);
-            if (!condition)
-            {
-                // restore previous context and return
-                codegen->current_loop_header = prev_loop_header;
-                codegen->current_loop_exit   = prev_loop_exit;
-                return;
-            }
-            LLVMBuildCondBr(codegen->builder, condition, loop_body, loop_end);
-        }
-        else
-        {
-            // infinite loop
-            LLVMBuildBr(codegen->builder, loop_body);
-        }
-
-        // generate loop body
-        LLVMPositionBuilderAtEnd(codegen->builder, loop_body);
-        codegen_statement(codegen, stmt_node->conditional.body);
-
-        // branch back to condition if no terminator
-        LLVMBasicBlockRef current_bb = LLVMGetInsertBlock(codegen->builder);
-        if (current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb))))
-        {
-            LLVMBuildBr(codegen->builder, loop_cond);
-        }
-
-        // restore previous loop context
-        codegen->current_loop_header = prev_loop_header;
-        codegen->current_loop_exit   = prev_loop_exit;
-
-        // continue with loop end
-        LLVMPositionBuilderAtEnd(codegen->builder, loop_end);
-    }
-    break;
-
-    default:
-        // ignore other statements for now
-        break;
-    }
-}
-
-// expression generation
-static LLVMValueRef codegen_expression(CodeGen *codegen, Node *expr_node)
-{
-    if (!expr_node)
-        return NULL;
-
-    switch (expr_node->kind)
-    {
     case NODE_LIT_INT:
-        return LLVMConstInt(LLVMInt32TypeInContext(codegen->context), expr_node->int_value, false);
+    {
+        Type *type   = type_builtin("i32");
+        result.type  = type;
+        result.value = LLVMConstInt(get_llvm_type(gen, type), node->int_value, type->is_signed);
+        break;
+    }
 
     case NODE_LIT_FLOAT:
-        return LLVMConstReal(LLVMDoubleTypeInContext(codegen->context), expr_node->float_value);
-    case NODE_IDENTIFIER:
     {
-        LLVMValueRef symbol = get_symbol(codegen, expr_node->str_value);
-        if (symbol)
-        {
-            SymbolKind kind = get_symbol_kind(codegen, expr_node->str_value);
-
-            switch (kind)
-            {
-            case SYMBOL_CONST:
-            case SYMBOL_PARAMETER:
-            case SYMBOL_FUNCTION:
-                // const values, parameters, and functions - return directly
-                return symbol;
-
-            case SYMBOL_VARIABLE:
-                // mutable variable (alloca) - load its value
-                return LLVMBuildLoad2(codegen->builder, LLVMGetAllocatedType(symbol), symbol, expr_node->str_value);
-            }
-        }
-        codegen_error(codegen, "Undefined symbol");
-        return NULL;
+        Type *type   = type_builtin("f64");
+        result.type  = type;
+        result.value = LLVMConstReal(get_llvm_type(gen, type), node->float_value);
+        break;
     }
 
-    case NODE_EXPR_BINARY:
+    case NODE_LIT_CHAR:
     {
-        // handle assignment specially since left side should not be evaluated as expression
-        if (expr_node->binary.op == OP_ASSIGN)
-        {
-            // assignment requires special handling - left side must be an lvalue
-            if (expr_node->binary.left->kind != NODE_IDENTIFIER)
-            {
-                codegen_error(codegen, "Left side of assignment must be a variable");
-                return NULL;
-            }
-
-            const char  *var_name   = expr_node->binary.left->str_value;
-            LLVMValueRef var_alloca = get_symbol(codegen, var_name);
-
-            if (!var_alloca)
-            {
-                codegen_error(codegen, "Undefined variable in assignment");
-                return NULL;
-            }
-
-            SymbolKind kind = get_symbol_kind(codegen, var_name);
-            if (kind != SYMBOL_VARIABLE)
-            {
-                codegen_error(codegen, "Cannot assign to const variable or function");
-                return NULL;
-            }
-
-            // evaluate right side
-            LLVMValueRef value = codegen_expression(codegen, expr_node->binary.right);
-            if (!value)
-            {
-                return NULL;
-            }
-
-            // store the value
-            LLVMBuildStore(codegen->builder, value, var_alloca);
-
-            // return the assigned value
-            return value;
-        }
-
-        // handle other binary operators
-        LLVMValueRef left  = codegen_expression(codegen, expr_node->binary.left);
-        LLVMValueRef right = codegen_expression(codegen, expr_node->binary.right);
-
-        if (!left || !right)
-        {
-            return NULL;
-        }
-
-        switch (expr_node->binary.op)
-        {
-        case OP_ADD:
-        {
-            LLVMTypeRef left_type = LLVMTypeOf(left);
-            if (is_float_type(left_type))
-            {
-                return LLVMBuildFAdd(codegen->builder, left, right, "fadd_tmp");
-            }
-            else
-            {
-                return LLVMBuildAdd(codegen->builder, left, right, "add_tmp");
-            }
-        }
-        case OP_SUB:
-        {
-            LLVMTypeRef left_type = LLVMTypeOf(left);
-            if (is_float_type(left_type))
-            {
-                return LLVMBuildFSub(codegen->builder, left, right, "fsub_tmp");
-            }
-            else
-            {
-                return LLVMBuildSub(codegen->builder, left, right, "sub_tmp");
-            }
-        }
-        case OP_MUL:
-        {
-            LLVMTypeRef left_type = LLVMTypeOf(left);
-            if (is_float_type(left_type))
-            {
-                return LLVMBuildFMul(codegen->builder, left, right, "fmul_tmp");
-            }
-            else
-            {
-                return LLVMBuildMul(codegen->builder, left, right, "mul_tmp");
-            }
-        }
-        case OP_DIV:
-        {
-            LLVMTypeRef left_type = LLVMTypeOf(left);
-            if (is_float_type(left_type))
-            {
-                return LLVMBuildFDiv(codegen->builder, left, right, "fdiv_tmp");
-            }
-            else
-            {
-                // TODO: need to track signedness for udiv vs sdiv
-                return LLVMBuildSDiv(codegen->builder, left, right, "div_tmp");
-            }
-        }
-        case OP_MOD:
-        {
-            LLVMTypeRef left_type = LLVMTypeOf(left);
-            if (is_float_type(left_type))
-            {
-                return LLVMBuildFRem(codegen->builder, left, right, "fmod_tmp");
-            }
-            else
-            {
-                // TODO: need to track signedness for urem vs srem
-                return LLVMBuildSRem(codegen->builder, left, right, "mod_tmp");
-            }
-        }
-
-        // bitwise operators
-        case OP_BITWISE_AND:
-            return LLVMBuildAnd(codegen->builder, left, right, "and_tmp");
-        case OP_BITWISE_OR:
-            return LLVMBuildOr(codegen->builder, left, right, "or_tmp");
-        case OP_BITWISE_XOR:
-            return LLVMBuildXor(codegen->builder, left, right, "xor_tmp");
-        case OP_BITWISE_SHL:
-            return LLVMBuildShl(codegen->builder, left, right, "shl_tmp");
-        case OP_BITWISE_SHR:
-            return LLVMBuildAShr(codegen->builder, left, right, "shr_tmp");
-
-        // logical operators
-        case OP_LOGICAL_AND:
-            return LLVMBuildAnd(codegen->builder, left, right, "land_tmp");
-        case OP_LOGICAL_OR:
-            return LLVMBuildOr(codegen->builder, left, right, "lor_tmp");
-
-        // comparison operators
-        case OP_EQUAL:
-            return LLVMBuildICmp(codegen->builder, LLVMIntEQ, left, right, "eq_tmp");
-        case OP_NOT_EQUAL:
-            return LLVMBuildICmp(codegen->builder, LLVMIntNE, left, right, "ne_tmp");
-        case OP_LESS:
-            return LLVMBuildICmp(codegen->builder, LLVMIntSLT, left, right, "lt_tmp");
-        case OP_GREATER:
-            return LLVMBuildICmp(codegen->builder, LLVMIntSGT, left, right, "gt_tmp");
-        case OP_LESS_EQUAL:
-            return LLVMBuildICmp(codegen->builder, LLVMIntSLE, left, right, "le_tmp");
-        case OP_GREATER_EQUAL:
-            return LLVMBuildICmp(codegen->builder, LLVMIntSGE, left, right, "ge_tmp");
-
-        default:
-            codegen_error(codegen, "Unsupported binary operator");
-            return NULL;
-        }
+        Type *type   = type_builtin("u8");
+        result.type  = type;
+        result.value = LLVMConstInt(get_llvm_type(gen, type), node->char_value, 0);
+        break;
     }
 
-    case NODE_EXPR_CALL:
+    case NODE_LIT_STRING:
     {
-        // get function name
-        if (!expr_node->call.target || expr_node->call.target->kind != NODE_IDENTIFIER)
+        result.value = LLVMBuildGlobalStringPtr(gen->builder, node->str_value, ".str");
+        result.type  = type_pointer(type_builtin("u8"));
+        break;
+    }
+
+    default:
+        fprintf(stderr, "error: unsupported literal node kind\n");
+        break;
+    }
+
+    return result;
+}
+
+static CodegenValue codegen_binary_op(CodeGenerator *gen, Node *node)
+{
+    CodegenValue left   = codegen_expression(gen, node->binary.left);
+    CodegenValue right  = codegen_expression(gen, node->binary.right);
+    CodegenValue result = {0};
+
+    // handle assignment specially - left side stays as lvalue
+    if (node->binary.op == OP_ASSIGN)
+    {
+        if (!left.is_lvalue)
         {
-            codegen_error(codegen, "Invalid function call target");
-            return NULL;
+            fprintf(stderr, "error: assignment requires lvalue\n");
+            return result;
         }
-
-        const char  *func_name = expr_node->call.target->str_value;
-        LLVMValueRef function  = get_symbol(codegen, func_name);
-
-        if (!function)
+        if (right.is_lvalue)
         {
-            codegen_error(codegen, "Undefined function");
-            return NULL;
+            right.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, right.type), right.value, "");
         }
-
-        // build arguments
-        LLVMValueRef *args      = NULL;
-        unsigned      arg_count = 0;
-
-        if (expr_node->call.args)
-        {
-            arg_count = node_list_count(expr_node->call.args);
-            if (arg_count > 0)
-            {
-                args = malloc(sizeof(LLVMValueRef) * arg_count);
-                for (unsigned i = 0; i < arg_count; i++)
-                {
-                    args[i] = codegen_expression(codegen, expr_node->call.args[i]);
-                    if (!args[i])
-                    {
-                        free(args);
-                        return NULL;
-                    }
-                }
-            }
-        }
-
-        // make the call
-        LLVMValueRef result = LLVMBuildCall2(codegen->builder, LLVMGlobalGetValueType(function), function, args, arg_count, "call_tmp");
-
-        if (args)
-        {
-            free(args);
-        }
-
+        LLVMBuildStore(gen->builder, right.value, left.value);
+        result = right;
         return result;
     }
 
-    case NODE_EXPR_UNARY:
+    // for other operations, load both operands if they reference memory
+    if (left.value && LLVMGetTypeKind(LLVMTypeOf(left.value)) == LLVMPointerTypeKind)
     {
-        LLVMValueRef operand = codegen_expression(codegen, expr_node->unary.target);
-        if (!operand)
-        {
-            return NULL;
-        }
-
-        switch (expr_node->unary.op)
-        {
-        case OP_LOGICAL_NOT:
-        {
-            // logical not - compare with zero
-            LLVMValueRef zero = LLVMConstInt(LLVMTypeOf(operand), 0, false);
-            return LLVMBuildICmp(codegen->builder, LLVMIntEQ, operand, zero, "not_tmp");
-        }
-        case OP_BITWISE_NOT:
-            return LLVMBuildNot(codegen->builder, operand, "bnot_tmp");
-        case OP_SUB:
-            // unary minus
-            return LLVMBuildNeg(codegen->builder, operand, "neg_tmp");
-        case OP_ADD:
-            // unary plus - no-op
-            return operand;
-        default:
-            codegen_error(codegen, "Unsupported unary operator");
-            return NULL;
-        }
+        left.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, left.type), left.value, "");
+    }
+    if (right.value && LLVMGetTypeKind(LLVMTypeOf(right.value)) == LLVMPointerTypeKind)
+    {
+        right.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, right.type), right.value, "");
     }
 
-    default:
-        codegen_error(codegen, "Unsupported expression");
-        return NULL;
-    }
-}
+    bool is_float  = left.type->kind == TYPE_FLOAT;
+    bool is_signed = left.type->is_signed;
 
-// helper function to end an if-chain
-static void end_if_chain(CodeGen *codegen)
-{
-    if (codegen->in_if_chain && codegen->if_chain_merge_block)
+    switch (node->binary.op)
     {
-        LLVMBasicBlockRef merge_bb = codegen->if_chain_merge_block;
-
-        // check if current block would branch to merge
-        LLVMBasicBlockRef current_bb   = LLVMGetInsertBlock(codegen->builder);
-        bool              needs_branch = current_bb && (!LLVMGetLastInstruction(current_bb) || !LLVMIsATerminatorInst(LLVMGetLastInstruction(current_bb)));
-
-        // check if merge block has any predecessors by checking for branches to it
-        LLVMValueRef merge_value      = LLVMBasicBlockAsValue(merge_bb);
-        LLVMUseRef   first_use        = LLVMGetFirstUse(merge_value);
-        bool         has_predecessors = (first_use != NULL) || needs_branch;
-
-        if (!has_predecessors)
+    case OP_ADD:
+        if (left.type->kind == TYPE_POINTER && right.type->kind == TYPE_INT)
         {
-            // no predecessors - delete the unreachable merge block
-            LLVMDeleteBasicBlock(merge_bb);
+            result.value = LLVMBuildGEP2(gen->builder, get_llvm_type(gen, left.type->pointer.base), left.value, &right.value, 1, "");
+            result.type  = left.type;
+        }
+        else if (is_float)
+        {
+            result.value = LLVMBuildFAdd(gen->builder, left.value, right.value, "");
+            result.type  = left.type;
         }
         else
         {
-            // has predecessors - branch from current block if needed
-            if (needs_branch)
-            {
-                LLVMBuildBr(codegen->builder, merge_bb);
-            }
+            result.value = LLVMBuildAdd(gen->builder, left.value, right.value, "");
+            result.type  = left.type;
+        }
+        break;
 
-            // position at merge block
-            LLVMPositionBuilderAtEnd(codegen->builder, merge_bb);
+    case OP_SUB:
+        if (is_float)
+        {
+            result.value = LLVMBuildFSub(gen->builder, left.value, right.value, "");
+        }
+        else
+        {
+            result.value = LLVMBuildSub(gen->builder, left.value, right.value, "");
+        }
+        result.type = left.type;
+        break;
+
+    case OP_MUL:
+        if (is_float)
+        {
+            result.value = LLVMBuildFMul(gen->builder, left.value, right.value, "");
+        }
+        else
+        {
+            result.value = LLVMBuildMul(gen->builder, left.value, right.value, "");
+        }
+        result.type = left.type;
+        break;
+
+    case OP_DIV:
+        if (is_float)
+        {
+            result.value = LLVMBuildFDiv(gen->builder, left.value, right.value, "");
+        }
+        else if (is_signed)
+        {
+            result.value = LLVMBuildSDiv(gen->builder, left.value, right.value, "");
+        }
+        else
+        {
+            result.value = LLVMBuildUDiv(gen->builder, left.value, right.value, "");
+        }
+        result.type = left.type;
+        break;
+
+    case OP_GREATER:
+        if (is_float)
+        {
+            result.value = LLVMBuildFCmp(gen->builder, LLVMRealOGT, left.value, right.value, "");
+        }
+        else if (is_signed)
+        {
+            result.value = LLVMBuildICmp(gen->builder, LLVMIntSGT, left.value, right.value, "");
+        }
+        else
+        {
+            result.value = LLVMBuildICmp(gen->builder, LLVMIntUGT, left.value, right.value, "");
+        }
+        result.type = type_builtin("u8");
+        break;
+
+    case OP_BITWISE_AND:
+        result.value = LLVMBuildAnd(gen->builder, left.value, right.value, "");
+        result.type  = left.type;
+        break;
+
+    case OP_BITWISE_OR:
+        result.value = LLVMBuildOr(gen->builder, left.value, right.value, "");
+        result.type  = left.type;
+        break;
+
+    default:
+        fprintf(stderr, "error: unsupported binary operator\n");
+        break;
+    }
+
+    return result;
+}
+
+static CodegenValue codegen_expression(CodeGenerator *gen, Node *node)
+{
+    CodegenValue result = {0};
+
+    switch (node->kind)
+    {
+    case NODE_LIT_INT:
+    case NODE_LIT_FLOAT:
+    case NODE_LIT_CHAR:
+    case NODE_LIT_STRING:
+        return codegen_literal(gen, node);
+
+    case NODE_IDENTIFIER:
+    {
+        Symbol *sym = NULL;
+
+        // first check current function scope
+        if (gen->current_scope)
+        {
+            sym = scope_lookup((Scope *)gen->current_scope, node->str_value);
         }
 
-        // reset state
-        codegen->in_if_chain          = false;
-        codegen->if_chain_merge_block = NULL;
+        // fallback to global scope
+        if (!sym)
+        {
+            sym = scope_lookup(gen->analyzer->global, node->str_value);
+        }
+
+        if (!sym)
+        {
+            fprintf(stderr, "error: undefined identifier '%s'\n", node->str_value);
+            return result;
+        }
+
+        LLVMValueRef value = lookup_value(gen, sym);
+        if (!value)
+        {
+            fprintf(stderr, "error: no value for symbol '%s'\n", node->str_value);
+            return result;
+        }
+
+        result.value     = value;
+        result.type      = sym->type;
+        result.is_lvalue = (sym->kind == SYMBOL_VARIABLE);
+        break;
+    }
+
+    case NODE_EXPR_BINARY:
+        return codegen_binary_op(gen, node);
+
+    case NODE_EXPR_INDEX:
+    {
+        CodegenValue array = codegen_expression(gen, node->binary.left);
+        CodegenValue index = codegen_expression(gen, node->binary.right);
+
+        if (index.is_lvalue)
+        {
+            index.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, index.type), index.value, "");
+        }
+
+        if (array.type->kind == TYPE_ARRAY)
+        {
+            LLVMValueRef indices[] = {LLVMConstInt(LLVMInt64TypeInContext(gen->context), 0, 0), index.value};
+            result.value           = LLVMBuildGEP2(gen->builder, get_llvm_type(gen, array.type), array.value, indices, 2, "");
+            result.type            = array.type->array.element;
+        }
+        else if (array.type->kind == TYPE_POINTER)
+        {
+            if (array.is_lvalue)
+            {
+                array.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, array.type), array.value, "");
+            }
+            result.value = LLVMBuildGEP2(gen->builder, get_llvm_type(gen, array.type->pointer.base), array.value, &index.value, 1, "");
+            result.type  = array.type->pointer.base;
+        }
+        result.is_lvalue = true;
+        break;
+    }
+
+    case NODE_EXPR_MEMBER:
+    {
+        CodegenValue struct_val  = codegen_expression(gen, node->binary.left);
+        char        *member_name = node->binary.right->str_value;
+
+        size_t  field_index = 0;
+        Symbol *field       = NULL;
+        for (size_t i = 0; struct_val.type->composite.fields[i]; i++)
+        {
+            if (strcmp(struct_val.type->composite.fields[i]->name, member_name) == 0)
+            {
+                field       = struct_val.type->composite.fields[i];
+                field_index = i;
+                break;
+            }
+        }
+
+        if (!field)
+        {
+            fprintf(stderr, "error: no member '%s'\n", member_name);
+            return result;
+        }
+
+        if (struct_val.type->kind == TYPE_STRUCT)
+        {
+            result.value = LLVMBuildStructGEP2(gen->builder, get_llvm_type(gen, struct_val.type), struct_val.value, field_index, "");
+        }
+        else if (struct_val.type->kind == TYPE_UNION)
+        {
+            LLVMTypeRef field_ptr_type = LLVMPointerType(get_llvm_type(gen, field->type), 0);
+            result.value               = LLVMBuildBitCast(gen->builder, struct_val.value, field_ptr_type, "");
+        }
+
+        result.type      = field->type;
+        result.is_lvalue = true;
+        break;
+    }
+
+    case NODE_EXPR_CAST:
+    {
+        CodegenValue expr        = codegen_expression(gen, node->binary.left);
+        Type        *target_type = node->binary.right->type;
+
+        if (!target_type)
+        {
+            fprintf(stderr, "error: cast node missing type information\n");
+            return result;
+        }
+
+        if (expr.is_lvalue)
+        {
+            expr.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, expr.type), expr.value, "");
+        }
+
+        result.value = LLVMBuildBitCast(gen->builder, expr.value, get_llvm_type(gen, target_type), "");
+        result.type  = target_type;
+        break;
+    }
+
+    default:
+        fprintf(stderr, "error: unsupported expression node kind: %d\n", node->kind);
+        break;
+    }
+
+    return result;
+}
+
+static bool codegen_var_decl(CodeGenerator *gen, Node *node)
+{
+    char *name = node->decl.name->str_value;
+
+    Symbol *sym = NULL;
+
+    // first check current function scope
+    if (gen->current_scope)
+    {
+        sym = scope_lookup((Scope *)gen->current_scope, name);
+    }
+
+    // fallback to global scope
+    if (!sym)
+    {
+        sym = scope_lookup(gen->analyzer->global, name);
+    }
+
+    if (!sym)
+        return false;
+
+    Type *type = sym->type;
+
+    LLVMValueRef alloca = LLVMBuildAlloca(gen->builder, get_llvm_type(gen, type), name);
+    register_value(gen, sym, alloca);
+
+    if (node->decl.init)
+    {
+        CodegenValue init = codegen_expression(gen, node->decl.init);
+        if (init.is_lvalue)
+        {
+            init.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, init.type), init.value, "");
+        }
+        LLVMBuildStore(gen->builder, init.value, alloca);
+    }
+
+    return true;
+}
+
+static bool codegen_function(CodeGenerator *gen, Node *node)
+{
+    char   *name = node->function.name->str_value;
+    Symbol *sym  = scope_lookup(gen->analyzer->global, name);
+    if (!sym)
+        return false;
+
+    Type       *func_type      = sym->type;
+    LLVMTypeRef llvm_func_type = get_llvm_type(gen, func_type);
+
+    LLVMValueRef func = LLVMGetNamedFunction(gen->module, name);
+    if (!func)
+    {
+        func = LLVMAddFunction(gen->module, name, llvm_func_type);
+    }
+
+    register_value(gen, sym, func);
+
+    if (sym->is_external || !node->function.body)
+    {
+        return true;
+    }
+
+    LLVMBasicBlockRef entry = LLVMAppendBasicBlock(func, "entry");
+    LLVMPositionBuilderAtEnd(gen->builder, entry);
+
+    LLVMValueRef old_func  = gen->current_function;
+    void        *old_scope = gen->current_scope;
+    gen->current_function  = func;
+    gen->current_scope     = node->function.scope;
+
+    if (node->function.params && node->function.scope)
+    {
+        Scope *func_scope = (Scope *)node->function.scope;
+        for (size_t i = 0; node->function.params[i]; i++)
+        {
+            Node   *param      = node->function.params[i];
+            char   *param_name = param->decl.name->str_value;
+            Symbol *param_sym  = scope_lookup(func_scope, param_name);
+
+            if (param_sym)
+            {
+                LLVMValueRef param_value  = LLVMGetParam(func, i);
+                LLVMValueRef param_alloca = LLVMBuildAlloca(gen->builder, get_llvm_type(gen, param_sym->type), param_name);
+                LLVMBuildStore(gen->builder, param_value, param_alloca);
+                register_value(gen, param_sym, param_alloca);
+            }
+        }
+    }
+
+    codegen_node(gen, node->function.body);
+
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(gen->builder)))
+    {
+        if (func_type->function.return_type->kind == TYPE_VOID)
+        {
+            LLVMBuildRetVoid(gen->builder);
+        }
+        else
+        {
+            LLVMBuildRet(gen->builder, LLVMConstNull(get_llvm_type(gen, func_type->function.return_type)));
+        }
+    }
+
+    gen->current_function = old_func;
+    gen->current_scope    = old_scope;
+    return true;
+}
+
+static bool codegen_if_or(CodeGenerator *gen, Node *node)
+{
+    LLVMBasicBlockRef then_block = LLVMAppendBasicBlock(gen->current_function, "then");
+    LLVMBasicBlockRef else_block = LLVMAppendBasicBlock(gen->current_function, "else");
+    LLVMBasicBlockRef end_block  = LLVMAppendBasicBlock(gen->current_function, "end");
+
+    if (node->conditional.condition)
+    {
+        CodegenValue cond = codegen_expression(gen, node->conditional.condition);
+        if (cond.is_lvalue)
+        {
+            cond.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, cond.type), cond.value, "");
+        }
+
+        if (cond.type->kind != TYPE_INT || cond.type->size != 1)
+        {
+            cond.value = LLVMBuildICmp(gen->builder, LLVMIntNE, cond.value, LLVMConstNull(get_llvm_type(gen, cond.type)), "");
+        }
+
+        LLVMBuildCondBr(gen->builder, cond.value, then_block, else_block);
+    }
+    else
+    {
+        LLVMBuildBr(gen->builder, then_block);
+    }
+
+    LLVMPositionBuilderAtEnd(gen->builder, then_block);
+    codegen_node(gen, node->conditional.body);
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(gen->builder)))
+    {
+        LLVMBuildBr(gen->builder, end_block);
+    }
+
+    LLVMPositionBuilderAtEnd(gen->builder, else_block);
+    if (node->conditional.else_body)
+    {
+        codegen_node(gen, node->conditional.else_body);
+    }
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(gen->builder)))
+    {
+        LLVMBuildBr(gen->builder, end_block);
+    }
+
+    LLVMPositionBuilderAtEnd(gen->builder, end_block);
+    return true;
+}
+
+static bool codegen_statement(CodeGenerator *gen, Node *node)
+{
+    switch (node->kind)
+    {
+    case NODE_STMT_VAL:
+    case NODE_STMT_VAR:
+        return codegen_var_decl(gen, node);
+
+    case NODE_STMT_FUNCTION:
+        return codegen_function(gen, node);
+
+    case NODE_STMT_IF:
+        return codegen_if_or(gen, node);
+
+    case NODE_STMT_RETURN:
+        if (node->single)
+        {
+            CodegenValue ret_val = codegen_expression(gen, node->single);
+            if (ret_val.is_lvalue)
+            {
+                ret_val.value = LLVMBuildLoad2(gen->builder, get_llvm_type(gen, ret_val.type), ret_val.value, "");
+            }
+            LLVMBuildRet(gen->builder, ret_val.value);
+        }
+        else
+        {
+            LLVMBuildRetVoid(gen->builder);
+        }
+        return true;
+
+    case NODE_STMT_EXPRESSION:
+        codegen_expression(gen, node->single);
+        return true;
+
+    default:
+        return true;
     }
 }
 
-// helper function to check if a type is floating point
-bool is_float_type(LLVMTypeRef type)
+static bool codegen_node(CodeGenerator *gen, Node *node)
 {
-    LLVMTypeKind kind = LLVMGetTypeKind(type);
-    return kind == LLVMFloatTypeKind || kind == LLVMDoubleTypeKind;
+    if (!node)
+        return true;
+
+    switch (node->kind)
+    {
+    case NODE_PROGRAM:
+    case NODE_BLOCK:
+        if (node->children)
+        {
+            for (size_t i = 0; node->children[i]; i++)
+            {
+                if (!codegen_node(gen, node->children[i]))
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+
+    default:
+        return codegen_statement(gen, node);
+    }
+}
+
+bool codegen_generate(CodeGenerator *gen)
+{
+    if (!gen || !gen->analyzer || !gen->analyzer->ast)
+        return false;
+
+    return codegen_node(gen, gen->analyzer->ast);
+}
+
+bool codegen_emit_ir(CodeGenerator *gen, const char *filename)
+{
+    char *error = NULL;
+    if (LLVMPrintModuleToFile(gen->module, filename, &error))
+    {
+        fprintf(stderr, "error: failed to write IR: %s\n", error);
+        LLVMDisposeMessage(error);
+        return false;
+    }
+    return true;
+}
+
+bool codegen_emit_object(CodeGenerator *gen, const char *filename)
+{
+    char *error  = NULL;
+    char *triple = LLVMGetDefaultTargetTriple();
+
+    LLVMTargetRef target;
+    if (LLVMGetTargetFromTriple(triple, &target, &error))
+    {
+        fprintf(stderr, "error: failed to get target: %s\n", error);
+        LLVMDisposeMessage(error);
+        return false;
+    }
+
+    LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, "generic", "", LLVMCodeGenLevelDefault, LLVMRelocDefault, LLVMCodeModelDefault);
+
+    if (LLVMTargetMachineEmitToFile(machine, gen->module, (char *)filename, LLVMObjectFile, &error))
+    {
+        fprintf(stderr, "error: failed to emit object: %s\n", error);
+        LLVMDisposeMessage(error);
+        return false;
+    }
+
+    LLVMDisposeTargetMachine(machine);
+    return true;
 }

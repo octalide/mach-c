@@ -9,6 +9,7 @@
 
 // forward declaration
 typedef struct Node Node;
+typedef struct Type Type;
 
 typedef enum NodeKind
 {
@@ -66,21 +67,18 @@ struct Node
 {
     NodeKind kind;
     Token   *token;
+    Type    *type;
 
-    // flexible data based on node type
     union
     {
-        // basic values
-        char              *str_value;   // for identifiers, strings
-        unsigned long long int_value;   // for integers
-        double             float_value; // for floats
-        char               char_value;  // for characters
+        char              *str_value;
+        unsigned long long int_value;
+        double             float_value;
+        char               char_value;
 
-        // node references
-        Node  *single;   // single child node
-        Node **children; // array of child nodes (null-terminated)
+        Node  *single;
+        Node **children;
 
-        // specific structures for complex nodes
         struct
         {
             char *message;
@@ -119,12 +117,14 @@ struct Node
             Node  *return_type;
             Node  *body;
             bool   is_variadic;
+            void  *scope; // Scope * for semantic analysis
         } function;
 
         struct
         {
             Node *condition;
             Node *body;
+            Node *else_body; // for if-else constructs
         } conditional;
 
         struct

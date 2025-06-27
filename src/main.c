@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void print_usage(const char *program_name)
 {
@@ -41,16 +42,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // check if file exists
-    if (!file_exists((char *)filename))
-    {
-        fprintf(stderr, "Error: File '%s' does not exist\n", filename);
-        return 1;
-    }
-
-    // read the file
+    // read source file
     char *source = read_file((char *)filename);
-    if (source == NULL)
+    if (!source)
     {
         fprintf(stderr, "Error: Could not read file '%s'\n", filename);
         return 1;
@@ -67,187 +61,133 @@ int main(int argc, char **argv)
     // parse the program
     Node *program = parser_parse_program(&parser);
 
-    if (parser.has_error)
+    if (parser.has_error || !program)
     {
         fprintf(stderr, "Parse error occurred\n");
-        free(source);
         parser_dnit(&parser);
         lexer_dnit(&lexer);
+        free(source);
         return 1;
     }
 
-    if (program == NULL)
-    {
-        fprintf(stderr, "Failed to parse program\n");
-        free(source);
-        parser_dnit(&parser);
-        lexer_dnit(&lexer);
-        return 1;
-    }
-
-    // handle command
+    // handle parse command
     if (strcmp(command, "parse") == 0)
     {
-        // output AST
         printf("AST for %s:\n", filename);
         print_node(program, 0);
+        node_dnit(program);
+        free(program);
+        parser_dnit(&parser);
+        lexer_dnit(&lexer);
+        free(source);
+        return 0;
     }
-    else if (strcmp(command, "compile") == 0 || strcmp(command, "emit-ir") == 0 || strcmp(command, "build") == 0)
+
+    // semantic analysis required for other commands
+    SemanticAnalyzer analyzer;
+    semantic_init(&analyzer, program);
+
+    if (!semantic_analyze(&analyzer))
     {
-        // initialize semantic analyzer
-        SemanticAnalyzer analyzer;
-        if (!semantic_init(&analyzer))
-        {
-            fprintf(stderr, "Failed to initialize semantic analyzer\n");
-            node_dnit(program);
-            free(program);
-            parser_dnit(&parser);
-            lexer_dnit(&lexer);
-            free(source);
-            return 1;
-        }
+        fprintf(stderr, "Semantic analysis failed\n");
+        semantic_dnit(&analyzer);
+        node_dnit(program);
+        free(program);
+        parser_dnit(&parser);
+        lexer_dnit(&lexer);
+        free(source);
+        return 1;
+    }
 
-        // perform semantic analysis
-        if (!semantic_analyze(&analyzer, program))
-        {
-            fprintf(stderr, "Semantic analysis failed\n");
-            if (analyzer.error_buffer_pos > 0)
-            {
-                fprintf(stderr, "%s", analyzer.error_messages);
-            }
-            semantic_dnit(&analyzer);
-            node_dnit(program);
-            free(program);
-            parser_dnit(&parser);
-            lexer_dnit(&lexer);
-            free(source);
-            return 1;
-        }
+    // initialize code generator
+    CodeGenerator codegen;
+    codegen_init(&codegen, &analyzer, filename);
 
-        printf("Semantic analysis passed\n");
-
-        // initialize codegen
-        CodeGen codegen;
-        if (!codegen_init(&codegen, "mach_program"))
-        {
-            fprintf(stderr, "Failed to initialize code generator\n");
-            semantic_dnit(&analyzer);
-            node_dnit(program);
-            free(program);
-            parser_dnit(&parser);
-            lexer_dnit(&lexer);
-            free(source);
-            return 1;
-        }
-
-        // generate code
-        if (!codegen_generate(&codegen, program))
-        {
-            fprintf(stderr, "Code generation failed\n");
-            codegen_dnit(&codegen);
-            semantic_dnit(&analyzer);
-            semantic_dnit(&analyzer);
-            node_dnit(program);
-            free(program);
-            parser_dnit(&parser);
-            lexer_dnit(&lexer);
-            free(source);
-            return 1;
-        }
-
-        // output based on command
-        if (strcmp(command, "compile") == 0)
-        {
-            const char *obj_file = output ? output : "output.o";
-            if (!codegen_write_object(&codegen, obj_file))
-            {
-                fprintf(stderr, "Failed to write object file\n");
-                codegen_dnit(&codegen);
-                semantic_dnit(&analyzer);
-                semantic_dnit(&analyzer);
-                node_dnit(program);
-                free(program);
-                parser_dnit(&parser);
-                lexer_dnit(&lexer);
-                free(source);
-                return 1;
-            }
-            printf("Object file written to: %s\n", obj_file);
-        }
-        else if (strcmp(command, "emit-ir") == 0)
-        {
-            const char *ir_file = output ? output : "output.ll";
-            if (!codegen_write_ir(&codegen, ir_file))
-            {
-                fprintf(stderr, "Failed to write IR file\n");
-                codegen_dnit(&codegen);
-                semantic_dnit(&analyzer);
-                semantic_dnit(&analyzer);
-                node_dnit(program);
-                free(program);
-                parser_dnit(&parser);
-                lexer_dnit(&lexer);
-                free(source);
-                return 1;
-            }
-            printf("LLVM IR written to: %s\n", ir_file);
-        }
-        else if (strcmp(command, "build") == 0)
-        {
-            // compile to object file first
-            const char *obj_file = "temp.o";
-            if (!codegen_write_object(&codegen, obj_file))
-            {
-                fprintf(stderr, "Failed to write object file\n");
-                codegen_dnit(&codegen);
-                semantic_dnit(&analyzer);
-                node_dnit(program);
-                free(program);
-                parser_dnit(&parser);
-                lexer_dnit(&lexer);
-                free(source);
-                return 1;
-            }
-
-            // determine output executable name
-            const char *exe_file = output ? output : "a.out";
-
-            // link with clang
-            char link_cmd[1024];
-            snprintf(link_cmd, sizeof(link_cmd), "clang %s -o %s", obj_file, exe_file);
-
-            int link_result = system(link_cmd);
-            if (link_result != 0)
-            {
-                fprintf(stderr, "Failed to link executable\n");
-                remove(obj_file);
-                codegen_dnit(&codegen);
-                semantic_dnit(&analyzer);
-                node_dnit(program);
-                free(program);
-                parser_dnit(&parser);
-                lexer_dnit(&lexer);
-                free(source);
-                return 1;
-            }
-
-            // cleanup temporary object file
-            remove(obj_file);
-            printf("Executable written to: %s\n", exe_file);
-        }
-
+    if (!codegen_generate(&codegen))
+    {
+        fprintf(stderr, "Code generation failed\n");
         codegen_dnit(&codegen);
         semantic_dnit(&analyzer);
+        node_dnit(program);
+        free(program);
+        parser_dnit(&parser);
+        lexer_dnit(&lexer);
+        free(source);
+        return 1;
+    }
+
+    // handle output commands
+    int ret = 0;
+
+    if (strcmp(command, "emit-ir") == 0)
+    {
+        const char *ir_file = output ? output : "output.ll";
+        if (!codegen_emit_ir(&codegen, ir_file))
+        {
+            fprintf(stderr, "Failed to write IR file\n");
+            ret = 1;
+        }
+        else
+        {
+            printf("LLVM IR written to: %s\n", ir_file);
+        }
+    }
+    else if (strcmp(command, "compile") == 0)
+    {
+        const char *obj_file = output ? output : "output.o";
+        if (!codegen_emit_object(&codegen, obj_file))
+        {
+            fprintf(stderr, "Failed to write object file\n");
+            ret = 1;
+        }
+        else
+        {
+            printf("Object file written to: %s\n", obj_file);
+        }
+    }
+    else if (strcmp(command, "build") == 0)
+    {
+        // write to temporary object file
+        char temp_obj[256];
+        snprintf(temp_obj, sizeof(temp_obj), "/tmp/mach_%d.o", getpid());
+
+        if (!codegen_emit_object(&codegen, temp_obj))
+        {
+            fprintf(stderr, "Failed to write object file\n");
+            ret = 1;
+        }
+        else
+        {
+            // link with clang
+            const char *exe_file = output ? output : "a.out";
+            char        link_cmd[1024];
+            snprintf(link_cmd, sizeof(link_cmd), "clang %s -o %s", temp_obj, exe_file);
+
+            if (system(link_cmd) != 0)
+            {
+                fprintf(stderr, "Failed to link executable\n");
+                ret = 1;
+            }
+            else
+            {
+                printf("Executable written to: %s\n", exe_file);
+            }
+
+            // cleanup temp file
+            unlink(temp_obj);
+        }
     }
 
     // cleanup
+    codegen_dnit(&codegen);
+    semantic_dnit(&analyzer);
     node_dnit(program);
     free(program);
     parser_dnit(&parser);
     lexer_dnit(&lexer);
     free(source);
 
-    return 0;
+    return ret;
 }
 
 static void print_indent(int indent)
@@ -260,7 +200,7 @@ static void print_indent(int indent)
 
 static void print_node(Node *node, int indent)
 {
-    if (node == NULL)
+    if (!node)
     {
         print_indent(indent);
         printf("(null)\n");
@@ -270,6 +210,7 @@ static void print_node(Node *node, int indent)
     print_indent(indent);
     printf("%s", node_kind_name(node->kind));
 
+    // print value info
     switch (node->kind)
     {
     case NODE_IDENTIFIER:
@@ -287,20 +228,26 @@ static void print_node(Node *node, int indent)
     case NODE_LIT_STRING:
         printf(" \"%s\"", node->str_value);
         break;
+    case NODE_EXPR_BINARY:
+        printf(" op=%s", op_to_string(node->binary.op));
+        break;
+    case NODE_EXPR_UNARY:
+        printf(" op=%s", op_to_string(node->unary.op));
+        break;
     default:
         break;
     }
 
     printf("\n");
 
-    // print children based on node type
+    // print children
     switch (node->kind)
     {
     case NODE_PROGRAM:
     case NODE_BLOCK:
         if (node->children)
         {
-            for (size_t i = 0; i < node_list_count(node->children); i++)
+            for (size_t i = 0; node->children[i]; i++)
             {
                 print_node(node->children[i], indent + 1);
             }
@@ -308,28 +255,56 @@ static void print_node(Node *node, int indent)
         break;
 
     case NODE_EXPR_BINARY:
-    case NODE_EXPR_INDEX:
-    case NODE_EXPR_MEMBER:
-    case NODE_EXPR_CAST:
-    case NODE_TYPE_ARRAY:
         print_node(node->binary.left, indent + 1);
         print_node(node->binary.right, indent + 1);
         break;
 
     case NODE_EXPR_UNARY:
-    case NODE_TYPE_POINTER:
-    case NODE_STMT_RETURN:
-    case NODE_STMT_EXPRESSION:
-        print_node(node->single, indent + 1);
+        print_node(node->unary.target, indent + 1);
         break;
 
     case NODE_EXPR_CALL:
         print_node(node->call.target, indent + 1);
         if (node->call.args)
         {
-            for (size_t i = 0; i < node_list_count(node->call.args); i++)
+            print_indent(indent + 1);
+            printf("arguments:\n");
+            for (size_t i = 0; node->call.args[i]; i++)
             {
-                print_node(node->call.args[i], indent + 1);
+                print_node(node->call.args[i], indent + 2);
+            }
+        }
+        break;
+
+    case NODE_EXPR_INDEX:
+    case NODE_EXPR_MEMBER:
+    case NODE_EXPR_CAST:
+        if (node->children)
+        {
+            print_node(node->children[0], indent + 1);
+            print_node(node->children[1], indent + 1);
+        }
+        break;
+
+    case NODE_TYPE_POINTER:
+    case NODE_TYPE_ARRAY:
+        print_node(node->single, indent + 1);
+        break;
+
+    case NODE_TYPE_FUNCTION:
+        if (node->function.return_type)
+        {
+            print_indent(indent + 1);
+            printf("return:\n");
+            print_node(node->function.return_type, indent + 2);
+        }
+        if (node->function.params)
+        {
+            print_indent(indent + 1);
+            printf("params:\n");
+            for (size_t i = 0; node->function.params[i]; i++)
+            {
+                print_node(node->function.params[i], indent + 2);
             }
         }
         break;
@@ -337,7 +312,6 @@ static void print_node(Node *node, int indent)
     case NODE_STMT_VAL:
     case NODE_STMT_VAR:
     case NODE_STMT_DEF:
-    case NODE_STMT_EXTERNAL:
         print_node(node->decl.name, indent + 1);
         if (node->decl.type)
         {
@@ -350,18 +324,12 @@ static void print_node(Node *node, int indent)
         break;
 
     case NODE_STMT_FUNCTION:
-    case NODE_TYPE_FUNCTION:
-        if (node->function.name)
-        {
-            print_indent(indent + 1);
-            printf("name:\n");
-            print_node(node->function.name, indent + 2);
-        }
+        print_node(node->function.name, indent + 1);
         if (node->function.params)
         {
             print_indent(indent + 1);
-            printf("parameters:\n");
-            for (size_t i = 0; i < node_list_count(node->function.params); i++)
+            printf("params:\n");
+            for (size_t i = 0; node->function.params[i]; i++)
             {
                 print_node(node->function.params[i], indent + 2);
             }
@@ -369,7 +337,7 @@ static void print_node(Node *node, int indent)
         if (node->function.return_type)
         {
             print_indent(indent + 1);
-            printf("return_type:\n");
+            printf("return:\n");
             print_node(node->function.return_type, indent + 2);
         }
         if (node->function.body)
@@ -384,25 +352,11 @@ static void print_node(Node *node, int indent)
     case NODE_STMT_UNION:
         if (node->composite.fields)
         {
-            print_indent(indent + 1);
-            printf("fields:\n");
-            for (size_t i = 0; i < node_list_count(node->composite.fields); i++)
+            for (size_t i = 0; node->composite.fields[i]; i++)
             {
-                print_node(node->composite.fields[i], indent + 2);
+                print_node(node->composite.fields[i], indent + 1);
             }
         }
-        break;
-
-    case NODE_STMT_USE:
-        if (node->binary.left)
-        {
-            print_indent(indent + 1);
-            printf("alias:\n");
-            print_node(node->binary.left, indent + 2);
-        }
-        print_indent(indent + 1);
-        printf("module:\n");
-        print_node(node->binary.right, indent + 2);
         break;
 
     case NODE_STMT_IF:
@@ -414,9 +368,32 @@ static void print_node(Node *node, int indent)
             printf("condition:\n");
             print_node(node->conditional.condition, indent + 2);
         }
-        print_indent(indent + 1);
-        printf("body:\n");
-        print_node(node->conditional.body, indent + 2);
+        if (node->conditional.body)
+        {
+            print_indent(indent + 1);
+            printf("body:\n");
+            print_node(node->conditional.body, indent + 2);
+        }
+        break;
+
+    case NODE_STMT_RETURN:
+    case NODE_STMT_EXPRESSION:
+    case NODE_STMT_EXTERNAL:
+        if (node->single)
+        {
+            print_node(node->single, indent + 1);
+        }
+        break;
+
+    case NODE_STMT_USE:
+        if (node->children)
+        {
+            print_node(node->children[0], indent + 1);
+            if (node->children[1])
+            {
+                print_node(node->children[1], indent + 1);
+            }
+        }
         break;
 
     default:

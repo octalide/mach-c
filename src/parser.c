@@ -1,740 +1,240 @@
 #include "parser.h"
-#include "operator.h"
-
+#include "lexer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// core parser functions
+// parser lifecycle
 void parser_init(Parser *parser, Lexer *lexer)
 {
-    parser->lexer     = lexer;
-    parser->has_error = false;
+    parser->lexer      = lexer;
+    parser->current    = NULL;
+    parser->previous   = NULL;
+    parser->panic_mode = false;
+    parser->had_error  = false;
+    parser_error_list_init(&parser->errors);
 
-    // initialize tokens
-    token_init(&parser->current, TOKEN_ERROR, 0, 0);
-    token_init(&parser->peek, TOKEN_ERROR, 0, 0);
-
-    // advance to get first two tokens
-    parser_advance(parser);
+    // prime the parser
     parser_advance(parser);
 }
 
 void parser_dnit(Parser *parser)
 {
-    if (parser == NULL)
+    if (parser->current)
     {
-        return;
+        token_dnit(parser->current);
+        free(parser->current);
     }
-
-    token_dnit(&parser->current);
-    token_dnit(&parser->peek);
-    parser->lexer     = NULL;
-    parser->has_error = false;
+    if (parser->previous)
+    {
+        token_dnit(parser->previous);
+        free(parser->previous);
+    }
+    parser_error_list_dnit(&parser->errors);
 }
 
-// utility functions
+// error list operations
+void parser_error_list_init(ParserErrorList *list)
+{
+    list->errors   = NULL;
+    list->count    = 0;
+    list->capacity = 0;
+}
+
+void parser_error_list_dnit(ParserErrorList *list)
+{
+    for (int i = 0; i < list->count; i++)
+    {
+        free(list->errors[i].message);
+        token_dnit(list->errors[i].token);
+        free(list->errors[i].token);
+    }
+    free(list->errors);
+}
+
+void parser_error_list_add(ParserErrorList *list, Token *token, const char *message)
+{
+    if (list->count >= list->capacity)
+    {
+        list->capacity = list->capacity ? list->capacity * 2 : 8;
+        list->errors   = realloc(list->errors, sizeof(ParserError) * list->capacity);
+    }
+
+    Token *error_token = malloc(sizeof(Token));
+    if (error_token == NULL)
+    {
+        fprintf(stderr, "error: memory allocation failed for error token\n");
+        exit(EXIT_FAILURE);
+    }
+
+    token_copy(token, error_token);
+
+    list->errors[list->count].token   = error_token;
+    list->errors[list->count].message = strdup(message);
+    if (list->errors[list->count].message == NULL)
+    {
+        fprintf(stderr, "error: memory allocation failed for error message\n");
+        exit(EXIT_FAILURE);
+    }
+
+    list->count++;
+}
+
+void parser_error_list_print(ParserErrorList *list, Lexer *lexer, const char *file_path)
+{
+    for (int i = 0; i < list->count; i++)
+    {
+        Token *token     = list->errors[i].token;
+        int    line      = lexer_get_pos_line(lexer, token->pos);
+        int    col       = lexer_get_pos_line_offset(lexer, token->pos);
+        char  *line_text = lexer_get_line_text(lexer, line);
+        if (line_text == NULL)
+        {
+            line_text = strdup("unable to retrieve line text");
+        }
+
+        printf("error: %s\n", list->errors[i].message);
+        printf("%s:%d:%d\n", file_path, line + 1, col);
+        printf("%5d | %-*s\n", line + 1, col > 1 ? col - 1 : 0, line_text);
+        printf("      | %*s^\n", col - 1, "");
+
+        free(line_text);
+    }
+}
+
+// helper functions
 void parser_advance(Parser *parser)
 {
-    // move peek to current
-    token_copy(&parser->peek, &parser->current);
+    parser->previous = parser->current;
 
-    // get next token
-    Token *token = lexer_next(parser->lexer);
-    if (token != NULL)
+    for (;;)
     {
-        token_copy(token, &parser->peek);
-    }
-    else
-    {
-        token_init(&parser->peek, TOKEN_EOF, parser->lexer->pos, 0);
-    }
+        parser->current = lexer_next(parser->lexer);
 
-    // skip comments
-    while (parser->peek.kind == TOKEN_COMMENT)
-    {
-        Token *next_token = lexer_next(parser->lexer);
-        if (next_token != NULL)
+        // skip comments
+        if (parser->current->kind == TOKEN_COMMENT)
         {
-            token_copy(next_token, &parser->peek);
+            token_dnit(parser->current);
+            free(parser->current);
+            continue;
         }
-        else
+
+        // if it's not an error token, we're done
+        if (parser->current->kind != TOKEN_ERROR)
         {
-            token_init(&parser->peek, TOKEN_EOF, parser->lexer->pos, 0);
             break;
         }
+
+        parser_error_at_current(parser, "unexpected character");
+        token_dnit(parser->current);
+        free(parser->current);
     }
 }
 
 bool parser_check(Parser *parser, TokenKind kind)
 {
-    return parser->current.kind == kind;
+    return parser->current->kind == kind;
 }
 
 bool parser_match(Parser *parser, TokenKind kind)
 {
-    if (parser_check(parser, kind))
+    if (!parser_check(parser, kind))
     {
-        parser_advance(parser);
-        return true;
+        return false;
     }
-    return false;
+
+    parser_advance(parser);
+    return true;
 }
 
 bool parser_consume(Parser *parser, TokenKind kind, const char *message)
 {
-    if (parser_check(parser, kind))
+    if (parser->current->kind == kind)
     {
         parser_advance(parser);
         return true;
     }
 
-    parser_error(parser, message);
+    parser_error(parser, parser->previous, message);
     return false;
-}
-
-// error handling
-void parser_error(Parser *parser, const char *message)
-{
-    parser->has_error = true;
-    int line          = lexer_get_pos_line(parser->lexer, parser->current.pos);
-    fprintf(stderr, "Parse error at line %d: %s\n", line + 1, message);
 }
 
 void parser_synchronize(Parser *parser)
 {
-    parser_advance(parser);
-
-    while (!parser_check(parser, TOKEN_EOF))
+    if (!parser->panic_mode)
     {
-        if (parser->current.kind == TOKEN_SEMICOLON)
+        return;
+    }
+
+    parser->panic_mode = false;
+
+    while (!parser_is_at_end(parser))
+    {
+        // check current token for semicolon (statement terminator)
+        if (parser->current->kind == TOKEN_SEMICOLON)
         {
+            parser_advance(parser);
             return;
         }
 
-        switch (parser->peek.kind)
+        switch (parser->current->kind)
         {
-        case TOKEN_KW_VAL:
-        case TOKEN_KW_VAR:
+        case TOKEN_KW_USE:
+        case TOKEN_KW_EXT:
         case TOKEN_KW_DEF:
-        case TOKEN_KW_FUN:
         case TOKEN_KW_STR:
         case TOKEN_KW_UNI:
-        case TOKEN_KW_EXT:
-        case TOKEN_KW_USE:
-        case TOKEN_KW_IF:
-        case TOKEN_KW_OR:
-        case TOKEN_KW_FOR:
-        case TOKEN_KW_BRK:
-        case TOKEN_KW_CNT:
-        case TOKEN_KW_RET:
+        case TOKEN_KW_VAL:
+        case TOKEN_KW_VAR:
+        case TOKEN_KW_FUN:
             return;
         default:
-            break;
-        }
-
-        parser_advance(parser);
-    }
-}
-
-// main parsing function
-Node *parser_parse_program(Parser *parser)
-{
-    Node **statements = node_list_new();
-    if (statements == NULL)
-    {
-        return NULL;
-    }
-
-    while (!parser_check(parser, TOKEN_EOF) && !parser->has_error)
-    {
-        Node *stmt = parser_parse_stmt(parser);
-        if (stmt != NULL)
-        {
-            node_list_add(&statements, stmt);
-        }
-        else
-        {
-            parser_synchronize(parser);
-        }
-    }
-
-    Node *program = malloc(sizeof(Node));
-    if (program == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(program, NODE_PROGRAM);
-    program->children = statements;
-    return program;
-}
-
-// identifier parsing
-Node *parser_parse_identifier(Parser *parser)
-{
-    if (!parser_check(parser, TOKEN_IDENTIFIER))
-    {
-        parser_error(parser, "Expected identifier");
-        return NULL;
-    }
-
-    char *value = lexer_raw_value(parser->lexer, &parser->current);
-    Node *node  = node_identifier(value);
-    node->token = &parser->current; // set token for error reporting
-    free(value);
-    parser_advance(parser);
-    return node;
-}
-
-// literal parsing
-Node *parser_parse_lit_int(Parser *parser)
-{
-    if (!parser_check(parser, TOKEN_LIT_INT))
-    {
-        parser_error(parser, "Expected integer literal");
-        return NULL;
-    }
-
-    unsigned long long value = lexer_eval_lit_int(parser->lexer, &parser->current);
-    Node              *node  = node_int(value);
-    node->token              = &parser->current; // set token for error reporting
-    parser_advance(parser);
-    return node;
-}
-
-Node *parser_parse_lit_float(Parser *parser)
-{
-    if (!parser_check(parser, TOKEN_LIT_FLOAT))
-    {
-        parser_error(parser, "Expected float literal");
-        return NULL;
-    }
-
-    double value = lexer_eval_lit_float(parser->lexer, &parser->current);
-    Node  *node  = node_float(value);
-    parser_advance(parser);
-    return node;
-}
-
-Node *parser_parse_lit_char(Parser *parser)
-{
-    if (!parser_check(parser, TOKEN_LIT_CHAR))
-    {
-        parser_error(parser, "Expected character literal");
-        return NULL;
-    }
-
-    char  value = lexer_eval_lit_char(parser->lexer, &parser->current);
-    Node *node  = node_char(value);
-    node->token = &parser->current; // set token for error reporting
-    parser_advance(parser);
-    return node;
-}
-
-Node *parser_parse_lit_string(Parser *parser)
-{
-    if (!parser_check(parser, TOKEN_LIT_STRING))
-    {
-        parser_error(parser, "Expected string literal");
-        return NULL;
-    }
-
-    char *value = lexer_eval_lit_string(parser->lexer, &parser->current);
-    Node *node  = node_string(value);
-    node->token = &parser->current; // set token for error reporting
-    free(value);
-    parser_advance(parser);
-    return node;
-}
-
-// array literal: [size]type{elements...} or [_]type{elements...}
-Node *parser_parse_lit_array(Parser *parser)
-{
-    if (!parser_check(parser, TOKEN_L_BRACKET))
-    {
-        parser_error(parser, "Expected '['");
-        return NULL;
-    }
-
-    parser_advance(parser); // consume '['
-
-    Node *size = NULL;
-    if (parser_check(parser, TOKEN_UNDERSCORE))
-    {
-        parser_advance(parser); // dynamic size
-    }
-    else
-    {
-        size = parser_parse_expr(parser);
-        if (size == NULL)
-        {
-            return NULL;
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_R_BRACKET, "Expected ']'"))
-    {
-        if (size)
-        {
-            node_dnit(size);
-            free(size);
-        }
-        return NULL;
-    }
-
-    Node *type = parser_parse_type(parser);
-    if (type == NULL)
-    {
-        if (size)
-        {
-            node_dnit(size);
-            free(size);
-        }
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{'"))
-    {
-        if (size)
-        {
-            node_dnit(size);
-            free(size);
-        }
-        node_dnit(type);
-        free(type);
-        return NULL;
-    }
-
-    Node **elements = node_list_new();
-    if (elements == NULL)
-    {
-        if (size)
-        {
-            node_dnit(size);
-            free(size);
-        }
-        node_dnit(type);
-        free(type);
-        return NULL;
-    }
-
-    while (!parser_check(parser, TOKEN_R_BRACE) && !parser_check(parser, TOKEN_EOF))
-    {
-        Node *element = parser_parse_expr(parser);
-        if (element != NULL)
-        {
-            node_list_add(&elements, element);
-        }
-
-        if (!parser_check(parser, TOKEN_R_BRACE))
-        {
-            if (!parser_consume(parser, TOKEN_COMMA, "Expected ',' or '}'"))
-            {
-                break;
-            }
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}'"))
-    {
-        if (size)
-        {
-            node_dnit(size);
-            free(size);
-        }
-        node_dnit(type);
-        free(type);
-        for (size_t i = 0; i < node_list_count(elements); i++)
-        {
-            node_dnit(elements[i]);
-            free(elements[i]);
-        }
-        free(elements);
-        return NULL;
-    }
-
-    // create array literal node
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_EXPR_CALL); // use call node for array literal
-    node->call.target = type;
-    node->call.args   = elements;
-
-    if (size)
-    {
-        node_dnit(size);
-        free(size);
-    }
-    return node;
-}
-
-// struct literal: type{field1, field2, ...}
-Node *parser_parse_lit_struct(Parser *parser)
-{
-    Node *type = parser_parse_type(parser);
-    if (type == NULL)
-    {
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{'"))
-    {
-        node_dnit(type);
-        free(type);
-        return NULL;
-    }
-
-    Node **fields = node_list_new();
-    if (fields == NULL)
-    {
-        node_dnit(type);
-        free(type);
-        return NULL;
-    }
-
-    while (!parser_check(parser, TOKEN_R_BRACE) && !parser_check(parser, TOKEN_EOF))
-    {
-        Node *field = parser_parse_expr(parser);
-        if (field != NULL)
-        {
-            node_list_add(&fields, field);
-        }
-
-        if (!parser_check(parser, TOKEN_R_BRACE))
-        {
-            if (!parser_consume(parser, TOKEN_COMMA, "Expected ',' or '}'"))
-            {
-                break;
-            }
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}'"))
-    {
-        node_dnit(type);
-        free(type);
-        for (size_t i = 0; i < node_list_count(fields); i++)
-        {
-            node_dnit(fields[i]);
-            free(fields[i]);
-        }
-        free(fields);
-        return NULL;
-    }
-
-    // create struct literal node
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_EXPR_CALL); // use call node for struct literal
-    node->call.target = type;
-    node->call.args   = fields;
-    return node;
-}
-
-// expression parsing
-Node *parser_parse_expr(Parser *parser)
-{
-    return parser_parse_expr_assignment(parser);
-}
-
-Node *parser_parse_expr_assignment(Parser *parser)
-{
-    Node *expr = parser_parse_expr_logical_or(parser);
-
-    while (parser_check(parser, TOKEN_EQUAL))
-    {
-        Operator op = OP_ASSIGN;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_logical_or(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_logical_or(Parser *parser)
-{
-    Node *expr = parser_parse_expr_logical_and(parser);
-
-    while (parser_check(parser, TOKEN_PIPE_PIPE))
-    {
-        Operator op = OP_LOGICAL_OR;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_logical_and(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_logical_and(Parser *parser)
-{
-    Node *expr = parser_parse_expr_bitwise_or(parser);
-
-    while (parser_check(parser, TOKEN_AMPERSAND_AMPERSAND))
-    {
-        Operator op = OP_LOGICAL_AND;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_bitwise_or(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_bitwise_or(Parser *parser)
-{
-    Node *expr = parser_parse_expr_bitwise_xor(parser);
-
-    while (parser_check(parser, TOKEN_PIPE))
-    {
-        Operator op = OP_BITWISE_OR;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_bitwise_xor(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_bitwise_xor(Parser *parser)
-{
-    Node *expr = parser_parse_expr_bitwise_and(parser);
-
-    while (parser_check(parser, TOKEN_CARET))
-    {
-        Operator op = OP_BITWISE_XOR;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_bitwise_and(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_bitwise_and(Parser *parser)
-{
-    Node *expr = parser_parse_expr_equality(parser);
-
-    while (parser_check(parser, TOKEN_AMPERSAND))
-    {
-        Operator op = OP_BITWISE_AND;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_equality(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_equality(Parser *parser)
-{
-    Node *expr = parser_parse_expr_comparison(parser);
-
-    while (parser_check(parser, TOKEN_EQUAL_EQUAL) || parser_check(parser, TOKEN_BANG_EQUAL))
-    {
-        Operator op = parser->current.kind == TOKEN_EQUAL_EQUAL ? OP_EQUAL : OP_NOT_EQUAL;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_comparison(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_comparison(Parser *parser)
-{
-    Node *expr = parser_parse_expr_shift(parser);
-
-    while (parser_check(parser, TOKEN_LESS) || parser_check(parser, TOKEN_LESS_EQUAL) || parser_check(parser, TOKEN_GREATER) || parser_check(parser, TOKEN_GREATER_EQUAL))
-    {
-        Operator op;
-        switch (parser->current.kind)
-        {
-        case TOKEN_LESS:
-            op = OP_LESS;
-            break;
-        case TOKEN_LESS_EQUAL:
-            op = OP_LESS_EQUAL;
-            break;
-        case TOKEN_GREATER:
-            op = OP_GREATER;
-            break;
-        case TOKEN_GREATER_EQUAL:
-            op = OP_GREATER_EQUAL;
-            break;
-        default:
-            op = OP_COUNT;
-            break;
-        }
-
-        parser_advance(parser);
-        Node *right = parser_parse_expr_shift(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_shift(Parser *parser)
-{
-    Node *expr = parser_parse_expr_term(parser);
-
-    while (parser_check(parser, TOKEN_LESS_LESS) || parser_check(parser, TOKEN_GREATER_GREATER))
-    {
-        Operator op = parser->current.kind == TOKEN_LESS_LESS ? OP_BITWISE_SHL : OP_BITWISE_SHR;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_term(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_term(Parser *parser)
-{
-    Node *expr = parser_parse_expr_factor(parser);
-
-    while (parser_check(parser, TOKEN_PLUS) || parser_check(parser, TOKEN_MINUS))
-    {
-        Operator op = parser->current.kind == TOKEN_PLUS ? OP_ADD : OP_SUB;
-        parser_advance(parser);
-        Node *right = parser_parse_expr_factor(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_factor(Parser *parser)
-{
-    Node *expr = parser_parse_expr_unary(parser);
-
-    while (parser_check(parser, TOKEN_STAR) || parser_check(parser, TOKEN_SLASH) || parser_check(parser, TOKEN_PERCENT))
-    {
-        Operator op;
-        switch (parser->current.kind)
-        {
-        case TOKEN_STAR:
-            op = OP_MUL;
-            break;
-        case TOKEN_SLASH:
-            op = OP_DIV;
-            break;
-        case TOKEN_PERCENT:
-            op = OP_MOD;
-            break;
-        default:
-            op = OP_COUNT;
-            break;
-        }
-
-        parser_advance(parser);
-        Node *right = parser_parse_expr_unary(parser);
-        expr        = node_binary(op, expr, right);
-    }
-
-    return expr;
-}
-
-Node *parser_parse_expr_unary(Parser *parser)
-{
-    if (parser_check(parser, TOKEN_MINUS) || parser_check(parser, TOKEN_PLUS) || parser_check(parser, TOKEN_BANG) || parser_check(parser, TOKEN_TILDE) || parser_check(parser, TOKEN_AT) || parser_check(parser, TOKEN_QUESTION))
-    {
-        Operator op;
-        switch (parser->current.kind)
-        {
-        case TOKEN_MINUS:
-            op = OP_SUB;
-            break;
-        case TOKEN_PLUS:
-            op = OP_ADD;
-            break;
-        case TOKEN_BANG:
-            op = OP_LOGICAL_NOT;
-            break;
-        case TOKEN_TILDE:
-            op = OP_BITWISE_NOT;
-            break;
-        case TOKEN_AT:
-            op = OP_DEREFERENCE;
-            break;
-        case TOKEN_QUESTION:
-            op = OP_REFERENCE;
-            break;
-        default:
-            op = OP_COUNT;
-            break;
-        }
-
-        parser_advance(parser);
-        Node *expr = parser_parse_expr_unary(parser);
-        return node_unary(op, expr);
-    }
-
-    return parser_parse_expr_postfix(parser);
-}
-
-Node *parser_parse_expr_postfix(Parser *parser)
-{
-    Node *expr = parser_parse_expr_primary(parser);
-
-    while (true)
-    {
-        if (parser_check(parser, TOKEN_L_PAREN))
-        {
-            expr = parser_parse_expr_call(parser, expr);
-        }
-        else if (parser_check(parser, TOKEN_L_BRACKET))
-        {
-            expr = parser_parse_expr_index(parser, expr);
-        }
-        else if (parser_check(parser, TOKEN_DOT))
-        {
-            expr = parser_parse_expr_member(parser, expr);
-        }
-        else if (parser_check(parser, TOKEN_COLON_COLON))
-        {
-            expr = parser_parse_expr_cast(parser, expr);
-        }
-        else
-        {
+            parser_advance(parser);
             break;
         }
     }
-
-    return expr;
 }
 
-Node *parser_parse_expr_primary(Parser *parser)
+// error handling
+void parser_error(Parser *parser, Token *token, const char *message)
 {
-    switch (parser->current.kind)
+    if (parser->panic_mode)
     {
-    case TOKEN_LIT_INT:
-        return parser_parse_lit_int(parser);
-    case TOKEN_LIT_FLOAT:
-        return parser_parse_lit_float(parser);
-    case TOKEN_LIT_CHAR:
-        return parser_parse_lit_char(parser);
-    case TOKEN_LIT_STRING:
-        return parser_parse_lit_string(parser);
+        return;
+    }
+
+    parser->panic_mode = true;
+    parser->had_error  = true;
+    parser_error_list_add(&parser->errors, token, message);
+}
+
+void parser_error_at_current(Parser *parser, const char *message)
+{
+    parser_error(parser, parser->current, message);
+}
+
+void parser_error_at_previous(Parser *parser, const char *message)
+{
+    parser_error(parser, parser->previous, message);
+}
+
+// utility functions
+bool parser_is_at_end(Parser *parser)
+{
+    return parser->current->kind == TOKEN_EOF;
+}
+
+bool parser_is_type_start(Parser *parser)
+{
+    switch (parser->current->kind)
+    {
     case TOKEN_IDENTIFIER:
-        // check if this might be a struct literal
-        if (parser->peek.kind == TOKEN_L_BRACE)
-        {
-            return parser_parse_lit_struct(parser);
-        }
-        return parser_parse_identifier(parser);
-    case TOKEN_TYPE_ANY:
+    case TOKEN_STAR:
+    case TOKEN_L_BRACKET:
+    case TOKEN_KW_FUN:
+    case TOKEN_KW_STR:
+    case TOKEN_KW_UNI:
+    case TOKEN_TYPE_PTR:
     case TOKEN_TYPE_I8:
     case TOKEN_TYPE_I16:
     case TOKEN_TYPE_I32:
@@ -746,375 +246,161 @@ Node *parser_parse_expr_primary(Parser *parser)
     case TOKEN_TYPE_F16:
     case TOKEN_TYPE_F32:
     case TOKEN_TYPE_F64:
-    {
-        // allow type tokens in expressions for builtin functions like size_of(i32)
-        char *type_name = lexer_raw_value(parser->lexer, &parser->current);
-        Node *node      = node_identifier(type_name);
-        free(type_name);
-        parser_advance(parser);
-        return node;
-    }
-    case TOKEN_L_BRACKET:
-        return parser_parse_lit_array(parser);
-    case TOKEN_L_PAREN:
-    {
-        parser_advance(parser); // consume '('
-        Node *expr = parser_parse_expr(parser);
-        if (!parser_consume(parser, TOKEN_R_PAREN, "Expected ')'"))
-        {
-            if (expr)
-            {
-                node_dnit(expr);
-                free(expr);
-            }
-            return NULL;
-        }
-        return expr;
-    }
+        return true;
     default:
-        parser_error(parser, "Unexpected token in expression");
-        return NULL;
+        return false;
     }
 }
 
-// postfix expression parsing
-Node *parser_parse_expr_call(Parser *parser, Node *target)
+char *parser_parse_identifier(Parser *parser)
 {
-    parser_advance(parser); // consume '('
-
-    Node **args = parser_parse_argument_list(parser);
-    if (args == NULL && parser->has_error)
+    if (!parser_consume(parser, TOKEN_IDENTIFIER, "expected identifier"))
     {
-        node_dnit(target);
-        free(target);
         return NULL;
     }
 
-    if (!parser_consume(parser, TOKEN_R_PAREN, "Expected ')'"))
-    {
-        node_dnit(target);
-        free(target);
-        if (args)
-        {
-            for (size_t i = 0; i < node_list_count(args); i++)
-            {
-                node_dnit(args[i]);
-                free(args[i]);
-            }
-            free(args);
-        }
-        return NULL;
-    }
-
-    return node_call(target, args);
+    return lexer_raw_value(parser->lexer, parser->previous);
 }
 
-Node *parser_parse_expr_index(Parser *parser, Node *target)
+// main parsing function
+AstNode *parser_parse_program(Parser *parser)
 {
-    parser_advance(parser); // consume '['
+    AstNode *program = malloc(sizeof(AstNode));
+    ast_node_init(program, AST_PROGRAM);
+    program->program.decls = malloc(sizeof(AstList));
+    ast_list_init(program->program.decls);
 
-    Node *index = parser_parse_expr(parser);
-    if (index == NULL)
+    while (!parser_is_at_end(parser))
     {
-        node_dnit(target);
-        free(target);
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_R_BRACKET, "Expected ']'"))
-    {
-        node_dnit(target);
-        free(target);
-        node_dnit(index);
-        free(index);
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_EXPR_INDEX);
-    node->binary.left  = target;
-    node->binary.right = index;
-    return node;
-}
-
-Node *parser_parse_expr_member(Parser *parser, Node *target)
-{
-    parser_advance(parser); // consume '.'
-
-    Node *member = parser_parse_identifier(parser);
-    if (member == NULL)
-    {
-        node_dnit(target);
-        free(target);
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_EXPR_MEMBER);
-    node->binary.left  = target;
-    node->binary.right = member;
-    return node;
-}
-
-Node *parser_parse_expr_cast(Parser *parser, Node *target)
-{
-    parser_advance(parser); // consume '::'
-
-    Node *type = parser_parse_type(parser);
-    if (type == NULL)
-    {
-        node_dnit(target);
-        free(target);
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_EXPR_CAST);
-    node->binary.left  = target;
-    node->binary.right = type;
-    return node;
-}
-
-// statement parsing
-Node *parser_parse_stmt(Parser *parser)
-{
-    switch (parser->current.kind)
-    {
-    case TOKEN_KW_USE:
-        return parser_parse_stmt_use(parser);
-    case TOKEN_KW_VAL:
-        return parser_parse_stmt_val(parser);
-    case TOKEN_KW_VAR:
-        return parser_parse_stmt_var(parser);
-    case TOKEN_KW_DEF:
-        return parser_parse_stmt_def(parser);
-    case TOKEN_KW_FUN:
-        return parser_parse_stmt_fun(parser);
-    case TOKEN_KW_STR:
-        return parser_parse_stmt_str(parser);
-    case TOKEN_KW_UNI:
-        return parser_parse_stmt_uni(parser);
-    case TOKEN_KW_EXT:
-        return parser_parse_stmt_ext(parser);
-    case TOKEN_KW_IF:
-        return parser_parse_stmt_if(parser);
-    case TOKEN_KW_OR:
-        return parser_parse_stmt_or(parser);
-    case TOKEN_KW_FOR:
-        return parser_parse_stmt_for(parser);
-    case TOKEN_KW_BRK:
-        return parser_parse_stmt_break(parser);
-    case TOKEN_KW_CNT:
-        return parser_parse_stmt_continue(parser);
-    case TOKEN_KW_RET:
-        return parser_parse_stmt_return(parser);
-    case TOKEN_L_BRACE:
-        return parser_parse_stmt_block(parser);
-    default:
-        return parser_parse_stmt_expr(parser);
-    }
-}
-
-Node *parser_parse_stmt_block(Parser *parser)
-{
-    if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{'"))
-    {
-        return NULL;
-    }
-
-    Node **statements = node_list_new();
-    if (statements == NULL)
-    {
-        return NULL;
-    }
-
-    while (!parser_check(parser, TOKEN_R_BRACE) && !parser_check(parser, TOKEN_EOF))
-    {
-        Node *stmt = parser_parse_stmt(parser);
-        if (stmt != NULL)
-        {
-            // check if this is an if statement followed by an or statement
-            if (stmt->kind == NODE_STMT_IF && parser_check(parser, TOKEN_KW_OR))
-            {
-                // parse the or statement
-                Node *or_stmt = parser_parse_stmt(parser);
-                if (or_stmt && or_stmt->kind == NODE_STMT_OR)
-                {
-                    // convert the if statement to have an else clause
-                    // create a new if-else node
-                    Node *if_else = malloc(sizeof(Node));
-                    if (if_else)
-                    {
-                        node_init(if_else, NODE_STMT_IF);
-                        if_else->conditional.condition = stmt->conditional.condition;
-
-                        // create block with if body and else body
-                        Node *if_body   = stmt->conditional.body;
-                        Node *else_body = or_stmt->conditional.body;
-
-                        // store the if body
-                        if_else->conditional.body = if_body;
-
-                        // for now, store else body in a custom way
-                        // we need to extend the AST to support else clauses
-                        if_else->conditional.else_body = else_body;
-
-                        node_list_add(&statements, if_else);
-
-                        // free the temporary nodes
-                        free(stmt);
-                        free(or_stmt);
-                    }
-                }
-                else
-                {
-                    // if or parsing failed, just add the if statement
-                    node_list_add(&statements, stmt);
-                }
-            }
-            else
-            {
-                node_list_add(&statements, stmt);
-            }
-        }
-        else
+        AstNode *decl = parser_parse_declaration(parser);
+        if (decl == NULL)
         {
             parser_synchronize(parser);
+            continue;
         }
+
+        ast_list_append(program->program.decls, decl);
     }
 
-    if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}'"))
+    return program;
+}
+
+// declaration parsing
+AstNode *parser_parse_declaration(Parser *parser)
+{
+    AstNode *result = NULL;
+
+    switch (parser->current->kind)
     {
-        for (size_t i = 0; i < node_list_count(statements); i++)
-        {
-            node_dnit(statements[i]);
-            free(statements[i]);
-        }
-        free(statements);
+    case TOKEN_KW_USE:
+        result = parser_parse_use_decl(parser);
+        break;
+    case TOKEN_KW_EXT:
+        result = parser_parse_ext_decl(parser);
+        break;
+    case TOKEN_KW_DEF:
+        result = parser_parse_def_decl(parser);
+        break;
+    case TOKEN_KW_VAL:
+        result = parser_parse_val_decl(parser);
+        break;
+    case TOKEN_KW_VAR:
+        result = parser_parse_var_decl(parser);
+        break;
+    case TOKEN_KW_FUN:
+        result = parser_parse_fun_decl(parser);
+        break;
+    case TOKEN_KW_STR:
+        result = parser_parse_str_decl(parser);
+        break;
+    case TOKEN_KW_UNI:
+        result = parser_parse_uni_decl(parser);
+        break;
+    default:
+        parser_error_at_current(parser, "expected declaration");
         return NULL;
     }
 
-    return node_block(statements);
+    // synchronize after declaration parsing
+    parser_synchronize(parser);
+
+    return result;
 }
 
-Node *parser_parse_stmt_use(Parser *parser)
+AstNode *parser_parse_use_decl(Parser *parser)
 {
     parser_advance(parser); // consume 'use'
 
-    Node *first = parser_parse_identifier(parser);
-    if (first == NULL)
-        return NULL;
-
-    Node *node = malloc(sizeof(Node));
+    AstNode *node = malloc(sizeof(AstNode));
     if (node == NULL)
-        return NULL;
-
-    if (parser_check(parser, TOKEN_COLON))
     {
-        parser_advance(parser); // consume ':'
+        parser_error_at_current(parser, "memory allocation failed for use declaration");
+        return NULL;
+    }
+    ast_node_init(node, AST_USE_DECL);
+    node->token = parser->previous;
 
-        Node *module = parser_parse_identifier(parser);
-        if (module == NULL)
+    // check for alias first
+    char *alias = NULL;
+    char *path  = NULL;
+
+    // parse first identifier
+    char *first = parser_parse_identifier(parser);
+    if (first == NULL)
+    {
+        parser_error_at_current(parser, "expected identifier after 'use'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (parser_match(parser, TOKEN_COLON))
+    {
+        // it's an aliased import: `alias: module.path`
+        alias = first;
+        path  = parser_parse_identifier(parser);
+        if (path == NULL)
         {
-            node_dnit(first);
-            free(first);
+            parser_error_at_current(parser, "expected module path after alias");
+            ast_node_dnit(node);
             free(node);
             return NULL;
         }
 
-        while (parser_check(parser, TOKEN_DOT))
+        // parse rest of module path
+        while (parser_match(parser, TOKEN_DOT))
         {
-            parser_advance(parser); // consume '.'
-
-            Node *next_part = parser_parse_identifier(parser);
-            if (next_part == NULL)
-            {
-                node_dnit(first);
-                free(first);
-                node_dnit(module);
-                free(module);
-                free(node);
-                return NULL;
-            }
-
-            Node *dotted = malloc(sizeof(Node));
-            if (dotted == NULL)
-            {
-                node_dnit(first);
-                free(first);
-                node_dnit(module);
-                free(module);
-                node_dnit(next_part);
-                free(next_part);
-                free(node);
-                return NULL;
-            }
-
-            node_init(dotted, NODE_EXPR_MEMBER);
-            dotted->binary.left  = module;
-            dotted->binary.right = next_part;
-            module               = dotted;
+            char *next     = parser_parse_identifier(parser);
+            char *new_path = malloc(strlen(path) + strlen(next) + 2);
+            sprintf(new_path, "%s.%s", path, next);
+            free(path);
+            free(next);
+            path = new_path;
         }
-
-        node_init(node, NODE_STMT_USE);
-        node->binary.left  = first;
-        node->binary.right = module;
     }
     else
     {
-        Node *module = first;
-        while (parser_check(parser, TOKEN_DOT))
+        // it's an unaliased import: `module.path`
+        path = first;
+
+        // parse rest of module path
+        while (parser_match(parser, TOKEN_DOT))
         {
-            parser_advance(parser); // consume '.'
-
-            Node *next_part = parser_parse_identifier(parser);
-            if (next_part == NULL)
-            {
-                node_dnit(module);
-                free(module);
-                free(node);
-                return NULL;
-            }
-
-            Node *dotted = malloc(sizeof(Node));
-            if (dotted == NULL)
-            {
-                node_dnit(module);
-                free(module);
-                node_dnit(next_part);
-                free(next_part);
-                free(node);
-                return NULL;
-            }
-
-            node_init(dotted, NODE_EXPR_MEMBER);
-            dotted->binary.left  = module;
-            dotted->binary.right = next_part;
-            module               = dotted;
+            char *next     = parser_parse_identifier(parser);
+            char *new_path = malloc(strlen(path) + strlen(next) + 2);
+            sprintf(new_path, "%s.%s", path, next);
+            free(path);
+            free(next);
+            path = new_path;
         }
-
-        node_init(node, NODE_STMT_USE);
-        node->single = module;
     }
 
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after use statement"))
+    node->use_decl.module_path = path;
+    node->use_decl.alias       = alias;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after use declaration"))
     {
-        node_dnit(node);
+        ast_node_dnit(node);
         free(node);
         return NULL;
     }
@@ -1122,824 +408,1367 @@ Node *parser_parse_stmt_use(Parser *parser)
     return node;
 }
 
-Node *parser_parse_stmt_val(Parser *parser)
-{
-    Token val_token = parser->current; // save token before advancing
-    parser_advance(parser);            // consume 'val'
-
-    Node *identifier = parser_parse_identifier(parser);
-    if (identifier == NULL)
-    {
-        return NULL;
-    }
-
-    Node *type = NULL;
-    if (parser_match(parser, TOKEN_COLON))
-    {
-        type = parser_parse_type(parser);
-        if (type == NULL)
-        {
-            node_dnit(identifier);
-            free(identifier);
-            return NULL;
-        }
-    }
-
-    Node *init = NULL;
-    if (parser_match(parser, TOKEN_EQUAL))
-    {
-        init = parser_parse_expr(parser);
-        if (init == NULL)
-        {
-            node_dnit(identifier);
-            free(identifier);
-            if (type)
-            {
-                node_dnit(type);
-                free(type);
-            }
-            return NULL;
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after val declaration"))
-    {
-        node_dnit(identifier);
-        free(identifier);
-        if (type)
-        {
-            node_dnit(type);
-            free(type);
-        }
-        if (init)
-        {
-            node_dnit(init);
-            free(init);
-        }
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_VAL);
-    node->token     = malloc(sizeof(Token));
-    *node->token    = val_token; // copy token for error reporting
-    node->decl.name = identifier;
-    node->decl.type = type;
-    node->decl.init = init;
-    return node;
-}
-
-Node *parser_parse_stmt_var(Parser *parser)
-{
-    parser_advance(parser); // consume 'var'
-
-    Node *identifier = parser_parse_identifier(parser);
-    if (identifier == NULL)
-    {
-        return NULL;
-    }
-
-    Node *type = NULL;
-    if (parser_match(parser, TOKEN_COLON))
-    {
-        type = parser_parse_type(parser);
-        if (type == NULL)
-        {
-            node_dnit(identifier);
-            free(identifier);
-            return NULL;
-        }
-    }
-
-    Node *init = NULL;
-    if (parser_match(parser, TOKEN_EQUAL))
-    {
-        init = parser_parse_expr(parser);
-        if (init == NULL)
-        {
-            node_dnit(identifier);
-            free(identifier);
-            if (type)
-            {
-                node_dnit(type);
-                free(type);
-            }
-            return NULL;
-        }
-    }
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after var declaration"))
-    {
-        node_dnit(identifier);
-        free(identifier);
-        if (type)
-        {
-            node_dnit(type);
-            free(type);
-        }
-        if (init)
-        {
-            node_dnit(init);
-            free(init);
-        }
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_VAR);
-    node->decl.name = identifier;
-    node->decl.type = type;
-    node->decl.init = init;
-    return node;
-}
-
-Node *parser_parse_stmt_def(Parser *parser)
-{
-    parser_advance(parser); // consume 'def'
-
-    Node *identifier = parser_parse_identifier(parser);
-    if (identifier == NULL)
-    {
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_COLON, "Expected ':' after def name"))
-    {
-        node_dnit(identifier);
-        free(identifier);
-        return NULL;
-    }
-
-    Node *type = parser_parse_type(parser);
-    if (type == NULL)
-    {
-        node_dnit(identifier);
-        free(identifier);
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after def declaration"))
-    {
-        node_dnit(identifier);
-        free(identifier);
-        node_dnit(type);
-        free(type);
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_DEF);
-    node->decl.name = identifier;
-    node->decl.type = type;
-    node->decl.init = NULL;
-    return node;
-}
-
-Node *parser_parse_stmt_fun(Parser *parser)
-{
-    parser_advance(parser); // consume 'fun'
-
-    Node *name = parser_parse_identifier(parser);
-    if (name == NULL)
-    {
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_L_PAREN, "Expected '(' after function name"))
-    {
-        node_dnit(name);
-        free(name);
-        return NULL;
-    }
-
-    bool   is_variadic = false;
-    Node **params      = parser_parse_parameter_list(parser, &is_variadic);
-
-    if (!parser_consume(parser, TOKEN_R_PAREN, "Expected ')' after parameters"))
-    {
-        node_dnit(name);
-        free(name);
-        if (params)
-        {
-            for (size_t i = 0; i < node_list_count(params); i++)
-            {
-                node_dnit(params[i]);
-                free(params[i]);
-            }
-            free(params);
-        }
-        return NULL;
-    }
-
-    Node *return_type = NULL;
-    if (!parser_check(parser, TOKEN_L_BRACE))
-    {
-        return_type = parser_parse_type(parser);
-        if (return_type == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            if (params)
-            {
-                for (size_t i = 0; i < node_list_count(params); i++)
-                {
-                    node_dnit(params[i]);
-                    free(params[i]);
-                }
-                free(params);
-            }
-            return NULL;
-        }
-    }
-
-    Node *body = parser_parse_stmt_block(parser);
-    if (body == NULL)
-    {
-        node_dnit(name);
-        free(name);
-        if (params)
-        {
-            for (size_t i = 0; i < node_list_count(params); i++)
-            {
-                node_dnit(params[i]);
-                free(params[i]);
-            }
-            free(params);
-        }
-        if (return_type)
-        {
-            node_dnit(return_type);
-            free(return_type);
-        }
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_FUNCTION);
-    node->function.name        = name;
-    node->function.params      = params;
-    node->function.return_type = return_type;
-    node->function.body        = body;
-    node->function.is_variadic = is_variadic;
-    return node;
-}
-
-// simplify struct statement parsing
-Node *parser_parse_stmt_str(Parser *parser)
-{
-    parser_advance(parser); // consume 'str'
-
-    if (parser_check(parser, TOKEN_IDENTIFIER))
-    {
-        Node *name = parser_parse_identifier(parser);
-        if (name == NULL)
-            return NULL;
-
-        if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after struct name"))
-        {
-            node_dnit(name);
-            free(name);
-            return NULL;
-        }
-
-        Node **fields = parser_parse_field_list(parser);
-
-        if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}' after struct fields"))
-        {
-            node_dnit(name);
-            free(name);
-            if (fields)
-            {
-                for (size_t i = 0; i < node_list_count(fields); i++)
-                {
-                    node_dnit(fields[i]);
-                    free(fields[i]);
-                }
-                free(fields);
-            }
-            return NULL;
-        }
-
-        Node *node = malloc(sizeof(Node));
-        if (node == NULL)
-            return NULL;
-
-        node_init(node, NODE_STMT_STRUCT);
-        node->composite.fields    = malloc((node_list_count(fields) + 2) * sizeof(Node *));
-        node->composite.fields[0] = name;
-        for (size_t i = 0; i < node_list_count(fields); i++)
-        {
-            node->composite.fields[i + 1] = fields[i];
-        }
-        node->composite.fields[node_list_count(fields) + 1] = NULL;
-        free(fields);
-        return node;
-    }
-
-    if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after str"))
-        return NULL;
-
-    Node **fields = parser_parse_field_list(parser);
-
-    if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}' after struct fields"))
-    {
-        if (fields)
-        {
-            for (size_t i = 0; i < node_list_count(fields); i++)
-            {
-                node_dnit(fields[i]);
-                free(fields[i]);
-            }
-            free(fields);
-        }
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-        return NULL;
-
-    node_init(node, NODE_TYPE_STRUCT);
-    node->composite.fields = fields;
-    return node;
-}
-
-Node *parser_parse_stmt_uni(Parser *parser)
-{
-    parser_advance(parser); // consume 'uni'
-
-    if (parser_check(parser, TOKEN_IDENTIFIER))
-    {
-        Node *name = parser_parse_identifier(parser);
-        if (name == NULL)
-            return NULL;
-
-        if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after union name"))
-        {
-            node_dnit(name);
-            free(name);
-            return NULL;
-        }
-
-        Node **fields = parser_parse_field_list(parser);
-
-        if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}' after union fields"))
-        {
-            node_dnit(name);
-            free(name);
-            if (fields)
-            {
-                for (size_t i = 0; i < node_list_count(fields); i++)
-                {
-                    node_dnit(fields[i]);
-                    free(fields[i]);
-                }
-                free(fields);
-            }
-            return NULL;
-        }
-
-        Node *node = malloc(sizeof(Node));
-        if (node == NULL)
-            return NULL;
-
-        node_init(node, NODE_STMT_UNION);
-        node->composite.fields    = malloc((node_list_count(fields) + 2) * sizeof(Node *));
-        node->composite.fields[0] = name;
-        for (size_t i = 0; i < node_list_count(fields); i++)
-        {
-            node->composite.fields[i + 1] = fields[i];
-        }
-        node->composite.fields[node_list_count(fields) + 1] = NULL;
-        free(fields);
-        return node;
-    }
-
-    if (!parser_consume(parser, TOKEN_L_BRACE, "Expected '{' after uni"))
-        return NULL;
-
-    Node **fields = parser_parse_field_list(parser);
-
-    if (!parser_consume(parser, TOKEN_R_BRACE, "Expected '}' after union fields"))
-    {
-        if (fields)
-        {
-            for (size_t i = 0; i < node_list_count(fields); i++)
-            {
-                node_dnit(fields[i]);
-                free(fields[i]);
-            }
-            free(fields);
-        }
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-        return NULL;
-
-    node_init(node, NODE_TYPE_UNION);
-    node->composite.fields = fields;
-    return node;
-}
-
-// ensure external statement uses single field consistently
-Node *parser_parse_stmt_ext(Parser *parser)
+AstNode *parser_parse_ext_decl(Parser *parser)
 {
     parser_advance(parser); // consume 'ext'
 
-    Node *decl = malloc(sizeof(Node));
-    if (decl == NULL)
-        return NULL;
-
-    node_init(decl, NODE_STMT_VAR);
-
-    decl->decl.name = parser_parse_identifier(parser);
-    if (decl->decl.name == NULL)
-    {
-        node_dnit(decl);
-        free(decl);
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_COLON, "Expected ':' after external name"))
-    {
-        node_dnit(decl);
-        free(decl);
-        return NULL;
-    }
-
-    decl->decl.type = parser_parse_type(parser);
-    if (decl->decl.type == NULL)
-    {
-        node_dnit(decl);
-        free(decl);
-        return NULL;
-    }
-
-    decl->decl.init = NULL;
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after external declaration"))
-    {
-        node_dnit(decl);
-        free(decl);
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
+    AstNode *node = malloc(sizeof(AstNode));
     if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for external declaration");
         return NULL;
+    }
+    ast_node_init(node, AST_EXT_DECL);
+    node->token = parser->previous;
 
-    node_init(node, NODE_STMT_EXTERNAL);
-    node->single = decl;
+    node->ext_decl.name = parser_parse_identifier(parser);
+    if (node->ext_decl.name == NULL)
+    {
+        parser_error_at_current(parser, "expected identifier after 'ext'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_COLON, "expected ':' after external name"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    node->ext_decl.type = parser_parse_type(parser);
+    if (node->ext_decl.type == NULL)
+    {
+        parser_error_at_current(parser, "expected type after ':' in external declaration");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after external declaration"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
     return node;
 }
 
-Node *parser_parse_stmt_if(Parser *parser)
+AstNode *parser_parse_def_decl(Parser *parser)
 {
-    parser_advance(parser); // consume 'if'
+    parser_advance(parser); // consume 'def'
 
-    if (!parser_consume(parser, TOKEN_L_PAREN, "Expected '(' after if"))
-    {
-        return NULL;
-    }
-
-    Node *condition = parser_parse_expr(parser);
-    if (condition == NULL)
-    {
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_R_PAREN, "Expected ')' after if condition"))
-    {
-        node_dnit(condition);
-        free(condition);
-        return NULL;
-    }
-
-    Node *body = parser_parse_stmt_block(parser);
-    if (body == NULL)
-    {
-        node_dnit(condition);
-        free(condition);
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
+    AstNode *node = malloc(sizeof(AstNode));
     if (node == NULL)
     {
+        parser_error_at_current(parser, "memory allocation failed for definition declaration");
+        return NULL;
+    }
+    ast_node_init(node, AST_DEF_DECL);
+    node->token = parser->previous;
+
+    node->def_decl.name = parser_parse_identifier(parser);
+    if (node->def_decl.name == NULL)
+    {
+        parser_error_at_current(parser, "expected identifier after 'def'");
+        ast_node_dnit(node);
+        free(node);
         return NULL;
     }
 
-    node_init(node, NODE_STMT_IF);
-    node->conditional.condition = condition;
-    node->conditional.body      = body;
+    if (!parser_consume(parser, TOKEN_COLON, "expected ':' after definition name"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    node->def_decl.type = parser_parse_type(parser);
+    if (node->def_decl.type == NULL)
+    {
+        parser_error_at_current(parser, "expected type after ':' in definition declaration");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after type definition"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
     return node;
 }
 
-Node *parser_parse_stmt_or(Parser *parser)
+AstNode *parser_parse_val_decl(Parser *parser)
 {
-    parser_advance(parser); // consume 'or'
+    parser_advance(parser); // consume 'val'
 
-    Node *condition = NULL;
-    if (parser_check(parser, TOKEN_L_PAREN))
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
     {
-        parser_advance(parser); // consume '('
-        condition = parser_parse_expr(parser);
-        if (condition == NULL)
+        parser_error_at_current(parser, "memory allocation failed for val declaration");
+        return NULL;
+    }
+    ast_node_init(node, AST_VAL_DECL);
+    node->token           = parser->previous;
+    node->var_decl.is_val = true;
+
+    node->var_decl.name = parser_parse_identifier(parser);
+    if (node->var_decl.name == NULL)
+    {
+        parser_error_at_current(parser, "expected identifier after 'val'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_COLON, "expected ':' after val name"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    node->var_decl.type = parser_parse_type(parser);
+    if (node->var_decl.type == NULL)
+    {
+        parser_error_at_current(parser, "expected type after ':' in val declaration");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_EQUAL, "expected '=' in val declaration"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    node->var_decl.init = parser_parse_expression(parser);
+    if (node->var_decl.init == NULL)
+    {
+        parser_error_at_current(parser, "expected expression after '=' in val declaration");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after val declaration"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_var_decl(Parser *parser)
+{
+    parser_advance(parser); // consume 'var'
+
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for var declaration");
+        return NULL;
+    }
+    ast_node_init(node, AST_VAR_DECL);
+    node->token           = parser->previous;
+    node->var_decl.is_val = false;
+
+    node->var_decl.name = parser_parse_identifier(parser);
+    if (node->var_decl.name == NULL)
+    {
+        parser_error_at_current(parser, "expected identifier after 'var'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_COLON, "expected ':' after var name"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+    node->var_decl.type = parser_parse_type(parser);
+    if (node->var_decl.type == NULL)
+    {
+        parser_error_at_current(parser, "expected type after ':' in var declaration");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    // optional initialization
+    if (parser_match(parser, TOKEN_EQUAL))
+    {
+        node->var_decl.init = parser_parse_expression(parser);
+        if (node->var_decl.init == NULL)
         {
+            parser_error_at_current(parser, "expected expression after '=' in var declaration");
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+    }
+    else
+    {
+        node->var_decl.init = NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after var declaration"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_fun_decl(Parser *parser)
+{
+    parser_advance(parser); // consume 'fun'
+
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for function declaration");
+        return NULL;
+    }
+    ast_node_init(node, AST_FUN_DECL);
+    node->token = parser->previous;
+
+    node->fun_decl.name = parser_parse_identifier(parser);
+    if (node->fun_decl.name == NULL)
+    {
+        parser_error_at_current(parser, "expected identifier after 'fun'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_L_PAREN, "expected '(' after function name"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    node->fun_decl.params = parser_parse_parameter_list(parser);
+    if (node->fun_decl.params == NULL)
+    {
+        // NOTE: no parameters is valid, but returns an empty list, not null
+        parser_error_at_current(parser, "expected parameter list after '(' in function declaration");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after parameters"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    // check for '{' next. if not found, parse next tokens as return type
+    node->fun_decl.return_type = NULL; // no return type
+    if (!parser_check(parser, TOKEN_L_BRACE))
+    {
+        // parse return type
+        node->fun_decl.return_type = parser_parse_type(parser);
+        if (node->fun_decl.return_type == NULL)
+        {
+            parser_error_at_current(parser, "expected return type or '{' after function parameters");
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+    }
+
+    // function body
+    node->fun_decl.body = parser_parse_block_stmt(parser);
+    if (node->fun_decl.body == NULL)
+    {
+        // NOTE: empty body is valid, but not null
+        parser_error_at_current(parser, "expected function body after '{'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_str_decl(Parser *parser)
+{
+    parser_advance(parser); // consume 'str'
+
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for struct declaration");
+        return NULL;
+    }
+    ast_node_init(node, AST_STR_DECL);
+    node->token = parser->previous;
+
+    node->str_decl.name = parser_parse_identifier(parser);
+    if (node->str_decl.name == NULL)
+    {
+        parser_error_at_current(parser, "expected identifier after 'str'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' after struct name"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    node->str_decl.fields = parser_parse_field_list(parser);
+    if (node->str_decl.fields == NULL)
+    {
+        parser_error_at_current(parser, "expected field list after '{' in struct declaration");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after struct fields"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_uni_decl(Parser *parser)
+{
+    parser_advance(parser); // consume 'uni'
+
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for union declaration");
+        return NULL;
+    }
+    ast_node_init(node, AST_UNI_DECL);
+    node->token = parser->previous;
+
+    node->uni_decl.name = parser_parse_identifier(parser);
+    if (node->uni_decl.name == NULL)
+    {
+        parser_error_at_current(parser, "expected identifier after 'uni'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' after union name"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+    node->uni_decl.fields = parser_parse_field_list(parser);
+    if (node->uni_decl.fields == NULL)
+    {
+        parser_error_at_current(parser, "expected field list after '{' in union declaration");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after union fields"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+// helper for parsing lists
+AstList *parser_parse_field_list(Parser *parser)
+{
+    AstList *list = malloc(sizeof(AstList));
+    if (list == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for field list");
+        return NULL;
+    }
+    ast_list_init(list);
+
+    while (!parser_check(parser, TOKEN_R_BRACE) && !parser_is_at_end(parser))
+    {
+        AstNode *field = malloc(sizeof(AstNode));
+        if (field == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for field declaration");
+            ast_list_dnit(list);
+            free(list);
+            return NULL;
+        }
+        ast_node_init(field, AST_FIELD_DECL);
+        field->token = parser->current;
+
+        field->field_decl.name = parser_parse_identifier(parser);
+        if (field->field_decl.name == NULL)
+        {
+            parser_error_at_current(parser, "expected identifier after field declaration");
+            ast_node_dnit(field);
+            ast_list_dnit(list);
+            free(field);
+            free(list);
             return NULL;
         }
 
-        if (!parser_consume(parser, TOKEN_R_PAREN, "Expected ')' after or condition"))
+        if (!parser_consume(parser, TOKEN_COLON, "expected ':' after field name"))
         {
-            node_dnit(condition);
-            free(condition);
-            return NULL;
-        }
-    }
-
-    Node *body = parser_parse_stmt_block(parser);
-    if (body == NULL)
-    {
-        if (condition)
-        {
-            node_dnit(condition);
-            free(condition);
-        }
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_OR);
-    node->conditional.condition = condition;
-    node->conditional.body      = body;
-    return node;
-}
-
-Node *parser_parse_stmt_for(Parser *parser)
-{
-    parser_advance(parser); // consume 'for'
-
-    Node *condition = NULL;
-    if (parser_check(parser, TOKEN_L_PAREN))
-    {
-        parser_advance(parser); // consume '('
-        condition = parser_parse_expr(parser);
-        if (condition == NULL)
-        {
+            ast_node_dnit(field);
+            ast_list_dnit(list);
+            free(field);
+            free(list);
             return NULL;
         }
 
-        if (!parser_consume(parser, TOKEN_R_PAREN, "Expected ')' after for condition"))
+        field->field_decl.type = parser_parse_type(parser);
+        if (field->field_decl.type == NULL)
         {
-            node_dnit(condition);
-            free(condition);
+            parser_error_at_current(parser, "expected type after ':' in field declaration");
+            ast_node_dnit(field);
+            ast_list_dnit(list);
+            free(field);
+            free(list);
             return NULL;
         }
-    }
 
-    Node *body = parser_parse_stmt_block(parser);
-    if (body == NULL)
-    {
-        if (condition)
+        if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after field"))
         {
-            node_dnit(condition);
-            free(condition);
+            ast_node_dnit(field);
+            ast_list_dnit(list);
+            free(field);
+            free(list);
+            return NULL;
         }
-        return NULL;
+
+        ast_list_append(list, field);
     }
 
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_FOR);
-    node->conditional.condition = condition;
-    node->conditional.body      = body;
-    return node;
+    return list;
 }
 
-Node *parser_parse_stmt_break(Parser *parser)
+AstList *parser_parse_parameter_list(Parser *parser)
 {
-    parser_advance(parser); // consume 'brk'
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after break"))
+    AstList *list = malloc(sizeof(AstList));
+    if (list == NULL)
     {
+        parser_error_at_current(parser, "memory allocation failed for parameter list");
         return NULL;
     }
+    ast_list_init(list);
 
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
+    // check for empty parameter list
+    if (parser_check(parser, TOKEN_R_PAREN))
     {
-        return NULL;
+        return list;
     }
 
-    node_init(node, NODE_STMT_BREAK);
-    return node;
+    do
+    {
+        AstNode *param = malloc(sizeof(AstNode));
+        if (param == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for parameter declaration");
+            ast_list_dnit(list);
+            free(list);
+            return NULL;
+        }
+        ast_node_init(param, AST_PARAM_DECL);
+        param->token = parser->current;
+
+        param->param_decl.name = parser_parse_identifier(parser);
+        if (param->param_decl.name == NULL)
+        {
+            parser_error_at_current(parser, "expected identifier after parameter declaration");
+            ast_node_dnit(param);
+            ast_list_dnit(list);
+            free(param);
+            free(list);
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_COLON, "expected ':' after parameter name"))
+        {
+            ast_node_dnit(param);
+            ast_list_dnit(list);
+            free(param);
+            free(list);
+            return NULL;
+        }
+
+        param->param_decl.type = parser_parse_type(parser);
+        if (param->param_decl.type == NULL)
+        {
+            parser_error_at_current(parser, "expected type after ':' in parameter declaration");
+            ast_node_dnit(param);
+            ast_list_dnit(list);
+            free(param);
+            free(list);
+            return NULL;
+        }
+
+        ast_list_append(list, param);
+    } while (parser_match(parser, TOKEN_COMMA));
+
+    return list;
 }
 
-Node *parser_parse_stmt_continue(Parser *parser)
+AstList *parser_parse_argument_list(Parser *parser)
 {
-    parser_advance(parser); // consume 'cnt'
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after continue"))
+    AstList *list = malloc(sizeof(AstList));
+    if (list == NULL)
     {
+        parser_error_at_current(parser, "memory allocation failed for argument list");
         return NULL;
     }
+    ast_list_init(list);
 
-    Node *node = malloc(sizeof(Node));
+    if (parser_check(parser, TOKEN_R_PAREN))
+    {
+        return list;
+    }
+
+    do
+    {
+        AstNode *arg = parser_parse_expression(parser);
+        if (arg == NULL)
+        {
+            parser_error_at_current(parser, "expected expression in argument list");
+            ast_list_dnit(list);
+            free(list);
+            return NULL;
+        }
+
+        ast_list_append(list, arg);
+    } while (parser_match(parser, TOKEN_COMMA));
+
+    return list;
+}
+
+// statement parsing
+AstNode *parser_parse_statement(Parser *parser)
+{
+    switch (parser->current->kind)
+    {
+    case TOKEN_L_BRACE:
+        return parser_parse_block_stmt(parser);
+    case TOKEN_KW_RET:
+        return parser_parse_ret_stmt(parser);
+    case TOKEN_KW_IF:
+        return parser_parse_if_stmt(parser);
+    case TOKEN_KW_FOR:
+        return parser_parse_for_stmt(parser);
+    case TOKEN_KW_BRK:
+        return parser_parse_brk_stmt(parser);
+    case TOKEN_KW_CNT:
+        return parser_parse_cnt_stmt(parser);
+    default:
+        return parser_parse_expr_stmt(parser);
+    }
+}
+
+AstNode *parser_parse_block_stmt(Parser *parser)
+{
+    AstNode *node = malloc(sizeof(AstNode));
     if (node == NULL)
     {
+        parser_error_at_current(parser, "memory allocation failed for block statement");
+        return NULL;
+    }
+    ast_node_init(node, AST_BLOCK_STMT);
+    node->token = parser->current;
+
+    node->block_stmt.stmts = malloc(sizeof(AstList));
+    if (node->block_stmt.stmts == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for block statement");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+    ast_list_init(node->block_stmt.stmts);
+
+    if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' at the start of block statement"))
+    {
+        ast_node_dnit(node);
+        free(node);
         return NULL;
     }
 
-    node_init(node, NODE_STMT_CONTINUE);
+    while (!parser_check(parser, TOKEN_R_BRACE) && !parser_is_at_end(parser))
+    {
+        // NOTE: not a huge fan of "declarations" being different than
+        // statements, but this works for now. Main difference is cleaner
+        // parsing and better errors during semantic analysis.
+        AstNode *stmt;
+        switch (parser->current->kind)
+        {
+        case TOKEN_KW_VAL:
+            stmt = parser_parse_val_decl(parser);
+            break;
+        case TOKEN_KW_VAR:
+            stmt = parser_parse_var_decl(parser);
+            break;
+        default:
+            stmt = parser_parse_statement(parser);
+            break;
+        }
+
+        if (stmt == NULL)
+        {
+            // if we failed to parse a statement, continue
+            continue;
+        }
+
+        ast_list_append(node->block_stmt.stmts, stmt);
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after block"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
     return node;
 }
 
-Node *parser_parse_stmt_return(Parser *parser)
+AstNode *parser_parse_expr_stmt(Parser *parser)
+{
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for expression statement");
+        return NULL;
+    }
+    ast_node_init(node, AST_EXPR_STMT);
+    node->token = parser->current;
+
+    node->expr_stmt.expr = parser_parse_expression(parser);
+    if (node->expr_stmt.expr == NULL)
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after expression"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_ret_stmt(Parser *parser)
 {
     parser_advance(parser); // consume 'ret'
 
-    Node *expr = NULL;
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for return statement");
+        return NULL;
+    }
+    ast_node_init(node, AST_RET_STMT);
+    node->token = parser->previous;
+
     if (!parser_check(parser, TOKEN_SEMICOLON))
     {
-        expr = parser_parse_expr(parser);
-        if (expr == NULL)
+        node->ret_stmt.expr = parser_parse_expression(parser);
+    }
+    else
+    {
+        node->ret_stmt.expr = NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after return value"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_if_stmt(Parser *parser)
+{
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for if statement");
+        return NULL;
+    }
+    ast_node_init(node, AST_IF_STMT);
+    node->token = parser->current;
+
+    // NOTE: this logic is unique as the process for checking for 'or' chains
+    // consumes the 'or' keyword. This is not the same behavior as 'if'
+    // statements, so we check for 'if' and consume it first.
+    parser_match(parser, TOKEN_KW_IF);
+
+    if (!parser_consume(parser, TOKEN_L_PAREN, "expected '('"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    node->if_stmt.cond = parser_parse_expression(parser);
+    if (node->if_stmt.cond == NULL)
+    {
+        parser_error_at_current(parser, "expected condition expression after '('");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after condition"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    node->if_stmt.then_stmt = parser_parse_block_stmt(parser);
+    if (node->if_stmt.then_stmt == NULL)
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    // handle 'or' (else) chains
+    if (parser_match(parser, TOKEN_KW_OR))
+    {
+        // check if it's 'or (condition)' vs just 'or { block }'
+        if (parser_check(parser, TOKEN_L_PAREN))
         {
+            // has condition
+            node->if_stmt.else_stmt = parser_parse_if_stmt(parser);
+        }
+        else
+        {
+            // no condition
+            node->if_stmt.else_stmt = parser_parse_block_stmt(parser);
+        }
+
+        if (node->if_stmt.else_stmt == NULL)
+        {
+            parser_error_at_current(parser, "expected condition or block after 'or'");
+            ast_node_dnit(node);
+            free(node);
             return NULL;
         }
     }
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after return"))
+    else
     {
-        if (expr)
+        node->if_stmt.else_stmt = NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_for_stmt(Parser *parser)
+{
+    parser_advance(parser); // consume 'for'
+
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for for statement");
+        return NULL;
+    }
+    ast_node_init(node, AST_FOR_STMT);
+    node->token = parser->previous;
+
+    if (parser_match(parser, TOKEN_L_PAREN))
+    {
+        node->for_stmt.cond = parser_parse_expression(parser);
+        if (node->for_stmt.cond == NULL)
         {
-            node_dnit(expr);
+            parser_error_at_current(parser, "expected loop condition after '('");
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after loop condition"))
+        {
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+    }
+    else
+    {
+        node->for_stmt.cond = NULL; // infinite loop
+    }
+
+    node->for_stmt.body = parser_parse_block_stmt(parser);
+    if (node->for_stmt.body == NULL)
+    {
+        parser_error_at_current(parser, "expected loop body after 'for'");
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_brk_stmt(Parser *parser)
+{
+    parser_advance(parser); // consume 'brk'
+
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for break statement");
+        return NULL;
+    }
+    ast_node_init(node, AST_BRK_STMT);
+    node->token = parser->previous;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after 'brk'"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+AstNode *parser_parse_cnt_stmt(Parser *parser)
+{
+    parser_advance(parser); // consume 'cnt'
+
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for continue statement");
+        return NULL;
+    }
+    ast_node_init(node, AST_CNT_STMT);
+    node->token = parser->previous;
+
+    if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after 'cnt'"))
+    {
+        ast_node_dnit(node);
+        free(node);
+        return NULL;
+    }
+
+    return node;
+}
+
+// expression parsing
+AstNode *parser_parse_expression(Parser *parser)
+{
+    return parser_parse_assignment(parser);
+}
+
+AstNode *parser_parse_assignment(Parser *parser)
+{
+    AstNode *expr = parser_parse_logical_or(parser);
+
+    if (parser_match(parser, TOKEN_EQUAL))
+    {
+        AstNode *assign = malloc(sizeof(AstNode));
+        if (assign == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for assignment expression");
+            ast_node_dnit(expr);
             free(expr);
+            return NULL;
         }
-        return NULL;
-    }
+        ast_node_init(assign, AST_BINARY_EXPR);
+        assign->token = parser->previous;
 
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_RETURN);
-    node->single = expr;
-    return node;
-}
-
-Node *parser_parse_stmt_expr(Parser *parser)
-{
-    Node *expr = parser_parse_expr(parser);
-    if (expr == NULL)
-    {
-        return NULL;
-    }
-
-    if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after expression"))
-    {
-        node_dnit(expr);
-        free(expr);
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_STMT_EXPRESSION);
-    node->single = expr;
-    return node;
-}
-
-// type parsing
-Node *parser_parse_type(Parser *parser)
-{
-    Node *base_type = NULL;
-
-    // handle prefix modifiers (pointers)
-    int pointer_count = 0;
-    while (parser_check(parser, TOKEN_STAR))
-    {
-        parser_advance(parser); // consume '*'
-        pointer_count++;
-    }
-
-    // handle base types
-    switch (parser->current.kind)
-    {
-    case TOKEN_TYPE_ANY:
-    case TOKEN_TYPE_I8:
-    case TOKEN_TYPE_I16:
-    case TOKEN_TYPE_I32:
-    case TOKEN_TYPE_I64:
-    case TOKEN_TYPE_U8:
-    case TOKEN_TYPE_U16:
-    case TOKEN_TYPE_U32:
-    case TOKEN_TYPE_U64:
-    case TOKEN_TYPE_F32:
-    case TOKEN_TYPE_F64:
-    {
-        char *type_name = lexer_raw_value(parser->lexer, &parser->current);
-        base_type       = node_identifier(type_name);
-        free(type_name);
-        parser_advance(parser);
-    }
-    break;
-    case TOKEN_IDENTIFIER:
-        base_type = parser_parse_identifier(parser);
-        break;
-    case TOKEN_KW_FUN:
-        base_type = parser_parse_type_function(parser);
-        break;
-    case TOKEN_KW_STR:
-        base_type = parser_parse_stmt_str(parser); // reuse struct parsing
-        break;
-    case TOKEN_KW_UNI:
-        base_type = parser_parse_stmt_uni(parser); // reuse union parsing
-        break;
-    case TOKEN_L_BRACKET:
-        // handle array types that start with [, like [_]u8 or [10]i32
-        base_type = parser_parse_type_array_prefix(parser);
-        break;
-    default:
-        parser_error(parser, "Expected type");
-        return NULL;
-    }
-
-    if (base_type == NULL)
-    {
-        return NULL;
-    }
-
-    // apply pointer prefixes (in reverse order since we counted them)
-    for (int i = 0; i < pointer_count; i++)
-    {
-        Node *pointer_node = malloc(sizeof(Node));
-        if (pointer_node == NULL)
+        assign->binary_expr.right = parser_parse_assignment(parser);
+        if (assign->binary_expr.right == NULL)
         {
-            node_dnit(base_type);
-            free(base_type);
+            parser_error_at_current(parser, "expected expression after '=' in assignment");
+            ast_node_dnit(assign);
+            ast_node_dnit(expr);
+            free(assign);
+            free(expr);
             return NULL;
         }
 
-        node_init(pointer_node, NODE_TYPE_POINTER);
-        pointer_node->single = base_type;
-        base_type            = pointer_node;
+        assign->binary_expr.left = expr;
+        assign->binary_expr.op   = TOKEN_EQUAL;
+
+        return assign;
     }
 
-    // handle postfix modifiers (arrays, additional pointers)
-    while (true)
+    return expr;
+}
+
+AstNode *parser_parse_logical_or(Parser *parser)
+{
+    AstNode *expr = parser_parse_logical_and(parser);
+
+    while (parser_match(parser, TOKEN_PIPE_PIPE))
     {
-        if (parser_check(parser, TOKEN_L_BRACKET))
+        AstNode *binary = malloc(sizeof(AstNode));
+        if (binary == NULL)
         {
-            base_type = parser_parse_type_array(parser, base_type);
-            if (base_type == NULL)
-            {
-                return NULL;
-            }
+            parser_error_at_current(parser, "memory allocation failed for binary expression");
+            return NULL;
         }
-        else if (parser_check(parser, TOKEN_STAR))
+        ast_node_init(binary, AST_BINARY_EXPR);
+        binary->token = parser->previous;
+
+        binary->binary_expr.op    = parser->previous->kind;
+        binary->binary_expr.right = parser_parse_logical_and(parser);
+        if (binary->binary_expr.right == NULL)
         {
-            base_type = parser_parse_type_pointer(parser, base_type);
-            if (base_type == NULL)
+            parser_error_at_current(parser, "expected expression after '||'");
+            ast_node_dnit(expr);
+            ast_node_dnit(binary);
+            free(binary);
+            free(expr);
+            return NULL;
+        }
+
+        binary->binary_expr.left = expr;
+        expr                     = binary;
+    }
+
+    return expr;
+}
+
+AstNode *parser_parse_logical_and(Parser *parser)
+{
+    AstNode *expr = parser_parse_bitwise(parser);
+
+    while (parser_match(parser, TOKEN_AMPERSAND_AMPERSAND))
+    {
+        AstNode *binary = malloc(sizeof(AstNode));
+        if (binary == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for binary expression");
+            return NULL;
+        }
+        ast_node_init(binary, AST_BINARY_EXPR);
+        binary->token = parser->previous;
+
+        binary->binary_expr.op    = parser->previous->kind;
+        binary->binary_expr.right = parser_parse_bitwise(parser);
+        if (binary->binary_expr.right == NULL)
+        {
+            parser_error_at_current(parser, "expected expression after '&&'");
+            ast_node_dnit(expr);
+            ast_node_dnit(binary);
+            free(binary);
+            free(expr);
+            return NULL;
+        }
+
+        binary->binary_expr.left = expr;
+        expr                     = binary;
+    }
+
+    return expr;
+}
+
+AstNode *parser_parse_bitwise(Parser *parser)
+{
+    AstNode *expr = parser_parse_equality(parser);
+
+    while (parser->current->kind == TOKEN_PIPE || parser->current->kind == TOKEN_CARET || parser->current->kind == TOKEN_AMPERSAND)
+    {
+        parser_advance(parser);
+        AstNode *binary = malloc(sizeof(AstNode));
+        if (binary == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for binary expression");
+            ast_node_dnit(expr);
+            free(expr);
+            return NULL;
+        }
+        ast_node_init(binary, AST_BINARY_EXPR);
+        binary->token          = parser->previous;
+        binary->binary_expr.op = parser->previous->kind;
+
+        binary->binary_expr.right = parser_parse_equality(parser);
+        if (binary->binary_expr.right == NULL)
+        {
+            parser_error_at_current(parser, "expected expression after bitwise operator");
+            ast_node_dnit(expr);
+            ast_node_dnit(binary);
+            free(binary);
+            free(expr);
+            return NULL;
+        }
+
+        binary->binary_expr.left = expr;
+        expr                     = binary;
+    }
+
+    return expr;
+}
+
+AstNode *parser_parse_equality(Parser *parser)
+{
+    AstNode *expr = parser_parse_comparison(parser);
+
+    while (parser->current->kind == TOKEN_EQUAL_EQUAL || parser->current->kind == TOKEN_BANG_EQUAL)
+    {
+        parser_advance(parser);
+        AstNode *binary = malloc(sizeof(AstNode));
+        if (binary == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for binary expression");
+            ast_node_dnit(expr);
+            free(expr);
+            return NULL;
+        }
+        ast_node_init(binary, AST_BINARY_EXPR);
+        binary->token          = parser->previous;
+        binary->binary_expr.op = parser->previous->kind;
+
+        binary->binary_expr.right = parser_parse_comparison(parser);
+        if (binary->binary_expr.right == NULL)
+        {
+            parser_error_at_current(parser, "expected expression after equality operator");
+            ast_node_dnit(expr);
+            ast_node_dnit(binary);
+            free(binary);
+            free(expr);
+            return NULL;
+        }
+
+        binary->binary_expr.left = expr;
+        expr                     = binary;
+    }
+
+    return expr;
+}
+
+AstNode *parser_parse_comparison(Parser *parser)
+{
+    AstNode *expr = parser_parse_bit_shift(parser);
+
+    while (parser->current->kind == TOKEN_LESS || parser->current->kind == TOKEN_GREATER || parser->current->kind == TOKEN_LESS_EQUAL || parser->current->kind == TOKEN_GREATER_EQUAL)
+    {
+        parser_advance(parser);
+        AstNode *binary = malloc(sizeof(AstNode));
+        if (binary == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for binary expression");
+            ast_node_dnit(expr);
+            free(expr);
+            return NULL;
+        }
+        ast_node_init(binary, AST_BINARY_EXPR);
+        binary->token          = parser->previous;
+        binary->binary_expr.op = parser->previous->kind;
+
+        binary->binary_expr.right = parser_parse_bit_shift(parser);
+        if (binary->binary_expr.right == NULL)
+        {
+            parser_error_at_current(parser, "expected expression after comparison operator");
+            ast_node_dnit(expr);
+            ast_node_dnit(binary);
+            free(binary);
+            free(expr);
+            return NULL;
+        }
+
+        binary->binary_expr.left = expr;
+        expr                     = binary;
+    }
+
+    return expr;
+}
+
+AstNode *parser_parse_bit_shift(Parser *parser)
+{
+    AstNode *expr = parser_parse_addition(parser);
+
+    while (parser->current->kind == TOKEN_LESS_LESS || parser->current->kind == TOKEN_GREATER_GREATER)
+    {
+        parser_advance(parser);
+        AstNode *binary = malloc(sizeof(AstNode));
+        if (binary == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for binary expression");
+            ast_node_dnit(expr);
+            free(expr);
+            return NULL;
+        }
+        ast_node_init(binary, AST_BINARY_EXPR);
+        binary->token          = parser->previous;
+        binary->binary_expr.op = parser->previous->kind;
+
+        binary->binary_expr.right = parser_parse_addition(parser);
+        if (binary->binary_expr.right == NULL)
+        {
+            parser_error_at_current(parser, "expected expression after bit shift operator");
+            ast_node_dnit(expr);
+            ast_node_dnit(binary);
+            free(binary);
+            free(expr);
+            return NULL;
+        }
+
+        binary->binary_expr.left = expr;
+        expr                     = binary;
+    }
+
+    return expr;
+}
+
+AstNode *parser_parse_addition(Parser *parser)
+{
+    AstNode *expr = parser_parse_multiplication(parser);
+
+    while (parser->current->kind == TOKEN_PLUS || parser->current->kind == TOKEN_MINUS)
+    {
+        parser_advance(parser);
+        AstNode *binary = malloc(sizeof(AstNode));
+        if (binary == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for binary expression");
+            ast_node_dnit(expr);
+            free(expr);
+            return NULL;
+        }
+        ast_node_init(binary, AST_BINARY_EXPR);
+        binary->token          = parser->previous;
+        binary->binary_expr.op = parser->previous->kind;
+
+        binary->binary_expr.right = parser_parse_multiplication(parser);
+        if (binary->binary_expr.right == NULL)
+        {
+            parser_error_at_current(parser, "expected expression after addition operator");
+            ast_node_dnit(expr);
+            ast_node_dnit(binary);
+            free(binary);
+            free(expr);
+            return NULL;
+        }
+
+        binary->binary_expr.left = expr;
+        expr                     = binary;
+    }
+
+    return expr;
+}
+
+AstNode *parser_parse_multiplication(Parser *parser)
+{
+    AstNode *expr = parser_parse_unary(parser);
+
+    while (parser->current->kind == TOKEN_STAR || parser->current->kind == TOKEN_SLASH || parser->current->kind == TOKEN_PERCENT)
+    {
+        parser_advance(parser);
+        AstNode *binary = malloc(sizeof(AstNode));
+        if (binary == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for binary expression");
+            ast_node_dnit(expr);
+            free(expr);
+            return NULL;
+        }
+        ast_node_init(binary, AST_BINARY_EXPR);
+        binary->token          = parser->previous;
+        binary->binary_expr.op = parser->previous->kind;
+
+        binary->binary_expr.right = parser_parse_unary(parser);
+        if (binary->binary_expr.right == NULL)
+        {
+            parser_error_at_current(parser, "expected expression after multiplication operator");
+            ast_node_dnit(expr);
+            ast_node_dnit(binary);
+            free(binary);
+            free(expr);
+            return NULL;
+        }
+
+        binary->binary_expr.left = expr;
+        expr                     = binary;
+    }
+
+    return expr;
+}
+
+AstNode *parser_parse_unary(Parser *parser)
+{
+    if (parser->current->kind == TOKEN_BANG || parser->current->kind == TOKEN_MINUS || parser->current->kind == TOKEN_PLUS || parser->current->kind == TOKEN_TILDE || parser->current->kind == TOKEN_QUESTION || parser->current->kind == TOKEN_AT ||
+        parser->current->kind == TOKEN_STAR)
+    {
+        parser_advance(parser);
+
+        AstNode *unary = malloc(sizeof(AstNode));
+        if (unary == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for unary expression");
+            return NULL;
+        }
+        ast_node_init(unary, AST_UNARY_EXPR);
+        unary->token         = parser->previous;
+        unary->unary_expr.op = parser->previous->kind;
+
+        unary->unary_expr.expr = parser_parse_unary(parser);
+        if (unary->unary_expr.expr == NULL)
+        {
+            parser_error_at_current(parser, "expected expression after unary operator");
+            ast_node_dnit(unary);
+            free(unary);
+            return NULL;
+        }
+
+        return unary;
+    }
+
+    return parser_parse_postfix(parser);
+}
+
+AstNode *parser_parse_postfix(Parser *parser)
+{
+    AstNode *expr = parser_parse_primary(parser);
+
+    for (;;)
+    {
+        if (parser_match(parser, TOKEN_L_PAREN))
+        {
+            AstNode *call = malloc(sizeof(AstNode));
+            if (call == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for function call expression");
+                return NULL;
+            }
+            ast_node_init(call, AST_CALL_EXPR);
+            call->token          = parser->previous;
+            call->call_expr.func = expr;
+
+            // function call
+            call->call_expr.args = parser_parse_argument_list(parser);
+            if (call->call_expr.args == NULL)
+            {
+                parser_error_at_current(parser, "expected argument list after '(' in function call");
+                ast_node_dnit(call);
+                free(call);
+                return NULL;
+            }
+
+            if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after arguments"))
             {
                 return NULL;
             }
+
+            expr = call;
+        }
+        else if (parser_match(parser, TOKEN_L_BRACKET))
+        {
+            AstNode *index_expr = malloc(sizeof(AstNode));
+            if (index_expr == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for index expression");
+                return NULL;
+            }
+            ast_node_init(index_expr, AST_INDEX_EXPR);
+            index_expr->token            = parser->previous;
+            index_expr->index_expr.array = expr;
+
+            // array indexing
+            index_expr->index_expr.index = parser_parse_expression(parser);
+            if (index_expr->index_expr.index == NULL)
+            {
+                parser_error_at_current(parser, "expected expression for array index");
+                ast_node_dnit(index_expr);
+                free(index_expr);
+                return NULL;
+            }
+
+            if (!parser_consume(parser, TOKEN_R_BRACKET, "expected ']' after array index"))
+            {
+                return NULL;
+            }
+
+            expr = index_expr;
+        }
+        else if (parser_match(parser, TOKEN_DOT))
+        {
+            AstNode *field_expr = malloc(sizeof(AstNode));
+            if (field_expr == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for field expression");
+                return NULL;
+            }
+            ast_node_init(field_expr, AST_FIELD_EXPR);
+            field_expr->token             = parser->previous;
+            field_expr->field_expr.object = expr;
+
+            // field access
+            field_expr->field_expr.field = parser_parse_identifier(parser);
+            if (field_expr->field_expr.field == NULL)
+            {
+                parser_error_at_current(parser, "expected identifier after '.' for field access");
+                ast_node_dnit(field_expr);
+                free(field_expr);
+                return NULL;
+            }
+
+            expr = field_expr;
+        }
+        else if (parser_match(parser, TOKEN_COLON_COLON))
+        {
+            AstNode *cast = malloc(sizeof(AstNode));
+            if (cast == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for cast expression");
+                return NULL;
+            }
+            ast_node_init(cast, AST_CAST_EXPR);
+            cast->token          = parser->previous;
+            cast->cast_expr.expr = expr;
+
+            // type cast
+            cast->cast_expr.type = parser_parse_type(parser);
+            if (cast->cast_expr.type == NULL)
+            {
+                parser_error_at_current(parser, "expected type after '::' for cast");
+                ast_node_dnit(cast);
+                free(cast);
+                return NULL;
+            }
+
+            expr = cast;
         }
         else
         {
@@ -1947,487 +1776,919 @@ Node *parser_parse_type(Parser *parser)
         }
     }
 
-    return base_type;
+    return expr;
 }
 
-Node *parser_parse_type_array(Parser *parser, Node *base_type)
+AstNode *parser_parse_primary(Parser *parser)
 {
-    parser_advance(parser); // consume '['
-
-    Node *size = NULL;
-    if (!parser_check(parser, TOKEN_UNDERSCORE) && !parser_check(parser, TOKEN_R_BRACKET))
+    // literals
+    if (parser->current->kind == TOKEN_LIT_INT)
     {
-        size = parser_parse_expr(parser);
-        if (size == NULL)
+        Token   *token = parser->current;
+        AstNode *lit   = malloc(sizeof(AstNode));
+        if (lit == NULL)
         {
-            node_dnit(base_type);
-            free(base_type);
+            parser_error_at_current(parser, "memory allocation failed for integer literal");
             return NULL;
         }
-    }
-    else if (parser_check(parser, TOKEN_UNDERSCORE))
-    {
-        parser_advance(parser); // consume '_' for dynamic array
+        ast_node_init(lit, AST_LIT_EXPR);
+        lit->token            = token;
+        lit->lit_expr.kind    = TOKEN_LIT_INT;
+        lit->lit_expr.int_val = lexer_eval_lit_int(parser->lexer, parser->current);
+        parser_advance(parser);
+        return lit;
     }
 
-    if (!parser_consume(parser, TOKEN_R_BRACKET, "Expected ']'"))
+    if (parser->current->kind == TOKEN_LIT_FLOAT)
     {
-        node_dnit(base_type);
-        free(base_type);
-        if (size)
+        Token   *token = parser->current;
+        AstNode *lit   = malloc(sizeof(AstNode));
+        if (lit == NULL)
         {
-            node_dnit(size);
-            free(size);
-        }
-        return NULL;
-    }
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_TYPE_ARRAY);
-    node->binary.left  = size;
-    node->binary.right = base_type;
-    return node;
-}
-
-Node *parser_parse_type_pointer(Parser *parser, Node *base_type)
-{
-    parser_advance(parser); // consume '*'
-
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
-    {
-        return NULL;
-    }
-
-    node_init(node, NODE_TYPE_POINTER);
-    node->single = base_type;
-    return node;
-}
-
-Node *parser_parse_type_function(Parser *parser)
-{
-    parser_advance(parser); // consume 'fun'
-
-    if (!parser_consume(parser, TOKEN_L_PAREN, "Expected '(' after fun"))
-    {
-        return NULL;
-    }
-
-    bool   is_variadic = false;
-    Node **params      = parser_parse_type_parameter_list(parser, &is_variadic);
-
-    if (!parser_consume(parser, TOKEN_R_PAREN, "Expected ')' after parameters"))
-    {
-        if (params)
-        {
-            for (size_t i = 0; i < node_list_count(params); i++)
-            {
-                node_dnit(params[i]);
-                free(params[i]);
-            }
-            free(params);
-        }
-        return NULL;
-    }
-
-    Node *return_type = NULL;
-    if (!parser_check(parser, TOKEN_SEMICOLON) && !parser_check(parser, TOKEN_R_PAREN) && !parser_check(parser, TOKEN_COMMA) && !parser_check(parser, TOKEN_EOF))
-    {
-        return_type = parser_parse_type(parser);
-        if (return_type == NULL)
-        {
-            if (params)
-            {
-                for (size_t i = 0; i < node_list_count(params); i++)
-                {
-                    node_dnit(params[i]);
-                    free(params[i]);
-                }
-                free(params);
-            }
+            parser_error_at_current(parser, "memory allocation failed for float literal");
             return NULL;
         }
+        ast_node_init(lit, AST_LIT_EXPR);
+        lit->token              = token;
+        lit->lit_expr.kind      = TOKEN_LIT_FLOAT;
+        lit->lit_expr.float_val = lexer_eval_lit_float(parser->lexer, parser->current);
+        parser_advance(parser);
+        return lit;
     }
 
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
+    if (parser->current->kind == TOKEN_LIT_CHAR)
     {
-        return NULL;
+        Token   *token = parser->current;
+        AstNode *lit   = malloc(sizeof(AstNode));
+        if (lit == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for character literal");
+            return NULL;
+        }
+        ast_node_init(lit, AST_LIT_EXPR);
+        lit->token             = token;
+        lit->lit_expr.kind     = TOKEN_LIT_CHAR;
+        lit->lit_expr.char_val = lexer_eval_lit_char(parser->lexer, parser->current);
+        parser_advance(parser);
+        return lit;
     }
 
-    node_init(node, NODE_TYPE_FUNCTION);
-    node->function.params      = params;
-    node->function.return_type = return_type;
-    node->function.body        = NULL;
-    node->function.is_variadic = is_variadic;
-    return node;
-}
-
-// parameter list parsing for type declarations (type-only)
-Node **parser_parse_type_parameter_list(Parser *parser, bool *is_variadic)
-{
-    Node **params = node_list_new();
-    if (params == NULL)
+    if (parser->current->kind == TOKEN_LIT_STRING)
     {
-        return NULL;
+        Token   *token = parser->current;
+        AstNode *lit   = malloc(sizeof(AstNode));
+        if (lit == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for string literal");
+            return NULL;
+        }
+        ast_node_init(lit, AST_LIT_EXPR);
+        lit->token               = token;
+        lit->lit_expr.kind       = TOKEN_LIT_STRING;
+        lit->lit_expr.string_val = lexer_eval_lit_string(parser->lexer, parser->current);
+        parser_advance(parser);
+        return lit;
     }
 
-    *is_variadic = false;
-
-    while (!parser_check(parser, TOKEN_R_PAREN) && !parser_check(parser, TOKEN_EOF))
+    // grouped expression
+    if (parser_match(parser, TOKEN_L_PAREN))
     {
-        // check for variadic parameters
-        if (parser_check(parser, TOKEN_DOT) && parser->peek.kind == TOKEN_DOT)
+        AstNode *expr = parser_parse_expression(parser);
+        if (expr == NULL)
         {
-            parser_advance(parser);              // consume first '.'
-            parser_advance(parser);              // consume second '.'
-            if (parser_match(parser, TOKEN_DOT)) // consume third '.'
-            {
-                *is_variadic = true;
-                break;
-            }
-            else
-            {
-                parser_error(parser, "Expected '...'");
-                goto error;
-            }
+            parser_error_at_current(parser, "expected expression after '('");
+            return NULL;
         }
 
-        // for type parameter lists, just parse the type directly
-        Node *type = parser_parse_type(parser);
-        if (type == NULL)
+        if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after expression"))
         {
-            goto error;
+            return NULL;
         }
 
-        // create a parameter node without name
-        Node *param = malloc(sizeof(Node));
-        if (param == NULL)
-        {
-            node_dnit(type);
-            free(type);
-            goto error;
-        }
-
-        node_init(param, NODE_STMT_VAL); // use VAL for parameters
-        param->decl.name = NULL;         // no name for type-only parameters
-        param->decl.type = type;
-        param->decl.init = NULL;
-
-        node_list_add(&params, param);
-
-        if (!parser_check(parser, TOKEN_R_PAREN))
-        {
-            if (!parser_consume(parser, TOKEN_COMMA, "Expected ',' or ')'"))
-            {
-                goto error;
-            }
-        }
+        return expr;
     }
 
-    return params;
-
-error:
-    if (params)
+    // array literal
+    if (parser_match(parser, TOKEN_L_BRACKET))
     {
-        for (size_t i = 0; i < node_list_count(params); i++)
-        {
-            node_dnit(params[i]);
-            free(params[i]);
-        }
-        free(params);
-    }
-    return NULL;
-}
-
-// helper functions
-Node **parser_parse_parameter_list(Parser *parser, bool *is_variadic)
-{
-    Node **params = node_list_new();
-    if (params == NULL)
-    {
-        return NULL;
+        return parser_parse_array_literal(parser);
     }
 
-    *is_variadic = false;
-
-    while (!parser_check(parser, TOKEN_R_PAREN) && !parser_check(parser, TOKEN_EOF))
+    // identifier (possibly followed by struct literal)
+    if (parser->current->kind == TOKEN_IDENTIFIER)
     {
-        // check for variadic parameters at start (anonymous: ...)
-        if (parser_check(parser, TOKEN_DOT) && parser->peek.kind == TOKEN_DOT)
-        {
-            parser_advance(parser);              // consume first '.'
-            parser_advance(parser);              // consume second '.'
-            if (parser_match(parser, TOKEN_DOT)) // consume third '.'
-            {
-                *is_variadic = true;
-                break;
-            }
-            else
-            {
-                parser_error(parser, "Expected '...'");
-                goto error;
-            }
-        }
-
-        Node *name = parser_parse_identifier(parser);
+        Token *token = parser->current;
+        char  *name  = parser_parse_identifier(parser);
         if (name == NULL)
         {
-            goto error;
+            parser_error_at_current(parser, "expected identifier after 'identifier'");
+            return NULL;
         }
 
-        if (!parser_consume(parser, TOKEN_COLON, "Expected ':' after parameter name"))
+        // check for built-in functions that take types
+        if (strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0)
         {
-            node_dnit(name);
-            free(name);
-            goto error;
-        }
-
-        // check for named variadic parameter: name: ...
-        if (parser_check(parser, TOKEN_DOT) && parser->peek.kind == TOKEN_DOT)
-        {
-            parser_advance(parser);              // consume first '.'
-            parser_advance(parser);              // consume second '.'
-            if (parser_match(parser, TOKEN_DOT)) // consume third '.'
+            if (!parser_consume(parser, TOKEN_L_PAREN, "expected '(' after built-in function"))
             {
-                // create variadic parameter node with name but no type
-                Node *param = malloc(sizeof(Node));
-                if (param == NULL)
-                {
-                    node_dnit(name);
-                    free(name);
-                    goto error;
-                }
+                return NULL;
+            }
 
-                node_init(param, NODE_STMT_VAL); // use VAL for parameters
-                param->decl.name = name;
-                param->decl.type = NULL; // no type for variadic parameters
-                param->decl.init = NULL;
+            AstNode *type_arg = parser_parse_type(parser);
+            if (type_arg == NULL)
+            {
+                parser_error_at_current(parser, "expected type argument after '(' in built-in function");
+                return NULL;
+            }
 
-                node_list_add(&params, param);
-                *is_variadic = true;
-                break; // variadic parameter must be last
+            if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after type argument"))
+            {
+                return NULL;
+            }
+
+            // create a special call node for built-ins
+            AstNode *call = malloc(sizeof(AstNode));
+            if (call == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for built-in function call");
+                ast_node_dnit(type_arg);
+                free(type_arg);
+                return NULL;
+            }
+            ast_node_init(call, AST_CALL_EXPR);
+            call->token = token;
+
+            AstNode *func = malloc(sizeof(AstNode));
+            if (func == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for built-in function node");
+                ast_node_dnit(call);
+                free(call);
+                ast_node_dnit(type_arg);
+                free(type_arg);
+                return NULL;
+            }
+            ast_node_init(func, AST_IDENT_EXPR);
+            func->token           = token;
+            func->ident_expr.name = name;
+
+            call->call_expr.func = func;
+            call->call_expr.args = malloc(sizeof(AstList));
+            if (call->call_expr.args == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for argument list in built-in function call");
+                ast_node_dnit(func);
+                free(func);
+                ast_node_dnit(call);
+                free(call);
+                ast_node_dnit(type_arg);
+                free(type_arg);
+                return NULL;
+            }
+
+            ast_list_init(call->call_expr.args);
+            ast_list_append(call->call_expr.args, type_arg);
+
+            return call;
+        }
+
+        // check for offset_of which takes a field path
+        if (strcmp(name, "offset_of") == 0)
+        {
+            if (!parser_consume(parser, TOKEN_L_PAREN, "expected '(' after offset_of"))
+            {
+                return NULL;
+            }
+
+            // parse type.field notation
+            AstNode *type_name = parser_parse_type_name(parser);
+            if (type_name == NULL)
+            {
+                parser_error_at_current(parser, "expected type name after '(' in offset_of");
+                return NULL;
+            }
+
+            if (!parser_consume(parser, TOKEN_DOT, "expected '.' after type in offset_of"))
+            {
+                ast_node_dnit(type_name);
+                free(type_name);
+                return NULL;
+            }
+
+            char *field = parser_parse_identifier(parser);
+            if (field == NULL)
+            {
+                parser_error_at_current(parser, "expected field name after '.' in offset_of");
+                return NULL;
+            }
+
+            if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after field"))
+            {
+                ast_node_dnit(type_name);
+                free(type_name);
+                free(field);
+                return NULL;
+            }
+
+            // create field access node
+            AstNode *field_expr = malloc(sizeof(AstNode));
+            if (field_expr == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for field access node");
+                ast_node_dnit(type_name);
+                free(type_name);
+                free(field);
+                return NULL;
+            }
+            ast_node_init(field_expr, AST_FIELD_EXPR);
+            field_expr->token             = token;
+            field_expr->field_expr.object = type_name;
+            field_expr->field_expr.field  = field;
+
+            // create call node
+            AstNode *call = malloc(sizeof(AstNode));
+            if (call == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for call node");
+                ast_node_dnit(field_expr);
+                free(field_expr);
+                return NULL;
+            }
+            ast_node_init(call, AST_CALL_EXPR);
+            call->token = token;
+
+            AstNode *func = malloc(sizeof(AstNode));
+            if (func == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for built-in function node");
+                ast_node_dnit(call);
+                free(call);
+                ast_node_dnit(field_expr);
+                free(field_expr);
+                return NULL;
+            }
+            ast_node_init(func, AST_IDENT_EXPR);
+            func->token           = token;
+            func->ident_expr.name = name;
+
+            call->call_expr.func = func;
+            call->call_expr.args = malloc(sizeof(AstList));
+            if (call->call_expr.args == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for argument list in built-in function call");
+                ast_node_dnit(func);
+                free(func);
+                ast_node_dnit(call);
+                free(call);
+                ast_node_dnit(field_expr);
+                free(field_expr);
+                return NULL;
+            }
+
+            ast_list_init(call->call_expr.args);
+            ast_list_append(call->call_expr.args, field_expr);
+
+            return call;
+        }
+
+        // check for len which can take either expression or type
+        if (strcmp(name, "len") == 0)
+        {
+            if (!parser_consume(parser, TOKEN_L_PAREN, "expected '(' after len"))
+            {
+                return NULL;
+            }
+
+            AstNode *arg;
+            if (parser_is_type_start(parser))
+            {
+                arg = parser_parse_type(parser);
             }
             else
             {
-                parser_error(parser, "Expected '...'");
-                node_dnit(name);
-                free(name);
-                goto error;
+                arg = parser_parse_expression(parser);
             }
-        }
-
-        Node *type = parser_parse_type(parser);
-        if (type == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            goto error;
-        }
-
-        // create parameter node
-        Node *param = malloc(sizeof(Node));
-        if (param == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            node_dnit(type);
-            free(type);
-            goto error;
-        }
-
-        node_init(param, NODE_STMT_VAL); // use VAL for parameters
-        param->decl.name = name;
-        param->decl.type = type;
-        param->decl.init = NULL;
-
-        node_list_add(&params, param);
-
-        if (!parser_check(parser, TOKEN_R_PAREN))
-        {
-            if (!parser_consume(parser, TOKEN_COMMA, "Expected ',' or ')'"))
+            if (arg == NULL)
             {
-                goto error;
+                parser_error_at_current(parser, "expected argument after '(' in len");
+                return NULL;
             }
+
+            if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after argument"))
+            {
+                ast_node_dnit(arg);
+                free(arg);
+                return NULL;
+            }
+
+            AstNode *call = malloc(sizeof(AstNode));
+            if (call == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for call node");
+                ast_node_dnit(arg);
+                free(arg);
+                return NULL;
+            }
+            ast_node_init(call, AST_CALL_EXPR);
+            call->token = token;
+
+            AstNode *func = malloc(sizeof(AstNode));
+            if (func == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for built-in function node");
+                ast_node_dnit(call);
+                free(call);
+                ast_node_dnit(arg);
+                free(arg);
+                return NULL;
+            }
+            ast_node_init(func, AST_IDENT_EXPR);
+            func->token           = token;
+            func->ident_expr.name = name;
+
+            call->call_expr.func = func;
+            call->call_expr.args = malloc(sizeof(AstList));
+            if (call->call_expr.args == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for argument list in built-in function call");
+                ast_node_dnit(func);
+                free(func);
+                ast_node_dnit(call);
+                free(call);
+                ast_node_dnit(arg);
+                free(arg);
+                return NULL;
+            }
+
+            ast_list_init(call->call_expr.args);
+            ast_list_append(call->call_expr.args, arg);
+
+            return call;
         }
-    }
 
-    return params;
-
-error:
-    if (params)
-    {
-        for (size_t i = 0; i < node_list_count(params); i++)
+        // check for struct literal
+        if (parser->current->kind == TOKEN_L_BRACE)
         {
-            node_dnit(params[i]);
-            free(params[i]);
+            AstNode *type = malloc(sizeof(AstNode));
+            if (type == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for struct type node");
+                return NULL;
+            }
+            ast_node_init(type, AST_TYPE_NAME);
+            type->token          = token;
+            type->type_name.name = name;
+            return parser_parse_struct_literal(parser, type);
         }
-        free(params);
+
+        AstNode *ident = malloc(sizeof(AstNode));
+        if (ident == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for identifier node");
+            return NULL;
+        }
+        ast_node_init(ident, AST_IDENT_EXPR);
+        ident->token           = token;
+        ident->ident_expr.name = name;
+        return ident;
     }
+
+    // NOTE: this is a fallback for when no valid primary expression is found
+    // it will advance the parser and return NULL, which should be handled by
+    // the caller. Note that this is one of those contingencies for something
+    // that should never happen (the lexer should ensure valid tokens).
+    parser_error_at_current(parser, "expected expression");
+    parser_advance(parser);
+
     return NULL;
 }
 
-Node **parser_parse_argument_list(Parser *parser)
+AstNode *parser_parse_array_literal(Parser *parser)
 {
-    Node **args = node_list_new();
-    if (args == NULL)
+    AstNode *array = malloc(sizeof(AstNode));
+    if (array == NULL)
     {
+        parser_error_at_current(parser, "memory allocation failed for array literal");
         return NULL;
     }
+    ast_node_init(array, AST_ARRAY_EXPR);
+    array->token = parser->previous;
 
-    while (!parser_check(parser, TOKEN_R_PAREN) && !parser_check(parser, TOKEN_EOF))
+    // parse array type
+    if (parser_match(parser, TOKEN_UNDERSCORE))
     {
-        Node *arg = parser_parse_expr(parser);
-        if (arg != NULL)
+        // unbound array
+        array->array_expr.type = malloc(sizeof(AstNode));
+        if (array->array_expr.type == NULL)
         {
-            node_list_add(&args, arg);
+            parser_error_at_current(parser, "memory allocation failed for array type");
+            ast_node_dnit(array);
+            free(array);
+            return NULL;
         }
-
-        if (!parser_check(parser, TOKEN_R_PAREN))
-        {
-            if (!parser_consume(parser, TOKEN_COMMA, "Expected ',' or ')'"))
-            {
-                break;
-            }
-        }
+        ast_node_init(array->array_expr.type, AST_TYPE_ARRAY);
+        array->array_expr.type->token           = parser->previous;
+        array->array_expr.type->type_array.size = NULL;
     }
-
-    return args;
-}
-
-Node **parser_parse_field_list(Parser *parser)
-{
-    Node **fields = node_list_new();
-    if (fields == NULL)
+    else
     {
-        return NULL;
-    }
-
-    while (!parser_check(parser, TOKEN_R_BRACE) && !parser_check(parser, TOKEN_EOF))
-    {
-        Node *name = parser_parse_identifier(parser);
-        if (name == NULL)
-        {
-            goto error;
-        }
-
-        if (!parser_consume(parser, TOKEN_COLON, "Expected ':' after field name"))
-        {
-            node_dnit(name);
-            free(name);
-            goto error;
-        }
-
-        Node *type = parser_parse_type(parser);
-        if (type == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            goto error;
-        }
-
-        if (!parser_consume(parser, TOKEN_SEMICOLON, "Expected ';' after field"))
-        {
-            node_dnit(name);
-            free(name);
-            node_dnit(type);
-            free(type);
-            goto error;
-        }
-
-        // create field node
-        Node *field = malloc(sizeof(Node));
-        if (field == NULL)
-        {
-            node_dnit(name);
-            free(name);
-            node_dnit(type);
-            free(type);
-            goto error;
-        }
-
-        node_init(field, NODE_STMT_VAL); // use VAL for fields
-        field->decl.name = name;
-        field->decl.type = type;
-        field->decl.init = NULL;
-
-        node_list_add(&fields, field);
-    }
-
-    return fields;
-
-error:
-    if (fields)
-    {
-        for (size_t i = 0; i < node_list_count(fields); i++)
-        {
-            node_dnit(fields[i]);
-            free(fields[i]);
-        }
-        free(fields);
-    }
-    return NULL;
-}
-
-Node *parser_parse_type_array_prefix(Parser *parser)
-{
-    parser_advance(parser); // consume '['
-
-    Node *size = NULL;
-    if (!parser_check(parser, TOKEN_UNDERSCORE) && !parser_check(parser, TOKEN_R_BRACKET))
-    {
-        size = parser_parse_expr(parser);
+        // sized array
+        AstNode *size = parser_parse_primary(parser);
         if (size == NULL)
         {
+            ast_node_dnit(array);
+            free(array);
+            return NULL;
+        }
+
+        array->array_expr.type = malloc(sizeof(AstNode));
+        if (array->array_expr.type == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for array type");
+            ast_node_dnit(array);
+            free(array);
+            return NULL;
+        }
+        ast_node_init(array->array_expr.type, AST_TYPE_ARRAY);
+        array->array_expr.type->token           = parser->previous;
+        array->array_expr.type->type_array.size = size;
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACKET, "expected ']' in array type"))
+    {
+        ast_node_dnit(array);
+        free(array);
+        return NULL;
+    }
+
+    // parse element type
+    array->array_expr.type->type_array.elem_type = parser_parse_type(parser);
+    if (array->array_expr.type->type_array.elem_type == NULL)
+    {
+        parser_error_at_current(parser, "expected element type after array size");
+        ast_node_dnit(array);
+        free(array);
+        return NULL;
+    }
+
+    if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' to start array literal"))
+    {
+        ast_node_dnit(array);
+        free(array);
+        return NULL;
+    }
+
+    // parse elements
+    array->array_expr.elems = malloc(sizeof(AstList));
+    if (array->array_expr.elems == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for array elements");
+        ast_node_dnit(array);
+        free(array);
+        return NULL;
+    }
+    ast_list_init(array->array_expr.elems);
+
+    if (!parser_check(parser, TOKEN_R_BRACE))
+    {
+        do
+        {
+            AstNode *elem = parser_parse_expression(parser);
+            ast_list_append(array->array_expr.elems, elem);
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after array elements"))
+    {
+        ast_node_dnit(array);
+        free(array);
+        return NULL;
+    }
+
+    return array;
+}
+
+AstNode *parser_parse_struct_literal(Parser *parser, AstNode *type)
+{
+    parser_advance(parser); // consume '{'
+
+    AstNode *struct_lit = malloc(sizeof(AstNode));
+    if (struct_lit == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for struct literal");
+        return NULL;
+    }
+    ast_node_init(struct_lit, AST_STRUCT_EXPR);
+    struct_lit->token            = parser->previous;
+    struct_lit->struct_expr.type = type;
+
+    struct_lit->struct_expr.fields = malloc(sizeof(AstList));
+    if (struct_lit->struct_expr.fields == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for struct fields");
+        ast_node_dnit(struct_lit);
+        free(struct_lit);
+        return NULL;
+    }
+    ast_list_init(struct_lit->struct_expr.fields);
+
+    if (!parser_check(parser, TOKEN_R_BRACE))
+    {
+        do
+        {
+            AstNode *field = malloc(sizeof(AstNode));
+            if (field == NULL)
+            {
+                parser_error_at_current(parser, "memory allocation failed for struct field");
+                ast_node_dnit(struct_lit);
+                free(struct_lit);
+                return NULL;
+            }
+            ast_node_init(field, AST_FIELD_EXPR);
+            field->token            = parser->previous;
+            field->field_expr.field = parser_parse_identifier(parser);
+            if (field->field_expr.field == NULL)
+            {
+                parser_error_at_current(parser, "expected field name");
+                ast_node_dnit(struct_lit);
+                free(struct_lit);
+                return NULL;
+            }
+
+            if (!parser_consume(parser, TOKEN_COLON, "expected ':' after field name"))
+            {
+                ast_node_dnit(struct_lit);
+                free(struct_lit);
+                return NULL;
+            }
+
+            field->field_expr.object = parser_parse_expression(parser);
+            if (field->field_expr.object == NULL)
+            {
+                ast_node_dnit(struct_lit);
+                free(struct_lit);
+                return NULL;
+            }
+
+            ast_list_append(struct_lit->struct_expr.fields, field);
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after struct fields"))
+    {
+        ast_node_dnit(struct_lit);
+        free(struct_lit);
+        return NULL;
+    }
+
+    return struct_lit;
+}
+
+// type parsing
+AstNode *parser_parse_type(Parser *parser)
+{
+    // function type
+    if (parser_match(parser, TOKEN_KW_FUN))
+    {
+        return parser_parse_type_fun(parser);
+    }
+
+    // struct type
+    if (parser_match(parser, TOKEN_KW_STR))
+    {
+        return parser_parse_type_str(parser);
+    }
+
+    // union type
+    if (parser_match(parser, TOKEN_KW_UNI))
+    {
+        return parser_parse_type_uni(parser);
+    }
+
+    // pointer type
+    if (parser_match(parser, TOKEN_STAR))
+    {
+        return parser_parse_type_ptr(parser);
+    }
+
+    // array type
+    if (parser_match(parser, TOKEN_L_BRACKET))
+    {
+        return parser_parse_type_array(parser);
+    }
+
+    // built-in or named type
+    return parser_parse_type_name(parser);
+}
+
+AstNode *parser_parse_type_name(Parser *parser)
+{
+    AstNode *type = malloc(sizeof(AstNode));
+    if (type == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for type name");
+        return NULL;
+    }
+    ast_node_init(type, AST_TYPE_NAME);
+    type->token = parser->current;
+
+    switch (parser->current->kind)
+    {
+    case TOKEN_TYPE_PTR:
+        type->type_name.name = strdup("ptr");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_I8:
+        type->type_name.name = strdup("i8");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_I16:
+        type->type_name.name = strdup("i16");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_I32:
+        type->type_name.name = strdup("i32");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_I64:
+        type->type_name.name = strdup("i64");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_U8:
+        type->type_name.name = strdup("u8");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_U16:
+        type->type_name.name = strdup("u16");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_U32:
+        type->type_name.name = strdup("u32");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_U64:
+        type->type_name.name = strdup("u64");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_F16:
+        type->type_name.name = strdup("f16");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_F32:
+        type->type_name.name = strdup("f32");
+        parser_advance(parser);
+        break;
+    case TOKEN_TYPE_F64:
+        type->type_name.name = strdup("f64");
+        parser_advance(parser);
+        break;
+    case TOKEN_IDENTIFIER:
+        type->type_name.name = parser_parse_identifier(parser);
+        if (type->type_name.name == NULL)
+        {
+            parser_error_at_current(parser, "expected identifier for type name");
+            ast_node_dnit(type);
+            free(type);
+            return NULL;
+        }
+        break;
+    default:
+        parser_error_at_current(parser, "expected type name");
+        type->type_name.name = strdup("error");
+        break;
+    }
+
+    return type;
+}
+
+AstNode *parser_parse_type_ptr(Parser *parser)
+{
+    AstNode *ptr = malloc(sizeof(AstNode));
+    if (ptr == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for pointer type");
+        return NULL;
+    }
+    ast_node_init(ptr, AST_TYPE_PTR);
+    ptr->token         = parser->current;
+    ptr->type_ptr.base = parser_parse_type(parser);
+    if (ptr->type_ptr.base == NULL)
+    {
+        ast_node_dnit(ptr);
+        free(ptr);
+        return NULL;
+    }
+
+    return ptr;
+}
+
+AstNode *parser_parse_type_array(Parser *parser)
+{
+    AstNode *array = malloc(sizeof(AstNode));
+    if (array == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for array type");
+        return NULL;
+    }
+    ast_node_init(array, AST_TYPE_ARRAY);
+    array->token = parser->current;
+
+    if (parser_match(parser, TOKEN_UNDERSCORE))
+    {
+        // unbound array
+        array->type_array.size = NULL;
+    }
+    else
+    {
+        // sized array
+        array->type_array.size = parser_parse_primary(parser);
+        if (array->type_array.size == NULL)
+        {
+            ast_node_dnit(array);
+            free(array);
             return NULL;
         }
     }
-    else if (parser_check(parser, TOKEN_UNDERSCORE))
-    {
-        parser_advance(parser); // consume '_' for dynamic array
-    }
 
-    if (!parser_consume(parser, TOKEN_R_BRACKET, "Expected ']'"))
+    if (!parser_consume(parser, TOKEN_R_BRACKET, "expected ']' after array size"))
     {
-        if (size)
-        {
-            node_dnit(size);
-            free(size);
-        }
+        ast_node_dnit(array);
+        free(array);
         return NULL;
     }
 
-    Node *base_type = parser_parse_type(parser);
-    if (base_type == NULL)
+    array->type_array.elem_type = parser_parse_type(parser);
+    if (array->type_array.elem_type == NULL)
     {
-        if (size)
-        {
-            node_dnit(size);
-            free(size);
-        }
+        ast_node_dnit(array);
+        free(array);
         return NULL;
     }
 
-    Node *node = malloc(sizeof(Node));
-    if (node == NULL)
+    return array;
+}
+
+AstNode *parser_parse_type_fun(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_L_PAREN, "expected '(' after 'fun'"))
     {
-        if (size)
-        {
-            node_dnit(size);
-            free(size);
-        }
-        node_dnit(base_type);
-        free(base_type);
         return NULL;
     }
 
-    node_init(node, NODE_TYPE_ARRAY);
-    node->binary.left  = size;
-    node->binary.right = base_type;
-    return node;
+    AstNode *fun = malloc(sizeof(AstNode));
+    if (fun == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for function type");
+        return NULL;
+    }
+    ast_node_init(fun, AST_TYPE_FUN);
+    fun->token           = parser->previous;
+    fun->type_fun.params = malloc(sizeof(AstList));
+    if (fun->type_fun.params == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for function parameters");
+        free(fun);
+        return NULL;
+    }
+    ast_list_init(fun->type_fun.params);
+
+    // parse parameter types
+    if (!parser_check(parser, TOKEN_R_PAREN))
+    {
+        do
+        {
+            AstNode *param_type = parser_parse_type(parser);
+            if (param_type == NULL)
+            {
+                ast_node_dnit(fun);
+                free(fun);
+                return NULL;
+            }
+
+            ast_list_append(fun->type_fun.params, param_type);
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after function type parameters"))
+    {
+        ast_node_dnit(fun);
+        free(fun);
+        return NULL;
+    }
+
+    // parse return type (optional)
+    if (parser_is_type_start(parser))
+    {
+        fun->type_fun.return_type = parser_parse_type(parser);
+        if (fun->type_fun.return_type == NULL)
+        {
+            ast_node_dnit(fun);
+            free(fun);
+            return NULL;
+        }
+    }
+    else
+    {
+        fun->type_fun.return_type = NULL;
+    }
+
+    return fun;
+}
+
+AstNode *parser_parse_type_str(Parser *parser)
+{
+    AstNode *str = malloc(sizeof(AstNode));
+    if (str == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for string type");
+        return NULL;
+    }
+    ast_node_init(str, AST_TYPE_STR);
+    str->token = parser->current;
+
+    if (parser->current->kind == TOKEN_IDENTIFIER)
+    {
+        str->type_str.name = parser_parse_identifier(parser);
+        if (str->type_str.name == NULL)
+        {
+            ast_node_dnit(str);
+            free(str);
+            return NULL;
+        }
+    }
+    else
+    {
+        str->type_str.name = NULL;
+        if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' for anonymous struct"))
+        {
+            ast_node_dnit(str);
+            free(str);
+            return NULL;
+        }
+
+        str->type_str.fields = parser_parse_field_list(parser);
+        if (str->type_str.fields == NULL)
+        {
+            ast_node_dnit(str);
+            free(str);
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after struct fields"))
+        {
+            ast_node_dnit(str);
+            free(str);
+            return NULL;
+        }
+    }
+
+    return str;
+}
+
+AstNode *parser_parse_type_uni(Parser *parser)
+{
+    AstNode *uni = malloc(sizeof(AstNode));
+    if (uni == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for union type");
+        return NULL;
+    }
+    ast_node_init(uni, AST_TYPE_UNI);
+    uni->token = parser->current;
+
+    if (parser->current->kind == TOKEN_IDENTIFIER)
+    {
+        uni->type_uni.name = parser_parse_identifier(parser);
+        if (uni->type_uni.name == NULL)
+        {
+            ast_node_dnit(uni);
+            free(uni);
+            return NULL;
+        }
+    }
+    else
+    {
+        uni->type_uni.name = NULL;
+        if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' for anonymous union"))
+        {
+            ast_node_dnit(uni);
+            free(uni);
+            return NULL;
+        }
+        uni->type_uni.fields = parser_parse_field_list(parser);
+        if (uni->type_uni.fields == NULL)
+        {
+            ast_node_dnit(uni);
+            free(uni);
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after union fields"))
+        {
+            ast_node_dnit(uni);
+            free(uni);
+            return NULL;
+        }
+    }
+
+    return uni;
 }

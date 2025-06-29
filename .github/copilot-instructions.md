@@ -17,3 +17,4 @@ Project guidelines:
 - Only use the C standard library or internal solutions with the exception of OpenCL where applicable.
 - Standard `Makefile`s are the only acceptable build system (NO CMake).
 - Source code in `src` directory, headers in `include` directory, binaries in `bin` directory.
+- Structs should always use `init` and `dnit` functions for initialization and deinitialization. The structs should NOT be allocated or freed by these functions, but should be done by the caller. `init` and `dnit` are allowed to allocate or free internal memory only. Effectively, no `new` or `free` functions should exist.

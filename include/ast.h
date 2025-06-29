@@ -1,160 +1,318 @@
 #ifndef AST_H
 #define AST_H
 
-#include "operator.h"
 #include "token.h"
-
 #include <stdbool.h>
-#include <stddef.h>
 
-// forward declaration
-typedef struct Node Node;
-typedef struct Type Type;
+// forward declarations
+typedef struct Type   Type;
+typedef struct Symbol Symbol;
 
-typedef enum NodeKind
+typedef enum AstKind
 {
-    NODE_ERROR,
+    AST_PROGRAM,
+    AST_MODULE,
 
-    NODE_PROGRAM,
-
-    NODE_BLOCK,
-
-    NODE_IDENTIFIER,
-
-    // literals
-    NODE_LIT_INT,
-    NODE_LIT_FLOAT,
-    NODE_LIT_CHAR,
-    NODE_LIT_STRING,
-
-    // expressions
-    NODE_EXPR_CALL,
-    NODE_EXPR_INDEX,
-    NODE_EXPR_MEMBER,
-    NODE_EXPR_CAST,
-    NODE_EXPR_UNARY,
-    NODE_EXPR_BINARY,
-
-    // types
-    NODE_TYPE_ARRAY,
-    NODE_TYPE_POINTER,
-    NODE_TYPE_FUNCTION,
-    NODE_TYPE_STRUCT,
-    NODE_TYPE_UNION,
+    // declarations
+    AST_USE_DECL,
+    AST_EXT_DECL,
+    AST_DEF_DECL,
+    AST_VAL_DECL,
+    AST_VAR_DECL,
+    AST_FUN_DECL,
+    AST_STR_DECL,
+    AST_UNI_DECL,
+    AST_FIELD_DECL,
+    AST_PARAM_DECL,
 
     // statements
-    NODE_STMT_USE,
-    NODE_STMT_VAL,
-    NODE_STMT_VAR,
-    NODE_STMT_DEF,
-    NODE_STMT_FUNCTION,
-    NODE_STMT_STRUCT,
-    NODE_STMT_UNION,
-    NODE_STMT_EXTERNAL,
-    NODE_STMT_IF,
-    NODE_STMT_OR,
-    NODE_STMT_FOR,
-    NODE_STMT_BREAK,
-    NODE_STMT_CONTINUE,
-    NODE_STMT_RETURN,
-    NODE_STMT_EXPRESSION,
+    AST_BLOCK_STMT,
+    AST_EXPR_STMT,
+    AST_RET_STMT,
+    AST_IF_STMT,
+    AST_FOR_STMT,
+    AST_BRK_STMT,
+    AST_CNT_STMT,
 
-    NODE_COUNT
-} NodeKind;
+    // expressions
+    AST_BINARY_EXPR,
+    AST_UNARY_EXPR,
+    AST_CALL_EXPR,
+    AST_INDEX_EXPR,
+    AST_FIELD_EXPR,
+    AST_CAST_EXPR,
+    AST_IDENT_EXPR,
+    AST_LIT_EXPR,
+    AST_ARRAY_EXPR,
+    AST_STRUCT_EXPR,
 
-// core AST node structure
-struct Node
+    // types
+    AST_TYPE_NAME,
+    AST_TYPE_PTR,
+    AST_TYPE_ARRAY,
+    AST_TYPE_FUN,
+    AST_TYPE_STR,
+    AST_TYPE_UNI,
+} AstKind;
+
+typedef struct AstNode AstNode;
+typedef struct AstList AstList;
+
+// generic list for child nodes
+struct AstList
 {
-    NodeKind kind;
-    Token   *token;
-    Type    *type;
+    AstNode **items;
+    int       count;
+    int       capacity;
+};
+
+// base AST node
+struct AstNode
+{
+    AstKind kind;
+    Token  *token;  // source token for error reporting
+    Type   *type;   // resolved type (filled during semantic analysis)
+    Symbol *symbol; // symbol table entry (if applicable)
 
     union
     {
-        char              *str_value;
-        unsigned long long int_value;
-        double             float_value;
-        char               char_value;
+        // program root
+        struct
+        {
+            AstList *decls;
+        } program;
 
-        Node  *single;
-        Node **children;
+        // module declaration
+        struct
+        {
+            char    *name;  // module name
+            AstList *decls; // declarations in this module
+        } module;
+
+        // use declaration
+        struct
+        {
+            char   *module_path;
+            char   *alias;      // null if unaliased
+            Symbol *module_sym; // filled during semantic analysis
+        } use_decl;
+
+        // external declaration
+        struct
+        {
+            char    *name;
+            AstNode *type;
+        } ext_decl;
+
+        // type definition
+        struct
+        {
+            char    *name;
+            AstNode *type;
+        } def_decl;
+
+        // value/variable declaration
+        struct
+        {
+            char    *name;
+            AstNode *type; // explicit type or null
+            AstNode *init; // initializer expression
+            bool     is_val;
+        } var_decl;
+
+        // function declaration
+        struct
+        {
+            char    *name;
+            AstList *params;
+            AstNode *return_type; // null for no return
+            AstNode *body;        // null for external functions
+        } fun_decl;
+
+        // struct declaration
+        struct
+        {
+            char    *name;
+            AstList *fields;
+        } str_decl;
+
+        // union declaration
+        struct
+        {
+            char    *name;
+            AstList *fields;
+        } uni_decl;
+
+        // field declaration
+        struct
+        {
+            char    *name;
+            AstNode *type;
+        } field_decl;
+
+        // parameter declaration
+        struct
+        {
+            char    *name;
+            AstNode *type;
+        } param_decl;
+
+        // block statement
+        struct
+        {
+            AstList *stmts;
+        } block_stmt;
+
+        // expression statement
+        struct
+        {
+            AstNode *expr;
+        } expr_stmt;
+
+        // return statement
+        struct
+        {
+            AstNode *expr; // null for void return
+        } ret_stmt;
+
+        // if statement
+        struct
+        {
+            AstNode *cond;
+            AstNode *then_stmt;
+            AstNode *else_stmt; // can be another if (or chain)
+        } if_stmt;
+
+        // for loop
+        struct
+        {
+            AstNode *cond; // null for infinite loop
+            AstNode *body;
+        } for_stmt;
+
+        // binary expression
+        struct
+        {
+            AstNode  *left;
+            AstNode  *right;
+            TokenKind op;
+        } binary_expr;
+
+        // unary expression
+        struct
+        {
+            AstNode  *expr;
+            TokenKind op;
+        } unary_expr;
+
+        // function call
+        struct
+        {
+            AstNode *func;
+            AstList *args;
+        } call_expr;
+
+        // array indexing
+        struct
+        {
+            AstNode *array;
+            AstNode *index;
+        } index_expr;
+
+        // field access
+        struct
+        {
+            AstNode *object;
+            char    *field;
+        } field_expr;
+
+        // type cast
+        struct
+        {
+            AstNode *expr;
+            AstNode *type;
+        } cast_expr;
+
+        // identifier
+        struct
+        {
+            char *name;
+        } ident_expr;
+
+        // literal
+        struct
+        {
+            TokenKind kind; // TOKEN_LIT_INT, etc.
+            union
+            {
+                unsigned long long int_val;
+                double             float_val;
+                char               char_val;
+                char              *string_val;
+            };
+        } lit_expr;
+
+        // array literal
+        struct
+        {
+            AstNode *type;  // element type
+            AstList *elems; // elements
+        } array_expr;
+
+        // struct literal
+        struct
+        {
+            AstNode *type;   // struct type
+            AstList *fields; // field initializers
+        } struct_expr;
+
+        // type expressions
+        struct
+        {
+            char *name;
+        } type_name;
 
         struct
         {
-            char *message;
-        } error;
+            AstNode *base;
+        } type_ptr;
 
         struct
         {
-            Node    *left;
-            Node    *right;
-            Operator op;
-        } binary;
+            AstNode *elem_type;
+            AstNode *size; // null for unbound arrays [_]
+        } type_array;
 
         struct
         {
-            Node    *target;
-            Operator op;
-        } unary;
+            AstList *params;
+            AstNode *return_type; // null for no return
+        } type_fun;
 
         struct
         {
-            Node  *target;
-            Node **args;
-        } call;
+            char    *name; // can be null for anonymous
+            AstList *fields;
+        } type_str;
 
         struct
         {
-            Node *name;
-            Node *type;
-            Node *init;
-        } decl;
-
-        struct
-        {
-            Node  *name;
-            Node **params;
-            Node  *return_type;
-            Node  *body;
-            bool   is_variadic;
-            void  *scope; // Scope * for semantic analysis
-        } function;
-
-        struct
-        {
-            Node *condition;
-            Node *body;
-            Node *else_body; // for if-else constructs
-        } conditional;
-
-        struct
-        {
-            Node **fields;
-        } composite;
+            char    *name; // can be null for anonymous
+            AstList *fields;
+        } type_uni;
     };
 };
 
-// core functions
-void node_init(Node *node, NodeKind kind);
-void node_dnit(Node *node);
+// ast node operations
+void ast_node_init(AstNode *node, AstKind kind);
+void ast_node_dnit(AstNode *node);
 
-// node creation helpers
-Node *node_identifier(const char *name);
-Node *node_int(unsigned long long value);
-Node *node_float(double value);
-Node *node_char(char value);
-Node *node_string(const char *value);
-Node *node_binary(Operator op, Node *left, Node *right);
-Node *node_unary(Operator op, Node *target);
-Node *node_call(Node *target, Node **args);
-Node *node_block(Node **statements);
+// list operations
+void ast_list_init(AstList *list);
+void ast_list_dnit(AstList *list);
+void ast_list_append(AstList *list, AstNode *node);
 
-// list utilities
-Node **node_list_new(void);
-void   node_list_add(Node ***list, Node *node);
-size_t node_list_count(Node **list);
-
-// utilities
-const char *node_kind_name(NodeKind kind);
+// pretty printing for debugging
+void ast_print(AstNode *node, int indent);
 
 #endif

@@ -81,8 +81,8 @@ char *token_kind_to_string(TokenKind kind)
     case TOKEN_KW_BRK:
         return "brk";
 
-    case TOKEN_TYPE_ANY:
-        return "any";
+    case TOKEN_TYPE_PTR:
+        return "ptr";
     case TOKEN_TYPE_I8:
         return "i8";
     case TOKEN_TYPE_I16:
@@ -264,9 +264,9 @@ TokenKind token_kind_from_identifier(const char *text, int len)
         {
             return TOKEN_KW_BRK;
         }
-        if (strncmp(text, "any", 3) == 0)
+        if (strncmp(text, "ptr", 3) == 0)
         {
-            return TOKEN_TYPE_ANY;
+            return TOKEN_TYPE_PTR;
         }
         if (strncmp(text, "i8", 3) == 0)
         {

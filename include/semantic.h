@@ -2,177 +2,199 @@
 #define SEMANTIC_H
 
 #include "ast.h"
+#include "lexer.h"
+#include "module.h"
 #include <stdbool.h>
 
 // forward declarations
 typedef struct Type             Type;
 typedef struct Symbol           Symbol;
-typedef struct Scope            Scope;
+typedef struct SymbolTable      SymbolTable;
 typedef struct SemanticAnalyzer SemanticAnalyzer;
-typedef struct SemanticError    SemanticError;
-typedef struct Lexer            Lexer;
 
-// semantic error structure
-struct SemanticError
-{
-    char *message;
-    char *filename;
-    int   line;
-    int   column;
-    char *line_text;
-    Node *node; // optional node reference
-};
-
-// error collection
-typedef struct ErrorList
-{
-    SemanticError **errors;
-    size_t          count;
-    size_t          capacity;
-} ErrorList;
-
-// type kinds
 typedef enum TypeKind
 {
-    TYPE_VOID,
-    TYPE_BOOL,
-    TYPE_INT,
-    TYPE_FLOAT,
-    TYPE_POINTER,
-    TYPE_ARRAY,
+    TYPE_UNKNOWN,
+    TYPE_PTR,   // untyped pointer (mach's equivalent to void*)
+    TYPE_INT,   // i8, i16, i32, i64, u8, u16, u32, u64
+    TYPE_FLOAT, // f16, f32, f64
+    TYPE_ARRAY, // [size]type or [_]type
     TYPE_FUNCTION,
     TYPE_STRUCT,
     TYPE_UNION,
-    TYPE_ALIAS,
-    TYPE_ERROR
+    TYPE_ALIAS, // type alias from def declaration
 } TypeKind;
 
-// type structure
 struct Type
 {
     TypeKind kind;
     unsigned size;      // size in bytes
-    unsigned align;     // alignment requirement
-    bool     is_signed; // for numeric types
-    bool     is_const;  // immutability
+    unsigned alignment; // alignment in bytes
+    bool     is_signed; // for integer types
 
     union
     {
-        // pointer type
+        // for TYPE_PTR
         struct
         {
-            Type *base;
-        } pointer;
+            Type *base; // null for untyped ptr
+        } ptr;
 
-        // array type
+        // for TYPE_ARRAY
         struct
         {
-            Type  *element;
-            size_t size; // 0 for dynamic arrays [_]
+            Type *elem_type;
+            int   size; // -1 for unbound arrays [_]
         } array;
 
-        // function type
+        // for TYPE_FUNCTION
         struct
         {
-            Type **params;
-            Type  *return_type;
-            bool   is_variadic;
+            Type **param_types;
+            int    param_count;
+            Type  *return_type; // null for no return value
         } function;
 
-        // struct/union type
+        // for TYPE_STRUCT/TYPE_UNION
         struct
         {
             Symbol **fields;
-            char    *name;
+            int      field_count;
+            char    *name; // can be null for anonymous
         } composite;
 
-        // alias type
+        // for TYPE_ALIAS
         struct
         {
-            Type *base;
+            Type *target;
             char *name;
         } alias;
     };
 };
 
-// symbol kinds
 typedef enum SymbolKind
 {
-    SYMBOL_VARIABLE,
-    SYMBOL_CONSTANT,
-    SYMBOL_FUNCTION,
-    SYMBOL_TYPE,
-    SYMBOL_STRUCT,
-    SYMBOL_UNION,
-    SYMBOL_FIELD
+    SYMBOL_VAR,    // variable or value
+    SYMBOL_FUNC,   // function
+    SYMBOL_TYPE,   // type definition
+    SYMBOL_FIELD,  // struct/union field
+    SYMBOL_PARAM,  // function parameter
+    SYMBOL_MODULE, // imported module
 } SymbolKind;
 
-// symbol structure
 struct Symbol
 {
-    char      *name;
     SymbolKind kind;
+    char      *name;
     Type      *type;
-    Node      *node;        // ast node reference
-    Scope     *scope;       // owning scope
-    bool       is_external; // external declaration
-    size_t     offset;      // for struct fields
+    AstNode   *decl_node; // declaration AST node
+    bool       is_val;    // true for val, false for var
+    Module    *module;    // for module symbols
+    Symbol    *next;      // for hash table chaining
 };
 
-// scope structure
-struct Scope
+struct SymbolTable
 {
-    Scope   *parent;
-    Symbol **symbols; // null-terminated array
-    int      level;   // nesting level
+    Symbol     **symbols;
+    int          capacity;
+    int          count;
+    SymbolTable *parent; // for nested scopes
 };
 
-// semantic analyzer
+typedef struct SemanticError
+{
+    AstNode *node;
+    char    *message;
+} SemanticError;
+
+typedef struct SemanticErrorList
+{
+    SemanticError *errors;
+    int            count;
+    int            capacity;
+} SemanticErrorList;
+
 struct SemanticAnalyzer
 {
-    Scope    *global;  // global scope
-    Scope    *current; // current scope
-    Type    **types;   // registered types
-    Node     *ast;     // ast root
-    bool      has_errors;
-    ErrorList errors;   // collected errors
-    Lexer    *lexer;    // for line/column info
-    char     *filename; // source filename
+    SymbolTable      *global_scope;
+    SymbolTable      *current_scope;
+    ModuleManager    *module_manager;
+    Type            **builtin_types;
+    int               builtin_count;
+    Type             *current_function_return_type; // for return statement checking
+    SemanticErrorList errors;
+    bool              had_error;
 };
 
-// core functions
-void semantic_init(SemanticAnalyzer *analyzer, Node *ast, Lexer *lexer, const char *filename);
-void semantic_dnit(SemanticAnalyzer *analyzer);
-bool semantic_analyze(SemanticAnalyzer *analyzer);
+// semantic analyzer lifecycle
+void semantic_analyzer_init(SemanticAnalyzer *analyzer, ModuleManager *manager);
+void semantic_analyzer_dnit(SemanticAnalyzer *analyzer);
 
-// type management
-Type  *type_new(TypeKind kind);
-void   type_free(Type *type);
-Type  *type_builtin(const char *name);
-Type  *type_pointer(Type *base);
-Type  *type_array(Type *element, size_t size);
-Type  *type_function(Type *return_type, Type **params, bool is_variadic);
-Type  *type_struct(const char *name);
-Type  *type_union(const char *name);
-Type  *type_alias(const char *name, Type *base);
-bool   type_equal(Type *a, Type *b);
-bool   type_compatible(Type *a, Type *b);
-size_t type_sizeof(Type *type);
-size_t type_alignof(Type *type);
+// main analysis functions
+bool semantic_analyze_program(SemanticAnalyzer *analyzer, AstNode *program);
+bool semantic_analyze_module(SemanticAnalyzer *analyzer, Module *module);
 
-// scope management
-Scope  *scope_new(Scope *parent);
-void    scope_free(Scope *scope);
-Symbol *scope_lookup(Scope *scope, const char *name);
-Symbol *scope_define(Scope *scope, const char *name, SymbolKind kind, Type *type);
+// declaration analysis
+bool semantic_analyze_declaration(SemanticAnalyzer *analyzer, AstNode *decl);
+bool semantic_analyze_use_decl(SemanticAnalyzer *analyzer, AstNode *decl);
+bool semantic_analyze_ext_decl(SemanticAnalyzer *analyzer, AstNode *decl);
+bool semantic_analyze_def_decl(SemanticAnalyzer *analyzer, AstNode *decl);
+bool semantic_analyze_var_decl(SemanticAnalyzer *analyzer, AstNode *decl);
+bool semantic_analyze_fun_decl(SemanticAnalyzer *analyzer, AstNode *decl);
+bool semantic_analyze_str_decl(SemanticAnalyzer *analyzer, AstNode *decl);
+bool semantic_analyze_uni_decl(SemanticAnalyzer *analyzer, AstNode *decl);
 
-// symbol management
-Symbol *symbol_new(const char *name, SymbolKind kind, Type *type);
-void    symbol_free(Symbol *symbol);
+// statement analysis
+bool semantic_analyze_statement(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_block_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_ret_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_if_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
 
-// error management
-void semantic_error_add(SemanticAnalyzer *analyzer, Node *node, const char *fmt, ...);
-void semantic_error_print_all(SemanticAnalyzer *analyzer);
-void semantic_error_free_all(SemanticAnalyzer *analyzer);
+// expression analysis
+Type *semantic_analyze_expression(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_binary_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+
+// type analysis
+Type *semantic_analyze_type(SemanticAnalyzer *analyzer, AstNode *type_node);
+Type *semantic_get_builtin_type(SemanticAnalyzer *analyzer, const char *name);
+
+// symbol table operations
+void symbol_table_init(SymbolTable *table, SymbolTable *parent);
+void symbol_table_dnit(SymbolTable *table);
+void symbol_table_push_scope(SemanticAnalyzer *analyzer);
+void symbol_table_pop_scope(SemanticAnalyzer *analyzer);
+
+Symbol *symbol_table_declare(SymbolTable *table, const char *name, SymbolKind kind, Type *type, AstNode *decl);
+Symbol *symbol_table_lookup(SymbolTable *table, const char *name);
+Symbol *symbol_table_lookup_current_scope(SymbolTable *table, const char *name);
+
+// symbol table iteration (for imports)
+void symbol_table_iterate(SymbolTable *table, void (*callback)(Symbol *symbol, void *data), void *data);
+
+// type operations
+Type *type_create_builtin(TypeKind kind, unsigned size, unsigned alignment, bool is_signed);
+Type *type_create_ptr(Type *base);
+Type *type_create_array(Type *elem_type, int size);
+Type *type_create_function(Type **param_types, int param_count, Type *return_type);
+Type *type_create_struct(const char *name);
+Type *type_create_union(const char *name);
+Type *type_create_alias(const char *name, Type *target);
+
+void  type_dnit(Type *type);
+bool  type_equals(Type *a, Type *b);
+bool  type_is_assignable(Type *target, Type *source);
+Type *type_get_common_type(Type *a, Type *b);
+
+// error reporting
+void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *format, ...);
+
+// error list operations
+void semantic_error_list_init(SemanticErrorList *list);
+void semantic_error_list_dnit(SemanticErrorList *list);
+void semantic_error_list_add(SemanticErrorList *list, AstNode *node, const char *message);
+void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char *file_path);
 
 #endif

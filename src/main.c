@@ -1,7 +1,8 @@
 #include "ast.h"
 #include "lexer.h"
+#include "module.h"
 #include "parser.h"
-#include "sema.h"
+#include "semantic.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,19 +82,16 @@ static int build_command(const char *filename)
 
     printf("Parsing successful!\n");
 
-    // semantic analysis
-    Sema sema;
-    sema_init(&sema);
+    // initialize module manager and resolve dependencies
+    ModuleManager module_manager;
+    module_manager_init(&module_manager);
 
-    bool sema_success = sema_analyze(&sema, program);
-
-    if (!sema_success)
+    if (!module_manager_resolve_dependencies(&module_manager, program))
     {
-        fprintf(stderr, "\nSemantic analysis failed with %d error(s):\n", sema.errors.count);
-        sema_error_list_print(&sema.errors, &lexer);
+        fprintf(stderr, "Error: Failed to resolve module dependencies\n");
 
         // cleanup
-        sema_dnit(&sema);
+        module_manager_dnit(&module_manager);
         ast_node_dnit(program);
         free(program);
         parser_dnit(&parser);
@@ -103,12 +101,34 @@ static int build_command(const char *filename)
         return 1;
     }
 
-    printf("Semantic analysis successful!\n\n");
-    printf("AST:\n");
-    ast_print(program, 0);
+    printf("Module dependencies resolved successfully!\n");
+
+    // perform semantic analysis
+    SemanticAnalyzer semantic_analyzer;
+    semantic_analyzer_init(&semantic_analyzer, &module_manager);
+
+    if (!semantic_analyze_program(&semantic_analyzer, program))
+    {
+        fprintf(stderr, "\nSemantic analysis failed with %d error(s):\n", semantic_analyzer.errors.count);
+        semantic_error_list_print(&semantic_analyzer.errors, &lexer, filename);
+
+        // cleanup
+        semantic_analyzer_dnit(&semantic_analyzer);
+        module_manager_dnit(&module_manager);
+        ast_node_dnit(program);
+        free(program);
+        parser_dnit(&parser);
+        lexer_dnit(&lexer);
+        free(source);
+
+        return 1;
+    }
+
+    printf("Semantic analysis successful!\n");
 
     // cleanup
-    sema_dnit(&sema);
+    semantic_analyzer_dnit(&semantic_analyzer);
+    module_manager_dnit(&module_manager);
     ast_node_dnit(program);
     free(program);
     parser_dnit(&parser);

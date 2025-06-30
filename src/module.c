@@ -126,7 +126,7 @@ Module *module_manager_load_module(ModuleManager *manager, const char *module_pa
     char *file_path = module_path_to_file_path(manager, module_path);
     if (!file_path)
     {
-        fprintf(stderr, "Error: Could not find module '%s'\n", module_path);
+        fprintf(stderr, "error: Could not find module '%s'\n", module_path);
         return NULL;
     }
 
@@ -134,7 +134,7 @@ Module *module_manager_load_module(ModuleManager *manager, const char *module_pa
     char *source = read_file(file_path);
     if (!source)
     {
-        fprintf(stderr, "Error: Could not read module file '%s'\n", file_path);
+        fprintf(stderr, "error: Could not read module file '%s'\n", file_path);
         free(file_path);
         return NULL;
     }
@@ -148,7 +148,7 @@ Module *module_manager_load_module(ModuleManager *manager, const char *module_pa
     AstNode *ast = parser_parse_program(&parser);
     if (!ast || parser.had_error)
     {
-        fprintf(stderr, "Error: Failed to parse module '%s'\n", module_path);
+        fprintf(stderr, "error: Failed to parse module '%s'\n", module_path);
         if (ast)
         {
             ast_node_dnit(ast);
@@ -200,7 +200,7 @@ bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *progra
             Module *module = module_manager_load_module(manager, decl->use_decl.module_path);
             if (!module)
             {
-                fprintf(stderr, "Error: Failed to load module '%s'\n", decl->use_decl.module_path);
+                fprintf(stderr, "error: Failed to load module '%s'\n", decl->use_decl.module_path);
                 return false;
             }
 

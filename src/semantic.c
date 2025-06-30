@@ -1148,6 +1148,36 @@ Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 
 Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
+    // check if object is a module identifier
+    if (expr->field_expr.object->kind == AST_IDENT_EXPR)
+    {
+        Symbol *sym = symbol_table_lookup(analyzer->current_scope, expr->field_expr.object->ident_expr.name);
+        if (sym && sym->kind == SYMBOL_MODULE)
+        {
+            // look up symbol in module
+            Symbol *module_sym = symbol_table_lookup(sym->module->symbols, expr->field_expr.field);
+            if (!module_sym)
+            {
+                semantic_error(analyzer, expr, "No symbol '%s' in module '%s'", expr->field_expr.field, sym->name);
+                return NULL;
+            }
+
+            expr->symbol                    = module_sym;
+            expr->field_expr.object->symbol = sym;
+
+            // function names decay to function pointers when used as values
+            if (module_sym->kind == SYMBOL_FUNC)
+            {
+                Type *func_ptr_type = type_create_ptr(module_sym->type);
+                expr->type          = func_ptr_type;
+                return func_ptr_type;
+            }
+
+            expr->type = module_sym->type;
+            return module_sym->type;
+        }
+    }
+
     Type *object_type = semantic_analyze_expression(analyzer, expr->field_expr.object);
     if (!object_type)
         return NULL;
@@ -1209,6 +1239,12 @@ Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     if (sym->kind == SYMBOL_TYPE)
     {
         semantic_error(analyzer, expr, "Type '%s' used as value", expr->ident_expr.name);
+        return NULL;
+    }
+
+    if (sym->kind == SYMBOL_MODULE)
+    {
+        semantic_error(analyzer, expr, "Module '%s' used as value", expr->ident_expr.name);
         return NULL;
     }
 

@@ -141,7 +141,30 @@ bool type_equals(Type *a, Type *b)
     case TYPE_ARRAY:
         return a->array.size == b->array.size && type_equals(a->array.elem_type, b->array.elem_type);
     case TYPE_FUNCTION:
-        return true;
+        // check parameter count
+        if (a->function.param_count != b->function.param_count)
+            return false;
+
+        // check parameter types
+        for (int i = 0; i < a->function.param_count; i++)
+        {
+            if (!type_equals(a->function.param_types[i], b->function.param_types[i]))
+                return false;
+        }
+
+        // check return types
+        if (a->function.return_type && b->function.return_type)
+        {
+            return type_equals(a->function.return_type, b->function.return_type);
+        }
+        else if (!a->function.return_type && !b->function.return_type)
+        {
+            return true;
+        }
+        else
+        {
+            return false;
+        }
     case TYPE_ALIAS:
         return type_equals(a->alias.target, b->alias.target);
     default:
@@ -174,6 +197,21 @@ bool type_is_assignable(Type *target, Type *source)
                 return true;
         }
         return false;
+    }
+
+    // function pointer to function type compatibility
+    if (source->kind == TYPE_PTR && source->ptr.base && source->ptr.base->kind == TYPE_FUNCTION)
+    {
+        // resolve target type if it's an alias
+        Type *resolved_target = target;
+        while (resolved_target->kind == TYPE_ALIAS)
+            resolved_target = resolved_target->alias.target;
+
+        // function pointer can be assigned to function type parameter
+        if (resolved_target->kind == TYPE_FUNCTION)
+        {
+            return type_equals(resolved_target, source->ptr.base);
+        }
     }
 
     if (target->kind == TYPE_ALIAS)
@@ -310,6 +348,9 @@ const char *type_to_string(Type *type)
     case TYPE_PTR:
         if (!type->ptr.base)
             return "ptr";
+        // special case: function pointers should display as "fun(...)" not "*fun(...)"
+        if (type->ptr.base->kind == TYPE_FUNCTION)
+            return type_to_string(type->ptr.base);
         snprintf(buffer, sizeof(buffer), "*%s", type_to_string(type->ptr.base));
         return buffer;
     case TYPE_ARRAY:

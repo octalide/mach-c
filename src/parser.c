@@ -2174,9 +2174,9 @@ AstNode *parser_parse_array_literal(Parser *parser)
     array->token = parser->previous;
 
     // parse array type
-    if (parser_match(parser, TOKEN_UNDERSCORE))
+    if (parser_check(parser, TOKEN_R_BRACKET))
     {
-        // unbound array
+        // unbound array - empty brackets []
         array->array_expr.type = malloc(sizeof(AstNode));
         if (array->array_expr.type == NULL)
         {
@@ -2492,9 +2492,9 @@ AstNode *parser_parse_type_array(Parser *parser)
     ast_node_init(array, AST_TYPE_ARRAY);
     array->token = parser->current;
 
-    if (parser_match(parser, TOKEN_UNDERSCORE))
+    if (parser_check(parser, TOKEN_R_BRACKET))
     {
-        // unbound array
+        // unbound array - empty brackets []
         array->type_array.size = NULL;
     }
     else

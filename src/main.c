@@ -126,7 +126,6 @@ static int build_command(const char *filename)
 
     printf("Semantic analysis successful!\n");
 
-    // cleanup
     semantic_analyzer_dnit(&semantic_analyzer);
     module_manager_dnit(&module_manager);
     ast_node_dnit(program);

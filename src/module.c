@@ -1,7 +1,8 @@
 #include "module.h"
 #include "ioutil.h"
 #include "lexer.h"
-#include "semantic.h"
+#include "symbol.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

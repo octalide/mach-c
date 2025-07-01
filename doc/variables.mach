@@ -1,7 +1,0 @@
-# compile time constant declaration
-# NOTE: This is a compile-time constant, not a variable. It can only be defined outside of a function.
-val PI: f32 = 3.14159
-
-# variable declaration
-# NOTE: This is a variable, which can be changed at runtime. They can be defined inside or outside of a function.
-var radius: f32 = 5.0

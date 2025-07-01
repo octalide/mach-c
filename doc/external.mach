@@ -1,9 +1,0 @@
-# use statement
-# NOTE: Module paths provided to the use statement are relative to the current project.
-use       doc.language_examples.types;     # non-aliased module path (all symbols are imported directly)
-use vars: doc.language_examples.variables; # aliased module path (module imported as `vars`)
-
-# external function declaration
-# NOTE: This is an external function declaration, which means it is defined in another module or library.
-# Mach exports all defined functions as C-style symbols, so they can be linked with other languages.
-ext foo: fun(f32) f32;

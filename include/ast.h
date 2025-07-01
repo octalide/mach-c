@@ -4,7 +4,7 @@
 #include "token.h"
 #include <stdbool.h>
 
-// forward declarations
+// forward statements
 typedef struct Type   Type;
 typedef struct Symbol Symbol;
 
@@ -13,38 +13,37 @@ typedef enum AstKind
     AST_PROGRAM,
     AST_MODULE,
 
-    // declarations
-    AST_USE_DECL,
-    AST_EXT_DECL,
-    AST_DEF_DECL,
-    AST_VAL_DECL,
-    AST_VAR_DECL,
-    AST_FUN_DECL,
-    AST_STR_DECL,
-    AST_UNI_DECL,
-    AST_FIELD_DECL,
-    AST_PARAM_DECL,
-
     // statements
-    AST_BLOCK_STMT,
-    AST_EXPR_STMT,
-    AST_RET_STMT,
-    AST_IF_STMT,
-    AST_FOR_STMT,
-    AST_BRK_STMT,
-    AST_CNT_STMT,
+    AST_STMT_USE,
+    AST_STMT_EXT,
+    AST_STMT_DEF,
+    AST_STMT_VAL,
+    AST_STMT_VAR,
+    AST_STMT_FUN,
+    AST_STMT_FIELD,
+    AST_STMT_PARAM,
+    AST_STMT_STR,
+    AST_STMT_UNI,
+    AST_STMT_IF,
+    AST_STMT_OR,
+    AST_STMT_FOR,
+    AST_STMT_BRK,
+    AST_STMT_CNT,
+    AST_STMT_RET,
+    AST_STMT_BLOCK,
+    AST_STMT_EXPR,
 
     // expressions
-    AST_BINARY_EXPR,
-    AST_UNARY_EXPR,
-    AST_CALL_EXPR,
-    AST_INDEX_EXPR,
-    AST_FIELD_EXPR,
-    AST_CAST_EXPR,
-    AST_IDENT_EXPR,
-    AST_LIT_EXPR,
-    AST_ARRAY_EXPR,
-    AST_STRUCT_EXPR,
+    AST_EXPR_BINARY,
+    AST_EXPR_UNARY,
+    AST_EXPR_CALL,
+    AST_EXPR_INDEX,
+    AST_EXPR_FIELD,
+    AST_EXPR_CAST,
+    AST_EXPR_IDENT,
+    AST_EXPR_LIT,
+    AST_EXPR_ARRAY,
+    AST_EXPR_STRUCT,
 
     // types
     AST_TYPE_NAME,
@@ -79,83 +78,83 @@ struct AstNode
         // program root
         struct
         {
-            AstList *decls;
+            AstList *stmts;
         } program;
 
-        // module declaration
+        // module statement
         struct
         {
             char    *name;  // module name
-            AstList *decls; // declarations in this module
+            AstList *stmts; // statements in this module
         } module;
 
-        // use declaration
+        // use statement
         struct
         {
             char   *module_path;
             char   *alias;      // null if unaliased
             Symbol *module_sym; // filled during semantic analysis
-        } use_decl;
+        } use_stmt;
 
-        // external declaration
+        // external statement
         struct
         {
             char    *name;
             AstNode *type;
-        } ext_decl;
+        } ext_stmt;
 
         // type definition
         struct
         {
             char    *name;
             AstNode *type;
-        } def_decl;
+        } def_stmt;
 
-        // value/variable declaration
+        // value/variable statement
         struct
         {
             char    *name;
             AstNode *type; // explicit type or null
             AstNode *init; // initializer expression
             bool     is_val;
-        } var_decl;
+        } var_stmt;
 
-        // function declaration
+        // function statement
         struct
         {
             char    *name;
             AstList *params;
             AstNode *return_type; // null for no return
             AstNode *body;        // null for external functions
-        } fun_decl;
+        } fun_stmt;
 
-        // struct declaration
+        // struct statement
         struct
         {
             char    *name;
             AstList *fields;
-        } str_decl;
+        } str_stmt;
 
-        // union declaration
+        // union statement
         struct
         {
             char    *name;
             AstList *fields;
-        } uni_decl;
+        } uni_stmt;
 
-        // field declaration
+        // field statement
         struct
         {
             char    *name;
             AstNode *type;
-        } field_decl;
+        } field_stmt;
 
-        // parameter declaration
+        // parameter statement
         struct
         {
             char    *name;
             AstNode *type;
-        } param_decl;
+        } param_stmt;
 
         // block statement
         struct
@@ -179,9 +178,9 @@ struct AstNode
         struct
         {
             AstNode *cond;
-            AstNode *then_stmt;
-            AstNode *else_stmt; // can be another if (or chain)
-        } if_stmt;
+            AstNode *body;
+            AstNode *stmt_or; // can be another conditional (or)
+        } cond_stmt;
 
         // for loop
         struct

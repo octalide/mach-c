@@ -17,115 +17,115 @@ void ast_node_dnit(AstNode *node)
     switch (node->kind)
     {
     case AST_PROGRAM:
-        if (node->program.decls)
+        if (node->program.stmts)
         {
-            ast_list_dnit(node->program.decls);
-            free(node->program.decls);
+            ast_list_dnit(node->program.stmts);
+            free(node->program.stmts);
         }
         break;
     case AST_MODULE:
         free(node->module.name);
-        if (node->module.decls)
+        if (node->module.stmts)
         {
-            ast_list_dnit(node->module.decls);
-            free(node->module.decls);
+            ast_list_dnit(node->module.stmts);
+            free(node->module.stmts);
         }
         break;
 
-    case AST_USE_DECL:
-        free(node->use_decl.module_path);
-        free(node->use_decl.alias);
+    case AST_STMT_USE:
+        free(node->use_stmt.module_path);
+        free(node->use_stmt.alias);
         break;
 
-    case AST_EXT_DECL:
-        free(node->ext_decl.name);
-        if (node->ext_decl.type)
+    case AST_STMT_EXT:
+        free(node->ext_stmt.name);
+        if (node->ext_stmt.type)
         {
-            ast_node_dnit(node->ext_decl.type);
-            free(node->ext_decl.type);
-        }
-        break;
-
-    case AST_DEF_DECL:
-        free(node->def_decl.name);
-        if (node->def_decl.type)
-        {
-            ast_node_dnit(node->def_decl.type);
-            free(node->def_decl.type);
+            ast_node_dnit(node->ext_stmt.type);
+            free(node->ext_stmt.type);
         }
         break;
 
-    case AST_VAL_DECL:
-    case AST_VAR_DECL:
-        free(node->var_decl.name);
-        if (node->var_decl.type)
+    case AST_STMT_DEF:
+        free(node->def_stmt.name);
+        if (node->def_stmt.type)
         {
-            ast_node_dnit(node->var_decl.type);
-            free(node->var_decl.type);
-        }
-        if (node->var_decl.init)
-        {
-            ast_node_dnit(node->var_decl.init);
-            free(node->var_decl.init);
+            ast_node_dnit(node->def_stmt.type);
+            free(node->def_stmt.type);
         }
         break;
 
-    case AST_FUN_DECL:
-        free(node->fun_decl.name);
-        if (node->fun_decl.params)
+    case AST_STMT_VAL:
+    case AST_STMT_VAR:
+        free(node->var_stmt.name);
+        if (node->var_stmt.type)
         {
-            ast_list_dnit(node->fun_decl.params);
-            free(node->fun_decl.params);
+            ast_node_dnit(node->var_stmt.type);
+            free(node->var_stmt.type);
         }
-        if (node->fun_decl.return_type)
+        if (node->var_stmt.init)
         {
-            ast_node_dnit(node->fun_decl.return_type);
-            free(node->fun_decl.return_type);
-        }
-        if (node->fun_decl.body)
-        {
-            ast_node_dnit(node->fun_decl.body);
-            free(node->fun_decl.body);
+            ast_node_dnit(node->var_stmt.init);
+            free(node->var_stmt.init);
         }
         break;
 
-    case AST_STR_DECL:
-        free(node->str_decl.name);
-        if (node->str_decl.fields)
+    case AST_STMT_FUN:
+        free(node->fun_stmt.name);
+        if (node->fun_stmt.params)
         {
-            ast_list_dnit(node->str_decl.fields);
-            free(node->str_decl.fields);
+            ast_list_dnit(node->fun_stmt.params);
+            free(node->fun_stmt.params);
+        }
+        if (node->fun_stmt.return_type)
+        {
+            ast_node_dnit(node->fun_stmt.return_type);
+            free(node->fun_stmt.return_type);
+        }
+        if (node->fun_stmt.body)
+        {
+            ast_node_dnit(node->fun_stmt.body);
+            free(node->fun_stmt.body);
         }
         break;
 
-    case AST_UNI_DECL:
-        free(node->uni_decl.name);
-        if (node->uni_decl.fields)
+    case AST_STMT_STR:
+        free(node->str_stmt.name);
+        if (node->str_stmt.fields)
         {
-            ast_list_dnit(node->uni_decl.fields);
-            free(node->uni_decl.fields);
+            ast_list_dnit(node->str_stmt.fields);
+            free(node->str_stmt.fields);
         }
         break;
 
-    case AST_FIELD_DECL:
-        free(node->field_decl.name);
-        if (node->field_decl.type)
+    case AST_STMT_UNI:
+        free(node->uni_stmt.name);
+        if (node->uni_stmt.fields)
         {
-            ast_node_dnit(node->field_decl.type);
-            free(node->field_decl.type);
+            ast_list_dnit(node->uni_stmt.fields);
+            free(node->uni_stmt.fields);
         }
         break;
 
-    case AST_PARAM_DECL:
-        free(node->param_decl.name);
-        if (node->param_decl.type)
+    case AST_STMT_FIELD:
+        free(node->field_stmt.name);
+        if (node->field_stmt.type)
         {
-            ast_node_dnit(node->param_decl.type);
-            free(node->param_decl.type);
+            ast_node_dnit(node->field_stmt.type);
+            free(node->field_stmt.type);
         }
         break;
 
-    case AST_BLOCK_STMT:
+    case AST_STMT_PARAM:
+        free(node->param_stmt.name);
+        if (node->param_stmt.type)
+        {
+            ast_node_dnit(node->param_stmt.type);
+            free(node->param_stmt.type);
+        }
+        break;
+
+    case AST_STMT_BLOCK:
         if (node->block_stmt.stmts)
         {
             ast_list_dnit(node->block_stmt.stmts);
@@ -133,7 +133,7 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_EXPR_STMT:
+    case AST_STMT_EXPR:
         if (node->expr_stmt.expr)
         {
             ast_node_dnit(node->expr_stmt.expr);
@@ -141,7 +141,7 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_RET_STMT:
+    case AST_STMT_RET:
         if (node->ret_stmt.expr)
         {
             ast_node_dnit(node->ret_stmt.expr);
@@ -149,25 +149,41 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_IF_STMT:
-        if (node->if_stmt.cond)
+    case AST_STMT_IF:
+        if (node->cond_stmt.cond)
         {
-            ast_node_dnit(node->if_stmt.cond);
-            free(node->if_stmt.cond);
+            ast_node_dnit(node->cond_stmt.cond);
+            free(node->cond_stmt.cond);
         }
-        if (node->if_stmt.then_stmt)
+        if (node->cond_stmt.body)
         {
-            ast_node_dnit(node->if_stmt.then_stmt);
-            free(node->if_stmt.then_stmt);
+            ast_node_dnit(node->cond_stmt.body);
+            free(node->cond_stmt.body);
         }
-        if (node->if_stmt.else_stmt)
+        if (node->cond_stmt.stmt_or)
         {
-            ast_node_dnit(node->if_stmt.else_stmt);
-            free(node->if_stmt.else_stmt);
+            ast_node_dnit(node->cond_stmt.stmt_or);
+            free(node->cond_stmt.stmt_or);
         }
         break;
-
-    case AST_FOR_STMT:
+    case AST_STMT_OR:
+        if (node->cond_stmt.cond)
+        {
+            ast_node_dnit(node->cond_stmt.cond);
+            free(node->cond_stmt.cond);
+        }
+        if (node->cond_stmt.body)
+        {
+            ast_node_dnit(node->cond_stmt.body);
+            free(node->cond_stmt.body);
+        }
+        if (node->cond_stmt.stmt_or)
+        {
+            ast_node_dnit(node->cond_stmt.stmt_or);
+            free(node->cond_stmt.stmt_or);
+        }
+        break;
+    case AST_STMT_FOR:
         if (node->for_stmt.cond)
         {
             ast_node_dnit(node->for_stmt.cond);
@@ -180,11 +196,11 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_BRK_STMT:
-    case AST_CNT_STMT:
+    case AST_STMT_BRK:
+    case AST_STMT_CNT:
         break;
 
-    case AST_BINARY_EXPR:
+    case AST_EXPR_BINARY:
         if (node->binary_expr.left)
         {
             ast_node_dnit(node->binary_expr.left);
@@ -197,7 +213,7 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_UNARY_EXPR:
+    case AST_EXPR_UNARY:
         if (node->unary_expr.expr)
         {
             ast_node_dnit(node->unary_expr.expr);
@@ -205,7 +221,7 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_CALL_EXPR:
+    case AST_EXPR_CALL:
         if (node->call_expr.func)
         {
             ast_node_dnit(node->call_expr.func);
@@ -218,7 +234,7 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_INDEX_EXPR:
+    case AST_EXPR_INDEX:
         if (node->index_expr.array)
         {
             ast_node_dnit(node->index_expr.array);
@@ -231,7 +247,7 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_FIELD_EXPR:
+    case AST_EXPR_FIELD:
         if (node->field_expr.object)
         {
             ast_node_dnit(node->field_expr.object);
@@ -240,7 +256,7 @@ void ast_node_dnit(AstNode *node)
         free(node->field_expr.field);
         break;
 
-    case AST_CAST_EXPR:
+    case AST_EXPR_CAST:
         if (node->cast_expr.expr)
         {
             ast_node_dnit(node->cast_expr.expr);
@@ -253,18 +269,18 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_IDENT_EXPR:
+    case AST_EXPR_IDENT:
         free(node->ident_expr.name);
         break;
 
-    case AST_LIT_EXPR:
+    case AST_EXPR_LIT:
         if (node->lit_expr.kind == TOKEN_LIT_STRING)
         {
             free(node->lit_expr.string_val);
         }
         break;
 
-    case AST_ARRAY_EXPR:
+    case AST_EXPR_ARRAY:
         if (node->array_expr.type)
         {
             ast_node_dnit(node->array_expr.type);
@@ -277,7 +293,7 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_STRUCT_EXPR:
+    case AST_EXPR_STRUCT:
         if (node->struct_expr.type)
         {
             ast_node_dnit(node->struct_expr.type);
@@ -405,114 +421,114 @@ void ast_print(AstNode *node, int indent)
     {
     case AST_PROGRAM:
         printf("PROGRAM\n");
-        for (int i = 0; i < node->program.decls->count; i++)
+        for (int i = 0; i < node->program.stmts->count; i++)
         {
-            ast_print(node->program.decls->items[i], indent + 1);
+            ast_print(node->program.stmts->items[i], indent + 1);
         }
         break;
     case AST_MODULE:
         printf("MODULE %s\n", node->module.name);
-        for (int i = 0; i < node->module.decls->count; i++)
+        for (int i = 0; i < node->module.stmts->count; i++)
         {
-            ast_print(node->module.decls->items[i], indent + 1);
+            ast_print(node->module.stmts->items[i], indent + 1);
         }
         break;
-    case AST_USE_DECL:
-        printf("USE %s", node->use_decl.module_path);
-        if (node->use_decl.alias)
+    case AST_STMT_USE:
+        printf("USE %s", node->use_stmt.module_path);
+        if (node->use_stmt.alias)
         {
-            printf(" as %s", node->use_decl.alias);
+            printf(" as %s", node->use_stmt.alias);
         }
         printf("\n");
         break;
 
-    case AST_EXT_DECL:
-        printf("EXT %s:\n", node->ext_decl.name);
-        ast_print(node->ext_decl.type, indent + 1);
+    case AST_STMT_EXT:
+        printf("EXT %s:\n", node->ext_stmt.name);
+        ast_print(node->ext_stmt.type, indent + 1);
         break;
 
-    case AST_DEF_DECL:
-        printf("DEF %s:\n", node->def_decl.name);
-        ast_print(node->def_decl.type, indent + 1);
+    case AST_STMT_DEF:
+        printf("DEF %s:\n", node->def_stmt.name);
+        ast_print(node->def_stmt.type, indent + 1);
         break;
 
-    case AST_VAL_DECL:
-        printf("VAL %s:\n", node->var_decl.name);
-        if (node->var_decl.type)
+    case AST_STMT_VAL:
+        printf("VAL %s:\n", node->var_stmt.name);
+        if (node->var_stmt.type)
         {
-            ast_print(node->var_decl.type, indent + 1);
+            ast_print(node->var_stmt.type, indent + 1);
         }
-        if (node->var_decl.init)
-        {
-            print_indent(indent + 1);
-            printf("= \n");
-            ast_print(node->var_decl.init, indent + 2);
-        }
-        break;
-
-    case AST_VAR_DECL:
-        printf("VAR %s:\n", node->var_decl.name);
-        if (node->var_decl.type)
-        {
-            ast_print(node->var_decl.type, indent + 1);
-        }
-        if (node->var_decl.init)
+        if (node->var_stmt.init)
         {
             print_indent(indent + 1);
             printf("= \n");
-            ast_print(node->var_decl.init, indent + 2);
+            ast_print(node->var_stmt.init, indent + 2);
         }
         break;
 
-    case AST_FUN_DECL:
-        printf("FUN %s\n", node->fun_decl.name);
+    case AST_STMT_VAR:
+        printf("VAR %s:\n", node->var_stmt.name);
+        if (node->var_stmt.type)
+        {
+            ast_print(node->var_stmt.type, indent + 1);
+        }
+        if (node->var_stmt.init)
+        {
+            print_indent(indent + 1);
+            printf("= \n");
+            ast_print(node->var_stmt.init, indent + 2);
+        }
+        break;
+
+    case AST_STMT_FUN:
+        printf("FUN %s\n", node->fun_stmt.name);
         print_indent(indent + 1);
         printf("params:\n");
-        for (int i = 0; i < node->fun_decl.params->count; i++)
+        for (int i = 0; i < node->fun_stmt.params->count; i++)
         {
-            ast_print(node->fun_decl.params->items[i], indent + 2);
+            ast_print(node->fun_stmt.params->items[i], indent + 2);
         }
-        if (node->fun_decl.return_type)
+        if (node->fun_stmt.return_type)
         {
             print_indent(indent + 1);
             printf("returns:\n");
-            ast_print(node->fun_decl.return_type, indent + 2);
+            ast_print(node->fun_stmt.return_type, indent + 2);
         }
-        if (node->fun_decl.body)
+        if (node->fun_stmt.body)
         {
             print_indent(indent + 1);
             printf("body:\n");
-            ast_print(node->fun_decl.body, indent + 2);
+            ast_print(node->fun_stmt.body, indent + 2);
         }
         break;
 
-    case AST_STR_DECL:
-        printf("STR %s\n", node->str_decl.name);
-        for (int i = 0; i < node->str_decl.fields->count; i++)
+    case AST_STMT_STR:
+        printf("STR %s\n", node->str_stmt.name);
+        for (int i = 0; i < node->str_stmt.fields->count; i++)
         {
-            ast_print(node->str_decl.fields->items[i], indent + 1);
+            ast_print(node->str_stmt.fields->items[i], indent + 1);
         }
         break;
 
-    case AST_UNI_DECL:
-        printf("UNI %s\n", node->uni_decl.name);
-        for (int i = 0; i < node->uni_decl.fields->count; i++)
+    case AST_STMT_UNI:
+        printf("UNI %s\n", node->uni_stmt.name);
+        for (int i = 0; i < node->uni_stmt.fields->count; i++)
         {
-            ast_print(node->uni_decl.fields->items[i], indent + 1);
+            ast_print(node->uni_stmt.fields->items[i], indent + 1);
         }
         break;
 
-    case AST_FIELD_DECL:
-        printf("FIELD %s:\n", node->field_decl.name);
-        ast_print(node->field_decl.type, indent + 1);
+    case AST_STMT_FIELD:
+        printf("FIELD %s:\n", node->field_stmt.name);
+        ast_print(node->field_stmt.type, indent + 1);
         break;
 
-    case AST_PARAM_DECL:
-        printf("PARAM %s:\n", node->param_decl.name);
-        ast_print(node->param_decl.type, indent + 1);
+    case AST_STMT_PARAM:
+        printf("PARAM %s:\n", node->param_stmt.name);
+        ast_print(node->param_stmt.type, indent + 1);
         break;
 
-    case AST_BLOCK_STMT:
+    case AST_STMT_BLOCK:
         printf("BLOCK\n");
         for (int i = 0; i < node->block_stmt.stmts->count; i++)
         {
@@ -520,12 +536,12 @@ void ast_print(AstNode *node, int indent)
         }
         break;
 
-    case AST_EXPR_STMT:
+    case AST_STMT_EXPR:
         printf("EXPR_STMT\n");
         ast_print(node->expr_stmt.expr, indent + 1);
         break;
 
-    case AST_RET_STMT:
+    case AST_STMT_RET:
         printf("RET\n");
         if (node->ret_stmt.expr)
         {
@@ -533,23 +549,23 @@ void ast_print(AstNode *node, int indent)
         }
         break;
 
-    case AST_IF_STMT:
+    case AST_STMT_IF:
         printf("IF\n");
         print_indent(indent + 1);
         printf("cond:\n");
-        ast_print(node->if_stmt.cond, indent + 2);
+        ast_print(node->cond_stmt.cond, indent + 2);
         print_indent(indent + 1);
         printf("then:\n");
-        ast_print(node->if_stmt.then_stmt, indent + 2);
-        if (node->if_stmt.else_stmt)
+        ast_print(node->cond_stmt.body, indent + 2);
+        if (node->cond_stmt.stmt_or)
         {
             print_indent(indent + 1);
             printf("else:\n");
-            ast_print(node->if_stmt.else_stmt, indent + 2);
+            ast_print(node->cond_stmt.stmt_or, indent + 2);
         }
         break;
 
-    case AST_FOR_STMT:
+    case AST_STMT_FOR:
         printf("FOR\n");
         if (node->for_stmt.cond)
         {
@@ -562,26 +578,26 @@ void ast_print(AstNode *node, int indent)
         ast_print(node->for_stmt.body, indent + 2);
         break;
 
-    case AST_BRK_STMT:
+    case AST_STMT_BRK:
         printf("BRK\n");
         break;
 
-    case AST_CNT_STMT:
+    case AST_STMT_CNT:
         printf("CNT\n");
         break;
 
-    case AST_BINARY_EXPR:
+    case AST_EXPR_BINARY:
         printf("BINARY %s\n", token_kind_to_string(node->binary_expr.op));
         ast_print(node->binary_expr.left, indent + 1);
         ast_print(node->binary_expr.right, indent + 1);
         break;
 
-    case AST_UNARY_EXPR:
+    case AST_EXPR_UNARY:
         printf("UNARY %s\n", token_kind_to_string(node->unary_expr.op));
         ast_print(node->unary_expr.expr, indent + 1);
         break;
 
-    case AST_CALL_EXPR:
+    case AST_EXPR_CALL:
         printf("CALL\n");
         ast_print(node->call_expr.func, indent + 1);
         print_indent(indent + 1);
@@ -592,18 +608,18 @@ void ast_print(AstNode *node, int indent)
         }
         break;
 
-    case AST_INDEX_EXPR:
+    case AST_EXPR_INDEX:
         printf("INDEX\n");
         ast_print(node->index_expr.array, indent + 1);
         ast_print(node->index_expr.index, indent + 1);
         break;
 
-    case AST_FIELD_EXPR:
+    case AST_EXPR_FIELD:
         printf("FIELD .%s\n", node->field_expr.field);
         ast_print(node->field_expr.object, indent + 1);
         break;
 
-    case AST_CAST_EXPR:
+    case AST_EXPR_CAST:
         printf("CAST\n");
         ast_print(node->cast_expr.expr, indent + 1);
         print_indent(indent + 1);
@@ -611,11 +627,11 @@ void ast_print(AstNode *node, int indent)
         ast_print(node->cast_expr.type, indent + 2);
         break;
 
-    case AST_IDENT_EXPR:
+    case AST_EXPR_IDENT:
         printf("IDENT %s\n", node->ident_expr.name);
         break;
 
-    case AST_LIT_EXPR:
+    case AST_EXPR_LIT:
         printf("LIT ");
         switch (node->lit_expr.kind)
         {
@@ -636,7 +652,7 @@ void ast_print(AstNode *node, int indent)
         }
         break;
 
-    case AST_ARRAY_EXPR:
+    case AST_EXPR_ARRAY:
         printf("ARRAY\n");
         ast_print(node->array_expr.type, indent + 1);
         for (int i = 0; i < node->array_expr.elems->count; i++)
@@ -645,7 +661,7 @@ void ast_print(AstNode *node, int indent)
         }
         break;
 
-    case AST_STRUCT_EXPR:
+    case AST_EXPR_STRUCT:
         printf("STRUCT_LIT\n");
         ast_print(node->struct_expr.type, indent + 1);
         for (int i = 0; i < node->struct_expr.fields->count; i++)

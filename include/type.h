@@ -2,84 +2,125 @@
 #define TYPE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 // forward declarations
-typedef struct Type    Type;
-typedef struct AstNode AstNode;
+typedef struct Symbol      Symbol;
+typedef struct AstNode     AstNode;
+typedef struct SymbolTable SymbolTable;
 
 typedef enum TypeKind
 {
-    TYPE_UNKNOWN,
-    TYPE_PTR,
-    TYPE_INT,
-    TYPE_FLOAT,
+    TYPE_U8,
+    TYPE_U16,
+    TYPE_U32,
+    TYPE_U64,
+    TYPE_I8,
+    TYPE_I16,
+    TYPE_I32,
+    TYPE_I64,
+    TYPE_F16,
+    TYPE_F32,
+    TYPE_F64,
+    TYPE_PTR,     // generic pointer
+    TYPE_POINTER, // typed pointer
     TYPE_ARRAY,
-    TYPE_FUNCTION,
     TYPE_STRUCT,
     TYPE_UNION,
-    TYPE_ALIAS,
+    TYPE_FUNCTION,
+    TYPE_ALIAS, // type alias from 'def'
 } TypeKind;
 
-struct Type
+typedef struct Type
 {
     TypeKind kind;
-    unsigned size;
-    unsigned alignment;
-    bool     is_signed;
+    size_t   size;      // size in bytes
+    size_t   alignment; // alignment requirement
+    char    *name;      // for named types (structs, unions, aliases)
 
     union
     {
+        // TYPE_POINTER
         struct
         {
-            Type *base;
-        } ptr;
+            struct Type *base;
+        } pointer;
 
+        // TYPE_ARRAY
         struct
         {
-            Type *elem_type;
-            int   size; // -1 for dynamic arrays
+            struct Type *elem_type;
+            size_t       length; // 0 for unbound arrays
+            bool         is_unbound;
         } array;
 
+        // TYPE_STRUCT, TYPE_UNION
         struct
         {
-            Type **param_types;
-            int    param_count;
-            Type  *return_type; // NULL for void return
-        } function;
-
-        struct
-        {
-            struct Symbol **fields;
-            int             field_count;
-            char           *name;
+            Symbol *fields; // linked list of field symbols
+            size_t  field_count;
         } composite;
 
+        // TYPE_FUNCTION
         struct
         {
-            Type *target;
-            char *name;
+            struct Type  *return_type; // NULL for no return
+            struct Type **param_types;
+            size_t        param_count;
+        } function;
+
+        // TYPE_ALIAS
+        struct
+        {
+            struct Type *target;
         } alias;
     };
-};
+} Type;
 
-Type *type_create_builtin(TypeKind kind, unsigned size, unsigned alignment, bool is_signed);
-Type *type_create_ptr(Type *base);
-Type *type_create_array(Type *elem_type, int size);
-Type *type_create_function(Type **param_types, int param_count, Type *return_type);
-Type *type_create_struct(const char *name);
-Type *type_create_union(const char *name);
-Type *type_create_alias(const char *name, Type *target);
-void  type_dnit(Type *type);
-bool  type_equals(Type *a, Type *b);
-bool  type_is_assignable(Type *target, Type *source);
-Type *type_get_common_type(Type *a, Type *b);
-bool  type_is_numeric(Type *type);
-bool  type_is_integer(Type *type);
-bool  type_is_pointer_like(Type *type);
-bool  type_can_cast(Type *from, Type *to);
-Type *type_get_element_type(Type *type);
-bool  type_can_accept_literal(Type *target, AstNode *literal_node);
+// type system initialization
+void type_system_init(void);
+void type_system_dnit(void);
 
-const char *type_to_string(Type *type);
+// builtin type accessors
+Type *type_u8(void);
+Type *type_u16(void);
+Type *type_u32(void);
+Type *type_u64(void);
+Type *type_i8(void);
+Type *type_i16(void);
+Type *type_i32(void);
+Type *type_i64(void);
+Type *type_f16(void);
+Type *type_f32(void);
+Type *type_f64(void);
+Type *type_ptr(void);
 
-#endif
+// type constructors
+Type *type_pointer_create(Type *base);
+Type *type_array_create(Type *elem_type, size_t length, bool is_unbound);
+Type *type_struct_create(const char *name);
+Type *type_union_create(const char *name);
+Type *type_function_create(Type *return_type, Type **param_types, size_t param_count);
+Type *type_alias_create(const char *name, Type *target);
+
+// type operations
+bool   type_equals(Type *a, Type *b);
+bool   type_is_numeric(Type *type);
+bool   type_is_integer(Type *type);
+bool   type_is_float(Type *type);
+bool   type_is_signed(Type *type);
+bool   type_is_pointer_like(Type *type);
+bool   type_is_truthy(Type *type); // can be used in boolean context (non-zero)
+bool   type_can_cast_to(Type *from, Type *to);
+bool   type_can_assign_to(Type *from, Type *to);
+size_t type_sizeof(Type *type);
+size_t type_alignof(Type *type);
+
+// type resolution from AST
+Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table);
+Type *type_resolve_alias(Type *type); // resolve alias to underlying type
+
+// debug
+void type_print(Type *type);
+
+#endif // TYPE_H

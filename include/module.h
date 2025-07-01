@@ -8,7 +8,7 @@
 typedef struct Module        Module;
 typedef struct ModuleManager ModuleManager;
 
-// forward declaration
+// forward statement
 typedef struct SymbolTable SymbolTable;
 
 // represents a loaded module
@@ -23,14 +23,31 @@ struct Module
     Module      *next;        // linked list for dependencies
 };
 
+// error tracking for modules
+typedef struct ModuleError
+{
+    char *module_path;
+    char *file_path;
+    char *message;
+} ModuleError;
+
+typedef struct ModuleErrorList
+{
+    ModuleError **errors;
+    int           count;
+    int           capacity;
+} ModuleErrorList;
+
 // manages module loading and dependency resolution
 struct ModuleManager
 {
-    Module **modules;      // hash table of loaded modules
-    int      capacity;     // hash table size
-    int      count;        // number of loaded modules
-    char   **search_paths; // directories to search for modules
-    int      search_count; // number of search paths
+    Module        **modules;      // hash table of loaded modules
+    int             capacity;     // hash table size
+    int             count;        // number of loaded modules
+    char          **search_paths; // directories to search for modules
+    int             search_count; // number of search paths
+    ModuleErrorList errors;       // accumulated errors during loading
+    bool            had_error;    // true if any module failed to load/parse
 };
 
 // module manager lifecycle
@@ -45,7 +62,13 @@ Module *module_manager_load_module(ModuleManager *manager, const char *module_pa
 Module *module_manager_find_module(ModuleManager *manager, const char *name);
 
 // dependency resolution
-bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *program);
+bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *program, const char *base_dir);
+
+// error handling
+void module_error_list_init(ModuleErrorList *list);
+void module_error_list_dnit(ModuleErrorList *list);
+void module_error_list_add(ModuleErrorList *list, const char *module_path, const char *file_path, const char *message);
+void module_error_list_print(ModuleErrorList *list);
 
 // module operations
 void module_init(Module *module, const char *name, const char *file_path);

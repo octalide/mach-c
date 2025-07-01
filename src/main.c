@@ -1,9 +1,9 @@
 #include "ast.h"
-#include "codegen.h"
 #include "lexer.h"
 #include "module.h"
 #include "parser.h"
 #include "semantic.h"
+// #include "codegen.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -204,17 +204,42 @@ static int build_command(int argc, char **argv)
     }
 
     printf("done\n");
-    printf("resolving dependencies... ");
 
     // initialize module manager and resolve dependencies
     ModuleManager module_manager;
     module_manager_init(&module_manager);
 
-    if (!module_manager_resolve_dependencies(&module_manager, program))
+    // get base directory from input file
+    char       *base_dir   = get_base_filename(filename);
+    const char *last_slash = strrchr(filename, '/');
+    if (last_slash)
     {
-        fprintf(stderr, "\nerror: failed to resolve module dependencies\n");
+        free(base_dir);
+        size_t dir_len = last_slash - filename;
+        base_dir       = malloc(dir_len + 1);
+        strncpy(base_dir, filename, dir_len);
+        base_dir[dir_len] = '\0';
+    }
+    else
+    {
+        free(base_dir);
+        base_dir = strdup(".");
+    }
+
+    if (!module_manager_resolve_dependencies(&module_manager, program, base_dir))
+    {
+        if (module_manager.had_error && module_manager.errors.count > 0)
+        {
+            fprintf(stderr, "\nmodule loading failed with %d error(s):\n", module_manager.errors.count);
+            module_error_list_print(&module_manager.errors);
+        }
+        else
+        {
+            fprintf(stderr, "\nerror: failed to resolve dependencies for program\n");
+        }
 
         // cleanup
+        free(base_dir);
         module_manager_dnit(&module_manager);
         ast_node_dnit(program);
         free(program);
@@ -226,17 +251,29 @@ static int build_command(int argc, char **argv)
         return 1;
     }
 
-    printf("done\n");
-    printf("analyzing program... ");
+    free(base_dir);
 
     // perform semantic analysis
+    printf("performing semantic analysis... ");
+
     SemanticAnalyzer semantic_analyzer;
-    semantic_analyzer_init(&semantic_analyzer, &module_manager);
+    semantic_analyzer_init(&semantic_analyzer);
 
-    if (!semantic_analyze_program(&semantic_analyzer, program))
+    bool semantic_success = semantic_analyze(&semantic_analyzer, program);
+
+    if (!semantic_success)
     {
-        fprintf(stderr, "\nsemantic analysis failed with %d error(s):\n", semantic_analyzer.errors.count);
-        semantic_error_list_print(&semantic_analyzer.errors, &lexer, filename);
+        printf("failed\n");
+
+        if (semantic_analyzer.errors.count > 0)
+        {
+            fprintf(stderr, "\nsemantic analysis failed with %d error(s):\n", semantic_analyzer.errors.count);
+            semantic_error_list_print(&semantic_analyzer.errors, &lexer, filename);
+        }
+        else
+        {
+            fprintf(stderr, "\nerror: semantic analysis failed\n");
+        }
 
         // cleanup
         semantic_analyzer_dnit(&semantic_analyzer);
@@ -252,118 +289,10 @@ static int build_command(int argc, char **argv)
     }
 
     printf("done\n");
-    printf("compiling... ");
 
-    // initialize codegen
-    CodegenContext codegen_ctx;
-    char          *module_name = get_base_filename(filename);
-    codegen_context_init(&codegen_ctx, module_name, &module_manager);
-
-    // generate code
-    if (!codegen_program(&codegen_ctx, program))
-    {
-        fprintf(stderr, "\nerror: code generation failed\n");
-
-        // cleanup
-        codegen_context_dnit(&codegen_ctx);
-        free(module_name);
-        semantic_analyzer_dnit(&semantic_analyzer);
-        module_manager_dnit(&module_manager);
-        ast_node_dnit(program);
-        free(program);
-        parser_dnit(&parser);
-        lexer_dnit(&lexer);
-        free(source);
-        free(default_output);
-
-        return 1;
-    }
-
-    printf("done\n");
-    printf("writing outputs...\n");
-
-    // emit requested outputs
-    bool  success     = true;
-    char *temp_object = NULL;
-
-    if (options.emit_ir)
-    {
-        char *ir_file = options.emit_ir && !options.emit_object && !options.emit_bitcode && !options.link_executable ? (char *)options.output_file : create_output_filename(filename, ".ll");
-
-        if (!codegen_write_ir(&codegen_ctx, ir_file))
-        {
-            success = false;
-        }
-        else
-        {
-            printf("IR written to %s\n", ir_file);
-        }
-
-        if (ir_file != options.output_file)
-            free(ir_file);
-    }
-
-    if (success && options.emit_bitcode)
-    {
-        char *bc_file = options.emit_bitcode && !options.emit_object && !options.link_executable ? (char *)options.output_file : create_output_filename(filename, ".bc");
-
-        if (!codegen_write_bitcode(&codegen_ctx, bc_file))
-        {
-            success = false;
-        }
-        else
-        {
-            printf("bitcode written to %s\n", bc_file);
-        }
-
-        if (bc_file != options.output_file)
-            free(bc_file);
-    }
-
-    if (success && (options.emit_object || options.link_executable))
-    {
-        char *obj_file;
-        if (options.emit_object && !options.link_executable)
-        {
-            obj_file = (char *)options.output_file;
-        }
-        else
-        {
-            temp_object = create_output_filename(filename, ".o");
-            obj_file    = temp_object;
-        }
-
-        if (!codegen_write_object(&codegen_ctx, obj_file))
-        {
-            success = false;
-        }
-        else
-        {
-            if (options.emit_object && !options.link_executable)
-                printf("object file written to %s\n", obj_file);
-        }
-    }
-
-    if (success && options.link_executable && temp_object)
-    {
-        if (!codegen_link_executable(temp_object, options.output_file))
-        {
-            success = false;
-        }
-        else
-        {
-            printf("executable created: %s\n", options.output_file);
-        }
-
-        // clean up temporary object file
-        unlink(temp_object);
-    }
-
-    // cleanup
-    free(temp_object);
-    codegen_context_dnit(&codegen_ctx);
-    free(module_name);
+    // cleanup semantic analyzer
     semantic_analyzer_dnit(&semantic_analyzer);
+
     module_manager_dnit(&module_manager);
     ast_node_dnit(program);
     free(program);
@@ -372,7 +301,7 @@ static int build_command(int argc, char **argv)
     free(source);
     free(default_output);
 
-    return success ? 0 : 1;
+    return 0;
 }
 
 int main(int argc, char **argv)

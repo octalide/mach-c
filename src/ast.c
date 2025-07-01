@@ -14,6 +14,14 @@ void ast_node_dnit(AstNode *node)
     if (!node)
         return;
 
+    // free token if present
+    if (node->token)
+    {
+        token_dnit(node->token);
+        free(node->token);
+        node->token = NULL;
+    }
+
     switch (node->kind)
     {
     case AST_PROGRAM:
@@ -561,6 +569,22 @@ void ast_print(AstNode *node, int indent)
         {
             print_indent(indent + 1);
             printf("else:\n");
+            ast_print(node->cond_stmt.stmt_or, indent + 2);
+        }
+        break;
+
+    case AST_STMT_OR:
+        printf("OR\n");
+        print_indent(indent + 1);
+        printf("cond:\n");
+        ast_print(node->cond_stmt.cond, indent + 2);
+        print_indent(indent + 1);
+        printf("then:\n");
+        ast_print(node->cond_stmt.body, indent + 2);
+        if (node->cond_stmt.stmt_or)
+        {
+            print_indent(indent + 1);
+            printf("or:\n");
             ast_print(node->cond_stmt.stmt_or, indent + 2);
         }
         break;

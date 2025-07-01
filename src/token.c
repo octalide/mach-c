@@ -81,31 +81,6 @@ char *token_kind_to_string(TokenKind kind)
     case TOKEN_KW_BRK:
         return "brk";
 
-    case TOKEN_TYPE_PTR:
-        return "ptr";
-    case TOKEN_TYPE_I8:
-        return "i8";
-    case TOKEN_TYPE_I16:
-        return "i16";
-    case TOKEN_TYPE_I32:
-        return "i32";
-    case TOKEN_TYPE_I64:
-        return "i64";
-    case TOKEN_TYPE_U8:
-        return "u8";
-    case TOKEN_TYPE_U16:
-        return "u16";
-    case TOKEN_TYPE_U32:
-        return "u32";
-    case TOKEN_TYPE_U64:
-        return "u64";
-    case TOKEN_TYPE_F16:
-        return "f16";
-    case TOKEN_TYPE_F32:
-        return "f32";
-    case TOKEN_TYPE_F64:
-        return "f64";
-
     case TOKEN_L_PAREN:
         return "(";
     case TOKEN_R_PAREN:
@@ -197,14 +172,6 @@ TokenKind token_kind_from_identifier(const char *text, int len)
         {
             return TOKEN_KW_OR;
         }
-        if (strncmp(text, "i8", 2) == 0)
-        {
-            return TOKEN_TYPE_I8;
-        }
-        if (strncmp(text, "u8", 2) == 0)
-        {
-            return TOKEN_TYPE_U8;
-        }
     }
     if (len == 3)
     {
@@ -263,54 +230,6 @@ TokenKind token_kind_from_identifier(const char *text, int len)
         if (strncmp(text, "brk", 3) == 0)
         {
             return TOKEN_KW_BRK;
-        }
-        if (strncmp(text, "ptr", 3) == 0)
-        {
-            return TOKEN_TYPE_PTR;
-        }
-        if (strncmp(text, "i8", 3) == 0)
-        {
-            return TOKEN_TYPE_I8;
-        }
-        if (strncmp(text, "i16", 3) == 0)
-        {
-            return TOKEN_TYPE_I16;
-        }
-        if (strncmp(text, "i32", 3) == 0)
-        {
-            return TOKEN_TYPE_I32;
-        }
-        if (strncmp(text, "i64", 3) == 0)
-        {
-            return TOKEN_TYPE_I64;
-        }
-        if (strncmp(text, "u8", 3) == 0)
-        {
-            return TOKEN_TYPE_U8;
-        }
-        if (strncmp(text, "u16", 3) == 0)
-        {
-            return TOKEN_TYPE_U16;
-        }
-        if (strncmp(text, "u32", 3) == 0)
-        {
-            return TOKEN_TYPE_U32;
-        }
-        if (strncmp(text, "u64", 3) == 0)
-        {
-            return TOKEN_TYPE_U64;
-        }
-        if (strncmp(text, "f16", 3) == 0)
-        {
-            return TOKEN_TYPE_F16;
-        }
-        if (strncmp(text, "f32", 3) == 0)
-        {
-            return TOKEN_TYPE_F32;
-        }
-        if (strncmp(text, "f64", 3) == 0)
-        {
-            return TOKEN_TYPE_F64;
         }
     }
 

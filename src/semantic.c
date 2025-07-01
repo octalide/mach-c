@@ -1,1231 +1,1189 @@
 #include "semantic.h"
+#include "lexer.h"
+#include "module.h"
+#include "token.h"
+#include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// builtin type registry
-static struct
+void semantic_analyzer_init(SemanticAnalyzer *analyzer)
 {
-    const char *name;
-    TypeKind    kind;
-    unsigned    size;
-    unsigned    alignment;
-    bool        is_signed;
-} builtin_types[] = {
-    {"u8", TYPE_INT, 1, 1, false},
-    {"u16", TYPE_INT, 2, 2, false},
-    {"u32", TYPE_INT, 4, 4, false},
-    {"u64", TYPE_INT, 8, 8, false},
-    {"i8", TYPE_INT, 1, 1, true},
-    {"i16", TYPE_INT, 2, 2, true},
-    {"i32", TYPE_INT, 4, 4, true},
-    {"i64", TYPE_INT, 8, 8, true},
-    {"f16", TYPE_FLOAT, 2, 2, false},
-    {"f32", TYPE_FLOAT, 4, 4, false},
-    {"f64", TYPE_FLOAT, 8, 8, false},
-    {"ptr", TYPE_PTR, 8, 8, false},
-};
-
-void semantic_analyzer_init(SemanticAnalyzer *analyzer, ModuleManager *manager)
-{
-    analyzer->global_scope = malloc(sizeof(SymbolTable));
-    symbol_table_init(analyzer->global_scope, NULL);
-    analyzer->current_scope                = analyzer->global_scope;
-    analyzer->module_manager               = manager;
-    analyzer->current_function_return_type = NULL;
-    analyzer->had_error                    = false;
-    analyzer->loop_depth                   = 0;
+    symbol_table_init(&analyzer->symbol_table);
+    module_manager_init(&analyzer->module_manager);
     semantic_error_list_init(&analyzer->errors);
-
-    // register builtin types
-    analyzer->builtin_count = sizeof(builtin_types) / sizeof(builtin_types[0]);
-    analyzer->builtin_types = malloc(sizeof(Type *) * analyzer->builtin_count);
-
-    for (int i = 0; i < analyzer->builtin_count; i++)
-    {
-        Type *type                 = type_create_builtin(builtin_types[i].kind, builtin_types[i].size, builtin_types[i].alignment, builtin_types[i].is_signed);
-        analyzer->builtin_types[i] = type;
-        symbol_table_declare(analyzer->global_scope, builtin_types[i].name, SYMBOL_TYPE, type, NULL);
-    }
+    analyzer->current_function = NULL;
+    analyzer->loop_depth       = 0;
+    analyzer->has_errors       = false;
 }
 
 void semantic_analyzer_dnit(SemanticAnalyzer *analyzer)
 {
-    symbol_table_dnit(analyzer->global_scope);
-    free(analyzer->global_scope);
+    symbol_table_dnit(&analyzer->symbol_table);
+    module_manager_dnit(&analyzer->module_manager);
     semantic_error_list_dnit(&analyzer->errors);
-
-    for (int i = 0; i < analyzer->builtin_count; i++)
-    {
-        type_dnit(analyzer->builtin_types[i]);
-    }
-    free(analyzer->builtin_types);
 }
 
-void semantic_push_scope(SemanticAnalyzer *analyzer)
+bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
 {
-    SymbolTable *new_scope = malloc(sizeof(SymbolTable));
-    symbol_table_init(new_scope, analyzer->current_scope);
-    analyzer->current_scope = new_scope;
-}
-
-void semantic_pop_scope(SemanticAnalyzer *analyzer)
-{
-    if (analyzer->current_scope != analyzer->global_scope)
-    {
-        SymbolTable *old_scope  = analyzer->current_scope;
-        analyzer->current_scope = old_scope->parent;
-        symbol_table_dnit(old_scope);
-        free(old_scope);
-    }
-}
-
-void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *format, ...)
-{
-    va_list args;
-    va_start(args, format);
-
-    char buffer[512];
-    vsnprintf(buffer, sizeof(buffer), format, args);
-
-    semantic_error_list_add(&analyzer->errors, node, buffer);
-    analyzer->had_error = true;
-
-    va_end(args);
-}
-
-bool semantic_analyze_program(SemanticAnalyzer *analyzer, AstNode *program)
-{
-    if (!program || program->kind != AST_PROGRAM)
+    if (!analyzer || !root)
         return false;
 
-    // analyze all declarations
-    for (int i = 0; i < program->program.decls->count; i++)
+    // initialize type system
+    type_system_init();
+
+    // add built-in functions
+    Type **len_params  = malloc(sizeof(Type *) * 1);
+    len_params[0]      = type_pointer_create(type_u8()); // accepts any pointer/array
+    Type   *len_type   = type_function_create(type_u64(), len_params, 1);
+    Symbol *len_symbol = symbol_create(SYMBOL_FUNC, "len", len_type, NULL);
+    symbol_add(analyzer->symbol_table.global_scope, len_symbol);
+    free(len_params);
+
+    // resolve module dependencies first
+    if (root->kind == AST_PROGRAM)
     {
-        if (!semantic_analyze_declaration(analyzer, program->program.decls->items[i]))
+        if (!module_manager_resolve_dependencies(&analyzer->module_manager, root, "."))
+        {
+            analyzer->has_errors = true;
             return false;
+        }
+
+        // first pass: process use statements to create module symbols
+        for (int i = 0; i < root->program.stmts->count; i++)
+        {
+            AstNode *stmt = root->program.stmts->items[i];
+            if (stmt->kind == AST_STMT_USE)
+            {
+                if (!semantic_analyze_use_stmt(analyzer, stmt))
+                {
+                    analyzer->has_errors = true;
+                }
+            }
+        }
+
+        // second pass: analyze imported modules now that module symbols exist
+        for (int i = 0; i < root->program.stmts->count; i++)
+        {
+            AstNode *stmt = root->program.stmts->items[i];
+            if (stmt->kind == AST_STMT_USE)
+            {
+                if (!semantic_analyze_imported_module(analyzer, stmt))
+                {
+                    analyzer->has_errors = true;
+                }
+            }
+        }
+
+        // third pass: analyze the current module statements
+        for (int i = 0; i < root->program.stmts->count; i++)
+        {
+            if (!semantic_analyze_stmt(analyzer, root->program.stmts->items[i]))
+            {
+                analyzer->has_errors = true;
+            }
+        }
     }
 
-    return !analyzer->had_error;
+    return !analyzer->has_errors;
 }
 
-bool semantic_analyze_module(SemanticAnalyzer *analyzer, Module *module)
+void semantic_print_errors(SemanticAnalyzer *analyzer, Lexer *lexer, const char *file_path)
 {
-    if (!module || !module->ast)
-        return false;
-
-    // create module's own symbol table if it doesn't have one
-    if (!module->symbols)
+    if (analyzer->errors.count > 0)
     {
-        module->symbols = malloc(sizeof(SymbolTable));
-        symbol_table_init(module->symbols, analyzer->global_scope);
+        semantic_error_list_print(&analyzer->errors, lexer, file_path);
     }
-
-    // temporarily switch to module's scope
-    SymbolTable *prev_scope = analyzer->current_scope;
-    analyzer->current_scope = module->symbols;
-
-    bool result = semantic_analyze_program(analyzer, module->ast);
-
-    // restore previous scope
-    analyzer->current_scope = prev_scope;
-
-    return result;
 }
 
-bool semantic_analyze_declaration(SemanticAnalyzer *analyzer, AstNode *decl)
+// analyze expression with optional expected type for better inference
+Type *semantic_analyze_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type)
 {
-    if (!decl)
-        return false;
+    if (!analyzer || !expr)
+        return NULL;
 
-    switch (decl->kind)
+    switch (expr->kind)
     {
-    case AST_USE_DECL:
-        return semantic_analyze_use_decl(analyzer, decl);
-    case AST_EXT_DECL:
-        return semantic_analyze_ext_decl(analyzer, decl);
-    case AST_DEF_DECL:
-        return semantic_analyze_def_decl(analyzer, decl);
-    case AST_VAL_DECL:
-    case AST_VAR_DECL:
-        return semantic_analyze_var_decl(analyzer, decl);
-    case AST_FUN_DECL:
-        return semantic_analyze_fun_decl(analyzer, decl);
-    case AST_STR_DECL:
-        return semantic_analyze_str_decl(analyzer, decl);
-    case AST_UNI_DECL:
-        return semantic_analyze_uni_decl(analyzer, decl);
+    case AST_EXPR_LIT:
+        return semantic_analyze_lit_expr_with_hint(analyzer, expr, expected_type);
+    case AST_EXPR_BINARY:
+        return semantic_analyze_binary_expr(analyzer, expr);
+    case AST_EXPR_UNARY:
+        return semantic_analyze_unary_expr(analyzer, expr);
+    case AST_EXPR_CALL:
+        return semantic_analyze_call_expr(analyzer, expr);
+    case AST_EXPR_INDEX:
+        return semantic_analyze_index_expr(analyzer, expr);
+    case AST_EXPR_FIELD:
+        return semantic_analyze_field_expr(analyzer, expr);
+    case AST_EXPR_CAST:
+        return semantic_analyze_cast_expr(analyzer, expr);
+    case AST_EXPR_IDENT:
+        return semantic_analyze_ident_expr(analyzer, expr);
+    case AST_EXPR_ARRAY:
+        return semantic_analyze_array_expr(analyzer, expr);
+    case AST_EXPR_STRUCT:
+        return semantic_analyze_struct_expr(analyzer, expr);
     default:
-        semantic_error(analyzer, decl, "Unknown declaration kind");
-        return false;
+        semantic_error(analyzer, expr, "unknown expression kind");
+        return NULL;
     }
 }
 
-static void import_module_symbol(Symbol *symbol, void *data)
+// helper function to format type names for error messages
+static void format_type_name(Type *type, char *buffer, size_t buffer_size)
 {
-    SemanticAnalyzer *analyzer = (SemanticAnalyzer *)data;
-    symbol_table_declare(analyzer->current_scope, symbol->name, symbol->kind, symbol->type, symbol->decl_node);
-}
-
-bool semantic_analyze_use_decl(SemanticAnalyzer *analyzer, AstNode *decl)
-{
-    Module *module = module_manager_find_module(analyzer->module_manager, decl->use_decl.module_path);
-    if (!module)
+    if (!type || !buffer || buffer_size == 0)
     {
-        semantic_error(analyzer, decl, "Module '%s' not found", decl->use_decl.module_path);
-        return false;
+        if (buffer && buffer_size > 0)
+            buffer[0] = '\0';
+        return;
     }
 
-    // ensure module is analyzed
-    if (!module->is_analyzed)
+    FILE *tmp = fmemopen(buffer, buffer_size - 1, "w");
+    if (tmp)
     {
-        SemanticAnalyzer module_analyzer;
-        semantic_analyzer_init(&module_analyzer, analyzer->module_manager);
-        if (!semantic_analyze_module(&module_analyzer, module))
-        {
-            semantic_analyzer_dnit(&module_analyzer);
-            return false;
-        }
-        module->is_analyzed = true;
-        semantic_analyzer_dnit(&module_analyzer);
-    }
-
-    Symbol *sym = symbol_table_declare(analyzer->current_scope, decl->use_decl.alias ? decl->use_decl.alias : decl->use_decl.module_path, SYMBOL_MODULE, NULL, decl);
-
-    if (!sym)
-    {
-        semantic_error(analyzer, decl, "Module name '%s' already declared", decl->use_decl.alias ? decl->use_decl.alias : decl->use_decl.module_path);
-        return false;
-    }
-
-    sym->module               = module;
-    decl->use_decl.module_sym = sym;
-
-    // import symbols if unaliased
-    if (!decl->use_decl.alias)
-    {
-        symbol_table_iterate(module->symbols, import_module_symbol, analyzer);
-    }
-
-    return true;
-}
-
-bool semantic_analyze_ext_decl(SemanticAnalyzer *analyzer, AstNode *decl)
-{
-    Type *type = semantic_analyze_type(analyzer, decl->ext_decl.type);
-    if (!type)
-        return false;
-
-    Symbol *sym = symbol_table_declare(analyzer->current_scope, decl->ext_decl.name, type->kind == TYPE_FUNCTION ? SYMBOL_FUNC : SYMBOL_VAR, type, decl);
-
-    if (!sym)
-    {
-        semantic_error(analyzer, decl, "External symbol '%s' already declared", decl->ext_decl.name);
-        return false;
-    }
-
-    decl->symbol = sym;
-    return true;
-}
-
-bool semantic_analyze_def_decl(SemanticAnalyzer *analyzer, AstNode *decl)
-{
-    Type *type = semantic_analyze_type(analyzer, decl->def_decl.type);
-    if (!type)
-        return false;
-
-    Type *alias = type_create_alias(decl->def_decl.name, type);
-
-    Symbol *sym = symbol_table_declare(analyzer->current_scope, decl->def_decl.name, SYMBOL_TYPE, alias, decl);
-
-    if (!sym)
-    {
-        semantic_error(analyzer, decl, "Type '%s' already declared", decl->def_decl.name);
-        type_dnit(alias);
-        return false;
-    }
-
-    decl->symbol = sym;
-    return true;
-}
-
-bool semantic_analyze_var_decl(SemanticAnalyzer *analyzer, AstNode *decl)
-{
-    Type *type       = NULL;
-    bool  init_valid = true;
-
-    // analyze initializer first to infer type if needed
-    if (decl->var_decl.init)
-    {
-        Type *init_type = semantic_analyze_expression(analyzer, decl->var_decl.init);
-        if (!init_type)
-        {
-            init_valid = false;
-            // if we have an explicit type, continue with that
-            if (!decl->var_decl.type)
-            {
-                semantic_error(analyzer, decl, "Variable '%s' requires type or initializer", decl->var_decl.name);
-                return false;
-            }
-        }
-
-        if (decl->var_decl.type)
-        {
-            type = semantic_analyze_type(analyzer, decl->var_decl.type);
-            if (!type)
-                return false;
-
-            // only check compatibility if initializer is valid
-            if (init_valid)
-            {
-                // first check basic type compatibility
-                if (!type_is_assignable(type, init_type))
-                {
-                    semantic_error(analyzer, decl, "Cannot assign %s to %s", type_to_string(init_type), type_to_string(type));
-                    init_valid = false;
-                }
-                // then check literal bounds if it's a literal and types are compatible
-                else if (decl->var_decl.init->kind == AST_LIT_EXPR)
-                {
-                    if (!type_can_accept_literal(type, decl->var_decl.init))
-                    {
-                        semantic_error(analyzer, decl, "Literal value out of range for type %s", type_to_string(type));
-                        init_valid = false;
-                    }
-                }
-            }
-        }
-        else if (init_valid)
-        {
-            type = init_type;
-        }
-    }
-    else if (decl->var_decl.type)
-    {
-        type = semantic_analyze_type(analyzer, decl->var_decl.type);
-        if (!type)
-            return false;
+        FILE *old_stdout = stdout;
+        stdout           = tmp;
+        type_print(type);
+        stdout = old_stdout;
+        fclose(tmp);
+        buffer[buffer_size - 1] = '\0'; // ensure null termination
     }
     else
     {
-        semantic_error(analyzer, decl, "Variable '%s' requires type or initializer", decl->var_decl.name);
-        return false;
+        buffer[0] = '\0';
     }
-
-    // add variable to symbol table even if initializer failed, as long as we have a valid type
-    Symbol *sym = symbol_table_declare(analyzer->current_scope, decl->var_decl.name, SYMBOL_VAR, type, decl);
-
-    if (!sym)
-    {
-        semantic_error(analyzer, decl, "Variable '%s' already declared", decl->var_decl.name);
-        return false;
-    }
-
-    sym->is_val  = decl->var_decl.is_val;
-    decl->symbol = sym;
-    decl->type   = type;
-
-    return init_valid;
 }
 
-bool semantic_analyze_fun_decl(SemanticAnalyzer *analyzer, AstNode *decl)
+// helper function to resolve types with current symbol table
+static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
 {
-    // build function type
-    Type **param_types = NULL;
-    int    param_count = 0;
+    if (!type_node)
+        return NULL;
 
-    if (decl->fun_decl.params)
+    // cache resolved type in the AST node
+    if (type_node->type)
+        return type_node->type;
+
+    Type *resolved = type_resolve(type_node, &analyzer->symbol_table);
+    if (resolved)
     {
-        param_count = decl->fun_decl.params->count;
-        param_types = malloc(sizeof(Type *) * param_count);
-
-        for (int i = 0; i < param_count; i++)
-        {
-            AstNode *param = decl->fun_decl.params->items[i];
-
-            Type *param_type = semantic_analyze_type(analyzer, param->param_decl.type);
-            if (!param_type)
-            {
-                free(param_types);
-                return false;
-            }
-            param_types[i] = param_type;
-
-            param->symbol = NULL;
-        }
+        type_node->type = resolved;
     }
+    return resolved;
+}
 
-    Type *return_type = NULL;
-    if (decl->fun_decl.return_type)
+bool semantic_analyze_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    if (!analyzer || !stmt)
+        return false;
+
+    switch (stmt->kind)
     {
-        return_type = semantic_analyze_type(analyzer, decl->fun_decl.return_type);
-        if (!return_type)
+    case AST_STMT_USE:
+        // use statements are processed in an earlier pass, skip here
+        return true;
+    case AST_STMT_EXT:
+        return semantic_analyze_ext_stmt(analyzer, stmt);
+    case AST_STMT_DEF:
+        return semantic_analyze_def_stmt(analyzer, stmt);
+    case AST_STMT_VAL:
+    case AST_STMT_VAR:
+        return semantic_analyze_var_stmt(analyzer, stmt);
+    case AST_STMT_FUN:
+        return semantic_analyze_fun_stmt(analyzer, stmt);
+    case AST_STMT_STR:
+        return semantic_analyze_str_stmt(analyzer, stmt);
+    case AST_STMT_UNI:
+        return semantic_analyze_uni_stmt(analyzer, stmt);
+    case AST_STMT_IF:
+        return semantic_analyze_if_stmt(analyzer, stmt);
+    case AST_STMT_OR:
+        return semantic_analyze_or_stmt(analyzer, stmt);
+    case AST_STMT_FOR:
+        return semantic_analyze_for_stmt(analyzer, stmt);
+    case AST_STMT_RET:
+        return semantic_analyze_ret_stmt(analyzer, stmt);
+    case AST_STMT_BLOCK:
+        return semantic_analyze_block_stmt(analyzer, stmt);
+    case AST_STMT_EXPR:
+        return semantic_analyze_expr(analyzer, stmt->expr_stmt.expr) != NULL;
+    case AST_STMT_BRK:
+    case AST_STMT_CNT:
+        if (analyzer->loop_depth == 0)
         {
-            free(param_types);
+            semantic_error(analyzer, stmt, "%s statement not within a loop", stmt->kind == AST_STMT_BRK ? "break" : "continue");
             return false;
         }
+        return true;
+    default:
+        semantic_error(analyzer, stmt, "unknown statement kind");
+        return false;
     }
+}
 
-    Type *fun_type = type_create_function(param_types, param_count, return_type);
+bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    const char *module_path = stmt->use_stmt.module_path;
+    const char *alias       = stmt->use_stmt.alias;
 
-    Symbol *sym = symbol_table_declare(analyzer->current_scope, decl->fun_decl.name, SYMBOL_FUNC, fun_type, decl);
-
-    if (!sym)
+    // find the loaded module from the module manager
+    Module *module = module_manager_find_module(&analyzer->module_manager, module_path);
+    if (!module)
     {
-        semantic_error(analyzer, decl, "Function '%s' already declared", decl->fun_decl.name);
-        type_dnit(fun_type);
+        semantic_error(analyzer, stmt, "module '%s' not found", module_path);
         return false;
     }
 
-    decl->symbol = sym;
-    decl->type   = fun_type;
+    // create module symbol
+    Symbol *module_symbol = symbol_create_module(alias ? alias : module_path, module_path);
 
-    // analyze function body
-    if (decl->fun_decl.body)
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, alias ? alias : module_path);
+    if (existing)
     {
-        semantic_push_scope(analyzer);
-
-        // add parameters to scope
-        for (int i = 0; i < param_count; i++)
-        {
-            AstNode *param      = decl->fun_decl.params->items[i];
-            Type    *param_type = param_types[i];
-
-            // check if this is a function type (either direct or through alias)
-            Type *resolved_type = param_type;
-            while (resolved_type->kind == TYPE_ALIAS)
-                resolved_type = resolved_type->alias.target;
-
-            // function parameters are stored as function pointers
-            if (resolved_type->kind == TYPE_FUNCTION)
-            {
-                param_type = type_create_ptr(resolved_type);
-            }
-
-            Symbol *param_sym = symbol_table_declare(analyzer->current_scope, param->param_decl.name, SYMBOL_PARAM, param_type, param);
-            if (!param_sym)
-            {
-                semantic_error(analyzer, param, "Parameter '%s' already declared", param->param_decl.name);
-                semantic_pop_scope(analyzer);
-                return false;
-            }
-
-            param->symbol = param_sym;
-            param->type   = param_type;
-        }
-
-        // set current function return type
-        Type *prev_return_type                 = analyzer->current_function_return_type;
-        analyzer->current_function_return_type = return_type;
-
-        bool success = semantic_analyze_statement(analyzer, decl->fun_decl.body);
-
-        analyzer->current_function_return_type = prev_return_type;
-        semantic_pop_scope(analyzer);
-
-        if (!success)
-            return false;
+        semantic_error(analyzer, stmt, "module name '%s' already in use", alias ? alias : module_path);
+        symbol_destroy(module_symbol);
+        return false;
     }
+
+    // the module scope will be linked after the module is analyzed
+    stmt->use_stmt.module_sym = module_symbol;
+
+    // add to symbol table
+    symbol_add_module(&analyzer->symbol_table, module_symbol);
 
     return true;
 }
 
-bool semantic_analyze_str_decl(SemanticAnalyzer *analyzer, AstNode *decl)
+bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_stmt)
 {
-    Type *str_type = type_create_struct(decl->str_decl.name);
+    const char *module_path = use_stmt->use_stmt.module_path;
 
-    if (decl->str_decl.name)
+    // find the loaded module
+    Module *module = module_manager_find_module(&analyzer->module_manager, module_path);
+    if (!module)
     {
-        Symbol *sym = symbol_table_declare(analyzer->current_scope, decl->str_decl.name, SYMBOL_TYPE, str_type, decl);
-
-        if (!sym)
-        {
-            semantic_error(analyzer, decl, "Struct '%s' already declared", decl->str_decl.name);
-            type_dnit(str_type);
-            return false;
-        }
-
-        decl->symbol = sym;
+        semantic_error(analyzer, use_stmt, "module '%s' not found", module_path);
+        return false;
     }
 
-    // analyze fields
-    if (decl->str_decl.fields)
+    // if already analyzed, skip
+    if (module->is_analyzed)
     {
-        int field_count                 = decl->str_decl.fields->count;
-        str_type->composite.fields      = malloc(sizeof(Symbol *) * field_count);
-        str_type->composite.field_count = field_count;
-
-        unsigned offset    = 0;
-        unsigned max_align = 1;
-
-        for (int i = 0; i < field_count; i++)
+        // link the module scope to the symbol
+        Symbol *module_symbol = use_stmt->use_stmt.module_sym;
+        if (module_symbol && module->symbols)
         {
-            AstNode *field      = decl->str_decl.fields->items[i];
-            Type    *field_type = semantic_analyze_type(analyzer, field->field_decl.type);
-            if (!field_type)
-            {
-                return false;
-            }
-
-            // create field symbol directly (not through symbol table)
-            Symbol *field_sym    = malloc(sizeof(Symbol));
-            field_sym->name      = strdup(field->field_decl.name);
-            field_sym->kind      = SYMBOL_FIELD;
-            field_sym->type      = field_type;
-            field_sym->decl_node = field;
-            field_sym->is_val    = false;
-            field_sym->module    = NULL;
-
-            // check for duplicate field names
-            for (int j = 0; j < i; j++)
-            {
-                if (strcmp(str_type->composite.fields[j]->name, field_sym->name) == 0)
-                {
-                    semantic_error(analyzer, field, "Field '%s' already declared", field->field_decl.name);
-                    free(field_sym->name);
-                    free(field_sym);
-                    return false;
-                }
-            }
-
-            // align field
-            unsigned align = field_type->alignment;
-            offset         = (offset + align - 1) & ~(align - 1);
-
-            field->symbol                 = field_sym;
-            str_type->composite.fields[i] = field_sym;
-
-            offset += field_type->size;
-            if (align > max_align)
-                max_align = align;
+            module_symbol->module.scope = module->symbols->global_scope;
         }
-
-        str_type->size      = (offset + max_align - 1) & ~(max_align - 1);
-        str_type->alignment = max_align;
+        return true;
     }
 
-    decl->type = str_type;
+    printf("analyzing module '%s'... ", module_path);
+
+    // create a new symbol table for the module
+    if (!module->symbols)
+    {
+        module->symbols = malloc(sizeof(SymbolTable));
+        symbol_table_init(module->symbols);
+    }
+
+    // create a separate analyzer for this module
+    SemanticAnalyzer module_analyzer;
+    semantic_analyzer_init(&module_analyzer);
+
+    // analyze the module
+    bool success = true;
+    if (module->ast && module->ast->kind == AST_PROGRAM)
+    {
+        for (int i = 0; i < module->ast->program.stmts->count; i++)
+        {
+            AstNode *stmt = module->ast->program.stmts->items[i];
+
+            // skip use statements in imported modules
+            if (stmt->kind == AST_STMT_USE)
+                continue;
+
+            if (!semantic_analyze_stmt(&module_analyzer, stmt))
+            {
+                success = false;
+            }
+        }
+    }
+
+    if (success)
+    {
+        // transfer the analyzed symbol table to the module
+        if (module->symbols)
+        {
+            symbol_table_dnit(module->symbols);
+            free(module->symbols);
+        }
+        module->symbols  = malloc(sizeof(SymbolTable));
+        *module->symbols = module_analyzer.symbol_table;
+
+        // prevent double cleanup by clearing the analyzer's references
+        module_analyzer.symbol_table.global_scope  = NULL;
+        module_analyzer.symbol_table.current_scope = NULL;
+
+        // link the module scope to the symbol
+        Symbol *module_symbol = use_stmt->use_stmt.module_sym;
+        if (module_symbol)
+        {
+            module_symbol->module.scope = module->symbols->global_scope;
+        }
+
+        module->is_analyzed = true;
+    }
+    else
+    {
+        semantic_error(analyzer, use_stmt, "failed to analyze module '%s'", module_path);
+    }
+
+    // copy errors if any
+    for (int i = 0; i < module_analyzer.errors.count; i++)
+    {
+        semantic_error_list_add(&analyzer->errors, module_analyzer.errors.errors[i].token, module_analyzer.errors.errors[i].message);
+    }
+
+    // clean up analyzer (symbol table already transferred)
+    semantic_error_list_dnit(&module_analyzer.errors);
+    module_manager_dnit(&module_analyzer.module_manager);
+
+    return success;
+}
+
+bool semantic_analyze_ext_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    const char *name = stmt->ext_stmt.name;
+    Type       *type = resolve_type(analyzer, stmt->ext_stmt.type);
+
+    if (!type)
+    {
+        semantic_error(analyzer, stmt, "cannot resolve type for external function '%s'", name);
+        return false;
+    }
+
+    if (type->kind != TYPE_FUNCTION)
+    {
+        semantic_error(analyzer, stmt, "external declaration '%s' must be a function type", name);
+        return false;
+    }
+
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
+    if (existing)
+    {
+        semantic_error(analyzer, stmt, "redefinition of '%s'", name);
+        return false;
+    }
+
+    Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, type, stmt);
+    symbol->func.is_external = true;
+    symbol_add(analyzer->symbol_table.current_scope, symbol);
+    stmt->symbol = symbol;
+
     return true;
 }
 
-bool semantic_analyze_uni_decl(SemanticAnalyzer *analyzer, AstNode *decl)
+bool semantic_analyze_def_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    Type *uni_type = type_create_union(decl->uni_decl.name);
+    const char *name        = stmt->def_stmt.name;
+    Type       *target_type = resolve_type(analyzer, stmt->def_stmt.type);
 
-    if (decl->uni_decl.name)
+    if (!target_type)
     {
-        Symbol *sym = symbol_table_declare(analyzer->current_scope, decl->uni_decl.name, SYMBOL_TYPE, uni_type, decl);
-
-        if (!sym)
-        {
-            semantic_error(analyzer, decl, "Union '%s' already declared", decl->uni_decl.name);
-            type_dnit(uni_type);
-            return false;
-        }
-
-        decl->symbol = sym;
+        semantic_error(analyzer, stmt, "cannot resolve target type for alias '%s'", name);
+        return false;
     }
 
-    // analyze fields
-    if (decl->uni_decl.fields)
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
+    if (existing)
     {
-        int field_count                 = decl->uni_decl.fields->count;
-        uni_type->composite.fields      = malloc(sizeof(Symbol *) * field_count);
-        uni_type->composite.field_count = field_count;
-
-        unsigned max_size  = 0;
-        unsigned max_align = 1;
-
-        for (int i = 0; i < field_count; i++)
-        {
-            AstNode *field      = decl->uni_decl.fields->items[i];
-            Type    *field_type = semantic_analyze_type(analyzer, field->field_decl.type);
-            if (!field_type)
-            {
-                return false;
-            }
-
-            // create field symbol directly (not through symbol table)
-            Symbol *field_sym    = malloc(sizeof(Symbol));
-            field_sym->name      = strdup(field->field_decl.name);
-            field_sym->kind      = SYMBOL_FIELD;
-            field_sym->type      = field_type;
-            field_sym->decl_node = field;
-            field_sym->is_val    = false;
-            field_sym->module    = NULL;
-
-            // check for duplicate field names
-            for (int j = 0; j < i; j++)
-            {
-                if (strcmp(uni_type->composite.fields[j]->name, field_sym->name) == 0)
-                {
-                    semantic_error(analyzer, field, "Field '%s' already declared", field->field_decl.name);
-                    free(field_sym->name);
-                    free(field_sym);
-                    return false;
-                }
-            }
-
-            field->symbol                 = field_sym;
-            uni_type->composite.fields[i] = field_sym;
-
-            if (field_type->size > max_size)
-                max_size = field_type->size;
-            if (field_type->alignment > max_align)
-                max_align = field_type->alignment;
-        }
-
-        uni_type->size      = max_size;
-        uni_type->alignment = max_align;
+        semantic_error(analyzer, stmt, "redefinition of type '%s'", name);
+        return false;
     }
 
-    decl->type = uni_type;
+    Type   *alias_type        = type_alias_create(name, target_type);
+    Symbol *symbol            = symbol_create(SYMBOL_TYPE, name, alias_type, stmt);
+    symbol->type_def.is_alias = true;
+    symbol_add(analyzer->symbol_table.current_scope, symbol);
+    stmt->symbol = symbol;
+    stmt->type   = alias_type;
+
     return true;
 }
 
-bool semantic_analyze_statement(SemanticAnalyzer *analyzer, AstNode *stmt)
+bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    const char *name   = stmt->var_stmt.name;
+    bool        is_val = stmt->var_stmt.is_val;
+
+    // resolve explicit type if given
+    Type *explicit_type = NULL;
+    if (stmt->var_stmt.type)
+    {
+        explicit_type = resolve_type(analyzer, stmt->var_stmt.type);
+        if (!explicit_type)
+        {
+            semantic_error(analyzer, stmt, "cannot resolve type for variable '%s'", name);
+            return false;
+        }
+    }
+
+    // analyze initializer with type hint
+    Type *init_type = NULL;
+    if (stmt->var_stmt.init)
+    {
+        init_type = semantic_analyze_expr_with_hint(analyzer, stmt->var_stmt.init, explicit_type);
+        if (!init_type)
+        {
+            semantic_error(analyzer, stmt, "invalid initializer for variable '%s'", name);
+            return false;
+        }
+    }
+
+    // determine final type
+    Type *final_type = NULL;
+    if (explicit_type && init_type)
+    {
+        if (!semantic_check_assignment(analyzer, explicit_type, init_type, stmt))
+        {
+            return false;
+        }
+        final_type = explicit_type;
+    }
+    else if (explicit_type)
+    {
+        final_type = explicit_type;
+    }
+    else if (init_type)
+    {
+        final_type = init_type;
+    }
+    else
+    {
+        semantic_error(analyzer, stmt, "variable '%s' has no type or initializer", name);
+        return false;
+    }
+
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
+    if (existing)
+    {
+        semantic_error(analyzer, stmt, "redefinition of '%s'", name);
+        return false;
+    }
+
+    // create symbol
+    SymbolKind kind       = is_val ? SYMBOL_VAL : SYMBOL_VAR;
+    Symbol    *symbol     = symbol_create(kind, name, final_type, stmt);
+    symbol->var.is_global = (analyzer->symbol_table.current_scope == analyzer->symbol_table.global_scope);
+    symbol->var.is_const  = is_val;
+
+    symbol_add(analyzer->symbol_table.current_scope, symbol);
+    stmt->symbol = symbol;
+    stmt->type   = final_type;
+
+    return true;
+}
+
+static bool stmt_has_return(AstNode *stmt)
 {
     if (!stmt)
         return false;
 
     switch (stmt->kind)
     {
-    case AST_BLOCK_STMT:
-        return semantic_analyze_block_stmt(analyzer, stmt);
-    case AST_EXPR_STMT:
-        return semantic_analyze_expression(analyzer, stmt->expr_stmt.expr) != NULL;
-    case AST_RET_STMT:
-        return semantic_analyze_ret_stmt(analyzer, stmt);
-    case AST_IF_STMT:
-        return semantic_analyze_if_stmt(analyzer, stmt);
-    case AST_FOR_STMT:
-        return semantic_analyze_for_stmt(analyzer, stmt);
-    case AST_BRK_STMT:
-        return semantic_analyze_brk_stmt(analyzer, stmt);
-    case AST_CNT_STMT:
-        return semantic_analyze_cnt_stmt(analyzer, stmt);
+    case AST_STMT_RET:
+        return true;
+
+    case AST_STMT_BLOCK:
+        if (stmt->block_stmt.stmts)
+        {
+            for (int i = 0; i < stmt->block_stmt.stmts->count; i++)
+            {
+                if (stmt_has_return(stmt->block_stmt.stmts->items[i]))
+                    return true;
+            }
+        }
+        return false;
+
+    case AST_STMT_IF:
+        return stmt->cond_stmt.stmt_or && stmt_has_return(stmt->cond_stmt.body) && stmt_has_return(stmt->cond_stmt.stmt_or);
+
     default:
-        semantic_error(analyzer, stmt, "Unknown statement kind");
         return false;
     }
 }
 
-bool semantic_analyze_block_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    semantic_push_scope(analyzer);
+    const char *name = stmt->fun_stmt.name;
 
-    bool success = true;
-    for (int i = 0; i < stmt->block_stmt.stmts->count; i++)
+    // resolve return type
+    Type *return_type = NULL;
+    if (stmt->fun_stmt.return_type)
     {
-        AstNode *s = stmt->block_stmt.stmts->items[i];
-
-        // handle declarations in block
-        if (s->kind >= AST_USE_DECL && s->kind <= AST_PARAM_DECL)
+        return_type = resolve_type(analyzer, stmt->fun_stmt.return_type);
+        if (!return_type)
         {
-            if (!semantic_analyze_declaration(analyzer, s))
-                success = false;
-        }
-        else
-        {
-            if (!semantic_analyze_statement(analyzer, s))
-                success = false;
+            semantic_error(analyzer, stmt, "cannot resolve return type for function '%s'", name);
+            return false;
         }
     }
 
-    semantic_pop_scope(analyzer);
-    return success;
+    // resolve parameter types
+    size_t param_count = stmt->fun_stmt.params ? stmt->fun_stmt.params->count : 0;
+    Type **param_types = NULL;
+
+    if (param_count > 0)
+    {
+        param_types = malloc(sizeof(Type *) * param_count);
+        for (size_t i = 0; i < param_count; i++)
+        {
+            AstNode *param = stmt->fun_stmt.params->items[i];
+            param_types[i] = resolve_type(analyzer, param->param_stmt.type);
+            if (!param_types[i])
+            {
+                semantic_error(analyzer, param, "cannot resolve type for parameter '%s'", param->param_stmt.name);
+                free(param_types);
+                return false;
+            }
+            // store resolved type in param node
+            param->type = param_types[i];
+        }
+    }
+
+    Type *func_type = type_function_create(return_type, param_types, param_count);
+    free(param_types);
+
+    // check for existing declaration
+    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
+    if (existing)
+    {
+        if (existing->kind != SYMBOL_FUNC)
+        {
+            semantic_error(analyzer, stmt, "redefinition of '%s' as different kind", name);
+            return false;
+        }
+        if (!type_equals(existing->type, func_type))
+        {
+            semantic_error(analyzer, stmt, "conflicting types for function '%s'", name);
+            return false;
+        }
+        if (stmt->fun_stmt.body && existing->func.is_defined)
+        {
+            semantic_error(analyzer, stmt, "redefinition of function '%s'", name);
+            return false;
+        }
+        // update existing symbol
+        if (stmt->fun_stmt.body)
+        {
+            existing->func.is_defined = true;
+            existing->decl            = stmt;
+        }
+        stmt->symbol = existing;
+        stmt->type   = func_type;
+    }
+    else
+    {
+        // create new symbol
+        Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, func_type, stmt);
+        symbol->func.is_external = false;
+        symbol->func.is_defined  = (stmt->fun_stmt.body != NULL);
+        symbol_add(analyzer->symbol_table.current_scope, symbol);
+        stmt->symbol = symbol;
+        stmt->type   = func_type;
+        existing     = symbol;
+    }
+
+    // analyze function body if present
+    if (stmt->fun_stmt.body)
+    {
+        // create function scope
+        Scope *func_scope = scope_push(&analyzer->symbol_table, name);
+
+        // add parameters to function scope
+        if (stmt->fun_stmt.params)
+        {
+            for (int i = 0; i < stmt->fun_stmt.params->count; i++)
+            {
+                AstNode *param            = stmt->fun_stmt.params->items[i];
+                Symbol  *param_symbol     = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param->type, param);
+                param_symbol->param.index = (size_t)i;
+                symbol_add(func_scope, param_symbol);
+                param->symbol = param_symbol;
+            }
+        }
+
+        // set current function for return type checking
+        AstNode *prev_function     = analyzer->current_function;
+        analyzer->current_function = stmt;
+
+        // analyze body
+        bool success = semantic_analyze_stmt(analyzer, stmt->fun_stmt.body);
+
+        // check for missing return
+        if (return_type && !stmt_has_return(stmt->fun_stmt.body))
+        {
+            semantic_warning(analyzer, stmt, "function '%s' may not return a value", name);
+        }
+
+        // restore previous function
+        analyzer->current_function = prev_function;
+
+        scope_pop(&analyzer->symbol_table);
+
+        return success;
+    }
+
+    return true;
 }
 
-bool semantic_analyze_ret_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+bool semantic_analyze_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    Type *ret_type = NULL;
+    const char *name = stmt->str_stmt.name;
 
-    if (stmt->ret_stmt.expr)
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
+    if (existing)
     {
-        ret_type = semantic_analyze_expression(analyzer, stmt->ret_stmt.expr);
-        if (!ret_type)
-            return false;
-    }
-
-    if (analyzer->current_function_return_type)
-    {
-        if (!ret_type)
-        {
-            semantic_error(analyzer, stmt, "Function expects return value of type %s", type_to_string(analyzer->current_function_return_type));
-            return false;
-        }
-
-        if (!type_is_assignable(analyzer->current_function_return_type, ret_type))
-        {
-            semantic_error(analyzer, stmt, "Cannot return %s from function expecting %s", type_to_string(ret_type), type_to_string(analyzer->current_function_return_type));
-            return false;
-        }
-    }
-    else if (ret_type)
-    {
-        semantic_error(analyzer, stmt, "Function does not return a value");
+        semantic_error(analyzer, stmt, "redefinition of struct '%s'", name);
         return false;
     }
+
+    Type   *struct_type   = type_struct_create(name);
+    Symbol *struct_symbol = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
+    symbol_add(analyzer->symbol_table.current_scope, struct_symbol);
+
+    // analyze fields
+    if (stmt->str_stmt.fields)
+    {
+        for (int i = 0; i < stmt->str_stmt.fields->count; i++)
+        {
+            AstNode *field      = stmt->str_stmt.fields->items[i];
+            Type    *field_type = resolve_type(analyzer, field->field_stmt.type);
+
+            if (!field_type)
+            {
+                semantic_error(analyzer, field, "cannot resolve type for field '%s'", field->field_stmt.name);
+                continue;
+            }
+
+            symbol_add_field(struct_symbol, field->field_stmt.name, field_type, field);
+        }
+    }
+
+    // calculate layout
+    symbol_calculate_struct_layout(struct_symbol);
+
+    stmt->symbol = struct_symbol;
+    stmt->type   = struct_type;
+
+    return true;
+}
+
+bool semantic_analyze_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    const char *name = stmt->uni_stmt.name;
+
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
+    if (existing)
+    {
+        semantic_error(analyzer, stmt, "redefinition of union '%s'", name);
+        return false;
+    }
+
+    Type   *union_type   = type_union_create(name);
+    Symbol *union_symbol = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
+    symbol_add(analyzer->symbol_table.current_scope, union_symbol);
+
+    // analyze fields
+    if (stmt->uni_stmt.fields)
+    {
+        for (int i = 0; i < stmt->uni_stmt.fields->count; i++)
+        {
+            AstNode *field      = stmt->uni_stmt.fields->items[i];
+            Type    *field_type = resolve_type(analyzer, field->field_stmt.type);
+
+            if (!field_type)
+            {
+                semantic_error(analyzer, field, "cannot resolve type for field '%s'", field->field_stmt.name);
+                continue;
+            }
+
+            symbol_add_field(union_symbol, field->field_stmt.name, field_type, field);
+        }
+    }
+
+    // calculate layout
+    symbol_calculate_union_layout(union_symbol);
+
+    stmt->symbol = union_symbol;
+    stmt->type   = union_type;
 
     return true;
 }
 
 bool semantic_analyze_if_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    Type *cond_type = semantic_analyze_expression(analyzer, stmt->if_stmt.cond);
+    // analyze condition
+    Type *cond_type = semantic_analyze_expr(analyzer, stmt->cond_stmt.cond);
     if (!cond_type)
-        return false;
-
-    if (!type_is_integer(cond_type))
     {
-        semantic_error(analyzer, stmt->if_stmt.cond, "Condition must be integer type, got %s", type_to_string(cond_type));
+        semantic_error(analyzer, stmt, "invalid condition in if statement");
         return false;
     }
 
-    if (!semantic_analyze_statement(analyzer, stmt->if_stmt.then_stmt))
-        return false;
-
-    if (stmt->if_stmt.else_stmt)
+    // condition should be truthy (numeric or pointer-like)
+    if (!type_is_truthy(cond_type))
     {
-        if (!semantic_analyze_statement(analyzer, stmt->if_stmt.else_stmt))
-            return false;
+        semantic_error(analyzer, stmt, "condition must be numeric or pointer-like");
+        return false;
     }
 
-    return true;
+    // analyze body
+    bool success = semantic_analyze_stmt(analyzer, stmt->cond_stmt.body);
+
+    // analyze or clause if present
+    if (stmt->cond_stmt.stmt_or)
+    {
+        success &= semantic_analyze_stmt(analyzer, stmt->cond_stmt.stmt_or);
+    }
+
+    return success;
+}
+
+bool semantic_analyze_or_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    // analyze condition
+    Type *cond_type = semantic_analyze_expr(analyzer, stmt->cond_stmt.cond);
+    if (!cond_type)
+    {
+        semantic_error(analyzer, stmt, "invalid condition in or statement");
+        return false;
+    }
+
+    // condition should be truthy (numeric or pointer-like)
+    if (!type_is_truthy(cond_type))
+    {
+        semantic_error(analyzer, stmt, "condition must be numeric or pointer-like");
+        return false;
+    }
+
+    // analyze body
+    return semantic_analyze_stmt(analyzer, stmt->cond_stmt.body);
 }
 
 bool semantic_analyze_for_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
+    bool success = true;
+
+    // analyze condition if present
     if (stmt->for_stmt.cond)
     {
-        Type *cond_type = semantic_analyze_expression(analyzer, stmt->for_stmt.cond);
+        Type *cond_type = semantic_analyze_expr(analyzer, stmt->for_stmt.cond);
         if (!cond_type)
-            return false;
-
-        if (!type_is_integer(cond_type))
         {
-            semantic_error(analyzer, stmt->for_stmt.cond, "Loop condition must be integer type, got %s", type_to_string(cond_type));
-            return false;
+            semantic_error(analyzer, stmt, "invalid condition in for loop");
+            success = false;
+        }
+        else if (!type_is_truthy(cond_type))
+        {
+            semantic_error(analyzer, stmt, "loop condition must be numeric or pointer-like");
+            success = false;
         }
     }
 
+    // enter loop context
     analyzer->loop_depth++;
-    bool success = semantic_analyze_statement(analyzer, stmt->for_stmt.body);
+
+    // analyze body
+    success &= semantic_analyze_stmt(analyzer, stmt->for_stmt.body);
+
+    // exit loop context
     analyzer->loop_depth--;
 
     return success;
 }
 
-bool semantic_analyze_brk_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+bool semantic_analyze_ret_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    if (analyzer->loop_depth == 0)
+    if (!analyzer->current_function)
     {
-        semantic_error(analyzer, stmt, "brk statement outside of loop");
+        semantic_error(analyzer, stmt, "return statement outside function");
         return false;
     }
+
+    Type *expected_return = analyzer->current_function->type->function.return_type;
+
+    if (stmt->ret_stmt.expr)
+    {
+        // use expected return type as hint for better literal inference
+        Type *actual_return = semantic_analyze_expr_with_hint(analyzer, stmt->ret_stmt.expr, expected_return);
+        if (!actual_return)
+        {
+            semantic_error(analyzer, stmt, "invalid return expression");
+            return false;
+        }
+
+        if (!semantic_check_assignment(analyzer, expected_return, actual_return, stmt))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        // no return expression
+        if (expected_return != NULL)
+        {
+            semantic_error(analyzer, stmt, "function must return a value");
+            return false;
+        }
+    }
+
     return true;
 }
 
-bool semantic_analyze_cnt_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+bool semantic_analyze_block_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    if (analyzer->loop_depth == 0)
+    // create new scope for block
+    scope_push(&analyzer->symbol_table, "block");
+
+    bool success = true;
+    if (stmt->block_stmt.stmts)
     {
-        semantic_error(analyzer, stmt, "cnt statement outside of loop");
-        return false;
+        for (int i = 0; i < stmt->block_stmt.stmts->count; i++)
+        {
+            if (!semantic_analyze_stmt(analyzer, stmt->block_stmt.stmts->items[i]))
+            {
+                success = false;
+            }
+        }
     }
-    return true;
+
+    scope_pop(&analyzer->symbol_table);
+
+    return success;
 }
 
-Type *semantic_analyze_expression(SemanticAnalyzer *analyzer, AstNode *expr)
+// continue with expression analysis in next part due to length...
+
+Type *semantic_analyze_expr(SemanticAnalyzer *analyzer, AstNode *expr)
+{
+    return semantic_analyze_expr_with_hint(analyzer, expr, NULL);
+}
+
+static Type *type_promote_binary(Type *left, Type *right)
+{
+    // if either is float, promote to float
+    if (type_is_float(left) || type_is_float(right))
+    {
+        if (left->kind == TYPE_F64 || right->kind == TYPE_F64)
+            return type_f64();
+        if (left->kind == TYPE_F32 || right->kind == TYPE_F32)
+            return type_f32();
+        return type_f16();
+    }
+
+    // both are integers - promote to larger/signed
+    if (type_is_signed(left) || type_is_signed(right))
+    {
+        // at least one is signed
+        if (left->size >= right->size)
+            return type_is_signed(left) ? left : right;
+        else
+            return type_is_signed(right) ? right : left;
+    }
+
+    // both unsigned - use larger
+    return left->size >= right->size ? left : right;
+}
+
+static bool is_lvalue(AstNode *expr)
 {
     if (!expr)
-        return NULL;
+        return false;
 
     switch (expr->kind)
     {
-    case AST_BINARY_EXPR:
-        return semantic_analyze_binary_expr(analyzer, expr);
-    case AST_UNARY_EXPR:
-        return semantic_analyze_unary_expr(analyzer, expr);
-    case AST_CALL_EXPR:
-        return semantic_analyze_call_expr(analyzer, expr);
-    case AST_INDEX_EXPR:
-        return semantic_analyze_index_expr(analyzer, expr);
-    case AST_FIELD_EXPR:
-        return semantic_analyze_field_expr(analyzer, expr);
-    case AST_CAST_EXPR:
-        return semantic_analyze_cast_expr(analyzer, expr);
-    case AST_IDENT_EXPR:
-        return semantic_analyze_ident_expr(analyzer, expr);
-    case AST_LIT_EXPR:
-        return semantic_analyze_lit_expr(analyzer, expr);
-    case AST_ARRAY_EXPR:
-        return semantic_analyze_array_expr(analyzer, expr);
-    case AST_STRUCT_EXPR:
-        return semantic_analyze_struct_expr(analyzer, expr);
-    case AST_TYPE_NAME:
-        // type names can appear in expressions (e.g., size_of(i32))
-        // but when they appear as variable references, we need to check if it's actually an identifier
+    case AST_EXPR_IDENT:
+        // check if it's a variable (not a function or type)
+        if (expr->symbol)
         {
-            Symbol *sym = symbol_table_lookup(analyzer->current_scope, expr->type_name.name);
-            if (sym && (sym->kind == SYMBOL_VAR || sym->kind == SYMBOL_PARAM))
-            {
-                // this is actually a variable reference misclassified as a type name
-                expr->symbol = sym;
-                expr->type   = sym->type;
-                return sym->type;
-            }
-            else
-            {
-                // this is actually a type reference - analyze it as a type
-                return semantic_analyze_type(analyzer, expr);
-            }
+            return expr->symbol->kind == SYMBOL_VAR || expr->symbol->kind == SYMBOL_VAL || expr->symbol->kind == SYMBOL_PARAM;
         }
+        return true;
+
+    case AST_EXPR_INDEX:
+        return true; // array elements are lvalues
+
+    case AST_EXPR_FIELD:
+        return is_lvalue(expr->field_expr.object);
+
+    case AST_EXPR_UNARY:
+        if (expr->unary_expr.op == TOKEN_AT)
+        {
+            return true; // *ptr is an lvalue
+        }
+        return false;
+
     default:
-        semantic_error(analyzer, expr, "Unknown expression kind: %d (expected AST_IDENT_EXPR=%d)", expr->kind, AST_IDENT_EXPR);
-        return NULL;
+        return false;
     }
 }
 
 Type *semantic_analyze_binary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    Type *left_type = semantic_analyze_expression(analyzer, expr->binary_expr.left);
-    if (!left_type)
-        return NULL;
-
-    Type *right_type = semantic_analyze_expression(analyzer, expr->binary_expr.right);
-    if (!right_type)
-        return NULL;
-
-    switch (expr->binary_expr.op)
+    // for assignment, analyze left first to get the target type
+    if (expr->binary_expr.op == TOKEN_EQUAL)
     {
-    case TOKEN_EQUAL: // assignment
-    {
-        // check lvalue
-        if (expr->binary_expr.left->kind != AST_IDENT_EXPR && expr->binary_expr.left->kind != AST_INDEX_EXPR && expr->binary_expr.left->kind != AST_FIELD_EXPR &&
-            (expr->binary_expr.left->kind != AST_UNARY_EXPR || expr->binary_expr.left->unary_expr.op != TOKEN_AT))
+        Type *left_type = semantic_analyze_expr(analyzer, expr->binary_expr.left);
+        if (!left_type)
+            return NULL;
+
+        // check if left side is an lvalue
+        if (!is_lvalue(expr->binary_expr.left))
         {
-            semantic_error(analyzer, expr->binary_expr.left, "Cannot assign to non-lvalue");
+            semantic_error(analyzer, expr, "cannot assign to non-lvalue");
             return NULL;
         }
 
-        // check if assigning to val
-        if (expr->binary_expr.left->kind == AST_IDENT_EXPR)
-        {
-            Symbol *sym = expr->binary_expr.left->symbol;
-            if (sym && sym->is_val)
-            {
-                semantic_error(analyzer, expr, "Cannot assign to val '%s'", sym->name);
-                return NULL;
-            }
-        }
-
-        // first check basic type compatibility
-        if (!type_is_assignable(left_type, right_type))
-        {
-            semantic_error(analyzer, expr, "Cannot assign %s to %s", type_to_string(right_type), type_to_string(left_type));
+        // use left type as hint for right side
+        Type *right_type = semantic_analyze_expr_with_hint(analyzer, expr->binary_expr.right, left_type);
+        if (!right_type)
             return NULL;
-        }
 
-        // then check literal bounds if it's a literal and types are compatible
-        if (expr->binary_expr.right->kind == AST_LIT_EXPR)
+        if (!semantic_check_assignment(analyzer, left_type, right_type, expr))
         {
-            if (!type_can_accept_literal(left_type, expr->binary_expr.right))
-            {
-                semantic_error(analyzer, expr, "Literal value out of range for type %s", type_to_string(left_type));
-                return NULL;
-            }
+            return NULL;
         }
 
         expr->type = left_type;
         return left_type;
     }
 
+    // for other operations, analyze both sides
+    Type *left_type  = semantic_analyze_expr(analyzer, expr->binary_expr.left);
+    Type *right_type = semantic_analyze_expr(analyzer, expr->binary_expr.right);
+
+    if (!left_type || !right_type)
+        return NULL;
+
+    // determine result type based on operation
+    Type *result_type = NULL;
+    switch (expr->binary_expr.op)
+    {
+    case TOKEN_EQUAL_EQUAL:
+    case TOKEN_BANG_EQUAL:
+    case TOKEN_LESS:
+    case TOKEN_LESS_EQUAL:
+    case TOKEN_GREATER:
+    case TOKEN_GREATER_EQUAL:
+    case TOKEN_AMPERSAND_AMPERSAND:
+    case TOKEN_PIPE_PIPE:
+        // comparison/logical operators return u8 (bool)
+        result_type = type_u8();
+        break;
+
     case TOKEN_PLUS:
     case TOKEN_MINUS:
+        // pointer arithmetic
+        if (type_is_pointer_like(left_type) && type_is_integer(right_type))
+        {
+            result_type = left_type;
+        }
+        else if (type_is_numeric(left_type) && type_is_numeric(right_type))
+        {
+            result_type = type_promote_binary(left_type, right_type);
+        }
+        else
+        {
+            semantic_error(analyzer, expr, "invalid operands for %s", expr->binary_expr.op == TOKEN_PLUS ? "addition" : "subtraction");
+            return NULL;
+        }
+        break;
+
     case TOKEN_STAR:
     case TOKEN_SLASH:
     case TOKEN_PERCENT:
-    {
         if (!type_is_numeric(left_type) || !type_is_numeric(right_type))
         {
-            semantic_error(analyzer, expr, "Arithmetic operations require numeric types, got %s and %s", type_to_string(left_type), type_to_string(right_type));
+            semantic_error(analyzer, expr, "arithmetic requires numeric operands");
             return NULL;
         }
-
-        Type *result_type = type_get_common_type(left_type, right_type);
-        expr->type        = result_type;
-        return result_type;
-    }
+        result_type = type_promote_binary(left_type, right_type);
+        break;
 
     case TOKEN_AMPERSAND:
     case TOKEN_PIPE:
     case TOKEN_CARET:
     case TOKEN_LESS_LESS:
     case TOKEN_GREATER_GREATER:
-    {
         if (!type_is_integer(left_type) || !type_is_integer(right_type))
         {
-            semantic_error(analyzer, expr, "Bitwise operations require integer types, got %s and %s", type_to_string(left_type), type_to_string(right_type));
+            semantic_error(analyzer, expr, "bitwise operations require integer operands");
             return NULL;
         }
-
-        Type *result_type = type_get_common_type(left_type, right_type);
-        expr->type        = result_type;
-        return result_type;
-    }
-
-    case TOKEN_AMPERSAND_AMPERSAND:
-    case TOKEN_PIPE_PIPE:
-    {
-        if (!type_is_integer(left_type) || !type_is_integer(right_type))
-        {
-            semantic_error(analyzer, expr, "Logical operations require integer types, got %s and %s", type_to_string(left_type), type_to_string(right_type));
-            return NULL;
-        }
-
-        // logical operations return u8
-        expr->type = semantic_get_builtin_type(analyzer, "u8");
-        return expr->type;
-    }
-
-    case TOKEN_EQUAL_EQUAL:
-    case TOKEN_BANG_EQUAL:
-    case TOKEN_LESS:
-    case TOKEN_GREATER:
-    case TOKEN_LESS_EQUAL:
-    case TOKEN_GREATER_EQUAL:
-    {
-        if (!type_equals(left_type, right_type) && !(type_is_numeric(left_type) && type_is_numeric(right_type)))
-        {
-            semantic_error(analyzer, expr, "Cannot compare %s and %s", type_to_string(left_type), type_to_string(right_type));
-            return NULL;
-        }
-
-        // comparison operations return u8
-        expr->type = semantic_get_builtin_type(analyzer, "u8");
-        return expr->type;
-    }
+        result_type = type_promote_binary(left_type, right_type);
+        break;
 
     default:
-        semantic_error(analyzer, expr, "Unknown binary operator");
+        semantic_error(analyzer, expr, "unknown binary operator");
         return NULL;
     }
+
+    expr->type = result_type;
+    return result_type;
 }
 
 Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    Type *operand_type = semantic_analyze_expression(analyzer, expr->unary_expr.expr);
+    Type *operand_type = semantic_analyze_expr(analyzer, expr->unary_expr.expr);
     if (!operand_type)
         return NULL;
 
+    if (!semantic_check_unary_op(analyzer, expr->unary_expr.op, operand_type, expr))
+    {
+        return NULL;
+    }
+
     switch (expr->unary_expr.op)
     {
-    case TOKEN_MINUS:
-    case TOKEN_PLUS:
-    {
-        if (!type_is_numeric(operand_type))
-        {
-            semantic_error(analyzer, expr, "Unary +/- requires numeric type, got %s", type_to_string(operand_type));
-            return NULL;
-        }
-        expr->type = operand_type;
-        return operand_type;
-    }
-
-    case TOKEN_TILDE:
-    {
-        if (!type_is_integer(operand_type))
-        {
-            semantic_error(analyzer, expr, "Bitwise NOT requires integer type, got %s", type_to_string(operand_type));
-            return NULL;
-        }
-        expr->type = operand_type;
-        return operand_type;
-    }
-
-    case TOKEN_BANG:
-    {
-        if (!type_is_integer(operand_type))
-        {
-            semantic_error(analyzer, expr, "Logical NOT requires integer type, got %s", type_to_string(operand_type));
-            return NULL;
-        }
-        // logical not returns u8
-        expr->type = semantic_get_builtin_type(analyzer, "u8");
-        return expr->type;
-    }
-
     case TOKEN_QUESTION: // address-of
-    {
-        Type *ptr_type = type_create_ptr(operand_type);
-        expr->type     = ptr_type;
-        return ptr_type;
-    }
+        expr->type = type_pointer_create(operand_type);
+        return expr->type;
 
     case TOKEN_AT: // dereference
-    {
-        if (operand_type->kind != TYPE_PTR)
+        if (operand_type->kind == TYPE_POINTER)
         {
-            semantic_error(analyzer, expr, "Cannot dereference non-pointer type %s", type_to_string(operand_type));
-            return NULL;
+            expr->type = operand_type->pointer.base;
+            return expr->type;
         }
-        expr->type = operand_type->ptr.base;
-        return operand_type->ptr.base;
-    }
-
-    default:
-        semantic_error(analyzer, expr, "Unknown unary operator");
+        semantic_error(analyzer, expr, "cannot dereference non-pointer type");
         return NULL;
+    case TOKEN_BANG:            // logical not
+        expr->type = type_u8(); // logical not returns u8 (0 or 1)
+        return type_u8();
+
+    default: // arithmetic unary
+        expr->type = operand_type;
+        return operand_type;
     }
 }
 
 Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    // check builtin functions first
-    if (expr->call_expr.func->kind == AST_IDENT_EXPR)
-    {
-        const char *name = expr->call_expr.func->ident_expr.name;
-        if (strcmp(name, "len") == 0 || strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0 || strcmp(name, "offset_of") == 0)
-        {
-            return semantic_analyze_builtin_expr(analyzer, expr);
-        }
-    }
-
-    Type *func_type = semantic_analyze_expression(analyzer, expr->call_expr.func);
+    Type *func_type = semantic_analyze_expr(analyzer, expr->call_expr.func);
     if (!func_type)
         return NULL;
 
-    // follow type aliases
-    while (func_type->kind == TYPE_ALIAS)
-        func_type = func_type->alias.target;
-
-    // handle function pointers
-    if (func_type->kind == TYPE_PTR && func_type->ptr.base && func_type->ptr.base->kind == TYPE_FUNCTION)
+    // resolve aliases to get the underlying type
+    Type *resolved_type = type_resolve_alias(func_type);
+    if (!resolved_type)
     {
-        func_type = func_type->ptr.base;
-    }
-    else if (func_type->kind != TYPE_FUNCTION)
-    {
-        semantic_error(analyzer, expr, "Cannot call non-function type %s", type_to_string(func_type));
+        semantic_error(analyzer, expr, "expression is not callable");
         return NULL;
     }
 
-    // check argument count
-    int arg_count = expr->call_expr.args ? expr->call_expr.args->count : 0;
-    if (arg_count != func_type->function.param_count)
+    if (resolved_type->kind != TYPE_FUNCTION)
     {
-        semantic_error(analyzer, expr, "Function expects %d arguments, got %d", func_type->function.param_count, arg_count);
+        semantic_error(analyzer, expr, "expression is not callable");
         return NULL;
     }
 
-    // check argument types
-    for (int i = 0; i < arg_count; i++)
+    if (!semantic_check_function_call(analyzer, resolved_type, expr->call_expr.args, expr))
     {
-        Type *arg_type = semantic_analyze_expression(analyzer, expr->call_expr.args->items[i]);
-        if (!arg_type)
-            return NULL;
-
-        Type *param_type = func_type->function.param_types[i];
-
-        // handle function argument decay to pointer
-        if (param_type->kind == TYPE_PTR && param_type->ptr.base && param_type->ptr.base->kind == TYPE_FUNCTION)
-        {
-            // parameter expects function pointer, allow both function and function pointer
-            if (arg_type->kind == TYPE_FUNCTION)
-            {
-                // function decays to pointer for parameter passing
-                continue;
-            }
-            else if (arg_type->kind == TYPE_PTR && arg_type->ptr.base && arg_type->ptr.base->kind == TYPE_FUNCTION)
-            {
-                // check function pointer compatibility
-                if (!type_equals(param_type->ptr.base, arg_type->ptr.base))
-                {
-                    semantic_error(analyzer, expr->call_expr.args->items[i], "Argument %d: incompatible function pointer types", i + 1);
-                    return NULL;
-                }
-                continue;
-            }
-        }
-
-        if (!type_is_assignable(param_type, arg_type))
-        {
-            semantic_error(analyzer, expr->call_expr.args->items[i], "Argument %d: cannot pass %s to parameter of type %s", i + 1, type_to_string(arg_type), type_to_string(param_type));
-            return NULL;
-        }
+        return NULL;
     }
 
-    expr->type = func_type->function.return_type;
-    return func_type->function.return_type;
-}
-
-Type *semantic_analyze_builtin_expr(SemanticAnalyzer *analyzer, AstNode *expr)
-{
-    const char *name      = expr->call_expr.func->ident_expr.name;
-    int         arg_count = expr->call_expr.args ? expr->call_expr.args->count : 0;
-
-    if (strcmp(name, "len") == 0)
-    {
-        if (arg_count != 1)
-        {
-            semantic_error(analyzer, expr, "len() expects 1 argument, got %d", arg_count);
-            return NULL;
-        }
-
-        Type *arg_type = semantic_analyze_expression(analyzer, expr->call_expr.args->items[0]);
-        if (!arg_type)
-            return NULL;
-
-        if (arg_type->kind != TYPE_ARRAY)
-        {
-            semantic_error(analyzer, expr, "len() requires array type, got %s", type_to_string(arg_type));
-            return NULL;
-        }
-
-        expr->type = semantic_get_builtin_type(analyzer, "u64");
-        return expr->type;
-    }
-    else if (strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0)
-    {
-        if (arg_count != 1)
-        {
-            semantic_error(analyzer, expr, "%s() expects 1 argument, got %d", name, arg_count);
-            return NULL;
-        }
-
-        // argument can be type or expression
-        AstNode *arg      = expr->call_expr.args->items[0];
-        Type    *arg_type = NULL;
-
-        if (arg->kind >= AST_TYPE_NAME && arg->kind <= AST_TYPE_UNI)
-        {
-            arg_type = semantic_analyze_type(analyzer, arg);
-        }
-        else
-        {
-            arg_type = semantic_analyze_expression(analyzer, arg);
-        }
-
-        if (!arg_type)
-            return NULL;
-
-        expr->type = semantic_get_builtin_type(analyzer, "u32");
-        return expr->type;
-    }
-    else if (strcmp(name, "offset_of") == 0)
-    {
-        if (arg_count != 1)
-        {
-            semantic_error(analyzer, expr, "offset_of() expects 1 argument, got %d", arg_count);
-            return NULL;
-        }
-
-        // argument must be field access
-        AstNode *arg = expr->call_expr.args->items[0];
-        if (arg->kind != AST_FIELD_EXPR)
-        {
-            semantic_error(analyzer, expr, "offset_of() requires field access expression");
-            return NULL;
-        }
-
-        // just need to validate the field access
-        Type *field_type = semantic_analyze_field_expr(analyzer, arg);
-        if (!field_type)
-            return NULL;
-
-        expr->type = semantic_get_builtin_type(analyzer, "u32");
-        return expr->type;
-    }
-
-    return NULL;
+    expr->type = resolved_type->function.return_type;
+    return expr->type;
 }
 
 Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    Type *array_type = semantic_analyze_expression(analyzer, expr->index_expr.array);
-    if (!array_type)
+    Type *array_type = semantic_analyze_expr(analyzer, expr->index_expr.array);
+    Type *index_type = semantic_analyze_expr(analyzer, expr->index_expr.index);
+
+    if (!array_type || !index_type)
         return NULL;
 
-    Type *index_type = semantic_analyze_expression(analyzer, expr->index_expr.index);
-    if (!index_type)
-        return NULL;
-
+    // check index type
     if (!type_is_integer(index_type))
     {
-        semantic_error(analyzer, expr->index_expr.index, "Array index must be integer type, got %s", type_to_string(index_type));
+        semantic_error(analyzer, expr, "array index must be integer");
         return NULL;
     }
 
+    // check array type
     if (array_type->kind == TYPE_ARRAY)
     {
         expr->type = array_type->array.elem_type;
-        return array_type->array.elem_type;
+        return expr->type;
     }
-    else if (array_type->kind == TYPE_PTR)
+    else if (array_type->kind == TYPE_POINTER)
     {
-        expr->type = array_type->ptr.base;
-        return array_type->ptr.base;
+        expr->type = array_type->pointer.base;
+        return expr->type;
     }
     else
     {
-        semantic_error(analyzer, expr, "Cannot index non-array/pointer type %s", type_to_string(array_type));
+        semantic_error(analyzer, expr, "subscripted value is not an array or pointer");
         return NULL;
     }
 }
 
 Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    // check if object is a module identifier
-    if (expr->field_expr.object->kind == AST_IDENT_EXPR)
+    Type *object_type = semantic_analyze_expr(analyzer, expr->field_expr.object);
+
+    // check if this is module member access
+    if (expr->field_expr.object->kind == AST_EXPR_IDENT)
     {
-        Symbol *sym = symbol_table_lookup(analyzer->current_scope, expr->field_expr.object->ident_expr.name);
-        if (sym && sym->kind == SYMBOL_MODULE)
+        Symbol *object_symbol = expr->field_expr.object->symbol;
+        if (object_symbol && object_symbol->kind == SYMBOL_MODULE)
         {
-            // look up symbol in module
-            Symbol *module_sym = symbol_table_lookup(sym->module->symbols, expr->field_expr.field);
-            if (!module_sym)
+            // this is module.member access
+            Symbol *member = symbol_lookup_scope(object_symbol->module.scope, expr->field_expr.field);
+            if (!member)
             {
-                semantic_error(analyzer, expr, "No symbol '%s' in module '%s'", expr->field_expr.field, sym->name);
+                semantic_error(analyzer, expr, "no symbol named '%s' in module '%s'", expr->field_expr.field, object_symbol->name);
                 return NULL;
             }
 
-            expr->symbol                    = module_sym;
-            expr->field_expr.object->symbol = sym;
-
-            // function names decay to function pointers when used as values
-            if (module_sym->kind == SYMBOL_FUNC)
-            {
-                Type *func_ptr_type = type_create_ptr(module_sym->type);
-                expr->type          = func_ptr_type;
-                return func_ptr_type;
-            }
-
-            expr->type = module_sym->type;
-            return module_sym->type;
+            expr->type   = member->type;
+            expr->symbol = member;
+            return member->type;
         }
     }
 
-    Type *object_type = semantic_analyze_expression(analyzer, expr->field_expr.object);
     if (!object_type)
         return NULL;
 
-    // follow aliases
-    while (object_type->kind == TYPE_ALIAS)
-        object_type = object_type->alias.target;
+    // handle pointer to struct dereference
+    if (object_type->kind == TYPE_POINTER)
+    {
+        object_type = object_type->pointer.base;
+    }
 
     if (object_type->kind != TYPE_STRUCT && object_type->kind != TYPE_UNION)
     {
-        semantic_error(analyzer, expr, "Cannot access field of non-struct/union type %s", type_to_string(object_type));
+        semantic_error(analyzer, expr, "member access on non-struct/union type");
         return NULL;
     }
 
-    // find field
-    for (int i = 0; i < object_type->composite.field_count; i++)
+    // find field in type
+    for (Symbol *field = object_type->composite.fields; field; field = field->next)
     {
-        Symbol *field = object_type->composite.fields[i];
-        if (strcmp(field->name, expr->field_expr.field) == 0)
+        if (field->name && strcmp(field->name, expr->field_expr.field) == 0)
         {
             expr->type   = field->type;
             expr->symbol = field;
@@ -1233,244 +1191,296 @@ Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         }
     }
 
-    semantic_error(analyzer, expr, "No field '%s' in type %s", expr->field_expr.field, type_to_string(object_type));
+    semantic_error(analyzer, expr, "no member named '%s'", expr->field_expr.field);
     return NULL;
 }
 
 Type *semantic_analyze_cast_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    Type *from_type = semantic_analyze_expression(analyzer, expr->cast_expr.expr);
-    if (!from_type)
+    Type *source_type = semantic_analyze_expr(analyzer, expr->cast_expr.expr);
+    Type *target_type = resolve_type(analyzer, expr->cast_expr.type);
+
+    if (!source_type || !target_type)
         return NULL;
 
-    Type *to_type = semantic_analyze_type(analyzer, expr->cast_expr.type);
-    if (!to_type)
-        return NULL;
+    // store resolved target type in the cast type node
+    if (expr->cast_expr.type)
+    {
+        expr->cast_expr.type->type = target_type;
+    }
 
-    if (!semantic_check_cast_validity(analyzer, from_type, to_type, expr))
-        return NULL;
+    if (!type_can_cast_to(source_type, target_type))
+    {
+        char source_str[256] = {0};
+        char target_str[256] = {0};
+        format_type_name(source_type, source_str, sizeof(source_str));
+        format_type_name(target_type, target_str, sizeof(target_str));
 
-    expr->type = to_type;
-    return to_type;
+        semantic_error(analyzer, expr, "invalid cast from `%s` to `%s`", source_str, target_str);
+        return NULL;
+    }
+
+    expr->type = target_type;
+    return target_type;
 }
 
 Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    Symbol *sym = symbol_table_lookup(analyzer->current_scope, expr->ident_expr.name);
-    if (!sym)
-    {
-        // check if this is a builtin function
-        const char *name = expr->ident_expr.name;
-        if (strcmp(name, "len") == 0 || strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0 || strcmp(name, "offset_of") == 0)
-        {
-            // builtin functions don't have symbols but are valid identifiers in call context
-            // the actual type checking will happen in semantic_analyze_builtin_expr
-            expr->symbol = NULL;
-            expr->type   = NULL; // type will be determined when used in call expression
-            return NULL;         // return NULL to indicate special handling needed
-        }
+    const char *name   = expr->ident_expr.name;
+    Symbol     *symbol = symbol_lookup(&analyzer->symbol_table, name);
 
-        semantic_error(analyzer, expr, "Undefined identifier '%s'", expr->ident_expr.name);
+    if (!symbol)
+    {
+        semantic_error(analyzer, expr, "undefined identifier '%s'", name);
         return NULL;
     }
 
-    expr->symbol = sym;
+    expr->symbol = symbol;
 
-    if (sym->kind == SYMBOL_TYPE)
+    // module symbols don't have a regular type, but they're valid for field access
+    if (symbol->kind == SYMBOL_MODULE)
     {
-        semantic_error(analyzer, expr, "Type '%s' used as value", expr->ident_expr.name);
-        return NULL;
+        expr->type = NULL; // modules don't have a type per se
+        return NULL;       // but this is OK for field expressions
     }
 
-    if (sym->kind == SYMBOL_MODULE)
-    {
-        semantic_error(analyzer, expr, "Module '%s' used as value", expr->ident_expr.name);
-        return NULL;
-    }
-
-    // function names decay to function pointers when used as values
-    if (sym->kind == SYMBOL_FUNC)
-    {
-        Type *func_ptr_type = type_create_ptr(sym->type);
-        expr->type          = func_ptr_type;
-        return func_ptr_type;
-    }
-
-    expr->type = sym->type;
-    return sym->type;
+    expr->type = symbol->type;
+    return symbol->type;
 }
 
 Type *semantic_analyze_lit_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
+    return semantic_analyze_lit_expr_with_hint(analyzer, expr, NULL);
+}
+
+Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type)
+{
+    (void)analyzer; // unused
+
     switch (expr->lit_expr.kind)
     {
     case TOKEN_LIT_INT:
-    {
-        // default to i32 for integer literals
-        expr->type = semantic_get_builtin_type(analyzer, "i32");
-        return expr->type;
-    }
+        // determine integer type based on value and context
+        {
+            unsigned long long value = expr->lit_expr.int_val;
+            Type              *int_type;
+
+            // if we have an expected integer type and value fits, use it
+            if (expected_type && type_is_integer(expected_type))
+            {
+                bool fits = false;
+                switch (expected_type->kind)
+                {
+                case TYPE_U8:
+                    fits = (value <= UINT8_MAX);
+                    break;
+                case TYPE_U16:
+                    fits = (value <= UINT16_MAX);
+                    break;
+                case TYPE_U32:
+                    fits = (value <= UINT32_MAX);
+                    break;
+                case TYPE_U64:
+                    fits = true;
+                    break;
+                case TYPE_I8:
+                    fits = (value <= INT8_MAX);
+                    break;
+                case TYPE_I16:
+                    fits = (value <= INT16_MAX);
+                    break;
+                case TYPE_I32:
+                    fits = (value <= INT32_MAX);
+                    break;
+                case TYPE_I64:
+                    fits = (value <= INT64_MAX);
+                    break;
+                default:
+                    fits = false;
+                    break;
+                }
+
+                if (fits)
+                {
+                    expr->type = expected_type;
+                    return expected_type;
+                }
+            }
+
+            // fall back to smallest type that can hold the value
+            if (value <= UINT8_MAX)
+            {
+                int_type = type_u8();
+            }
+            else if (value <= UINT16_MAX)
+            {
+                int_type = type_u16();
+            }
+            else if (value <= UINT32_MAX)
+            {
+                int_type = type_u32();
+            }
+            else
+            {
+                int_type = type_u64();
+            }
+
+            expr->type = int_type;
+            return int_type;
+        }
 
     case TOKEN_LIT_FLOAT:
-    {
-        // default to f64 for float literals
-        expr->type = semantic_get_builtin_type(analyzer, "f64");
-        return expr->type;
-    }
+        // if we have an expected float type, use it
+        if (expected_type && type_is_float(expected_type))
+        {
+            expr->type = expected_type;
+            return expected_type;
+        }
+        // default to f64
+        expr->type = type_f64();
+        return type_f64();
 
     case TOKEN_LIT_CHAR:
-    {
-        expr->type = semantic_get_builtin_type(analyzer, "u8");
-        return expr->type;
-    }
+        // if we have an expected integer type that can hold a char, use it
+        if (expected_type && type_is_integer(expected_type) && expected_type->size >= 1)
+        {
+            expr->type = expected_type;
+            return expected_type;
+        }
+        // default to u8
+        expr->type = type_u8();
+        return type_u8();
 
     case TOKEN_LIT_STRING:
-    {
-        // strings are []u8
-        Type *char_type   = semantic_get_builtin_type(analyzer, "u8");
-        Type *string_type = type_create_array(char_type, -1);
-        expr->type        = string_type;
-        return string_type;
-    }
+        expr->type = type_array_create(type_u8(), strlen(expr->lit_expr.string_val), true);
+        return expr->type;
 
     default:
-        semantic_error(analyzer, expr, "Unknown literal type");
         return NULL;
     }
 }
 
 Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    Type *array_type = semantic_analyze_type(analyzer, expr->array_expr.type);
-    if (!array_type)
-        return NULL;
-
-    // extract element type from the array type
-    Type *elem_type = NULL;
-    if (array_type->kind == TYPE_ARRAY)
+    Type *specified_type = resolve_type(analyzer, expr->array_expr.type);
+    if (!specified_type)
     {
-        elem_type = array_type->array.elem_type;
-    }
-    else
-    {
-        semantic_error(analyzer, expr, "Array expression must have array type, got %s", type_to_string(array_type));
+        semantic_error(analyzer, expr, "cannot resolve array type");
         return NULL;
     }
 
-    int elem_count = expr->array_expr.elems ? expr->array_expr.elems->count : 0;
-
-    // check element count for bound arrays
-    if (array_type->array.size >= 0 && elem_count > array_type->array.size)
+    // check if the specified type is already an array type
+    if (specified_type->kind == TYPE_ARRAY)
     {
-        semantic_error(analyzer, expr, "Array literal has %d elements but declared size is %d", elem_count, array_type->array.size);
-        return NULL;
-    }
+        // for []T{...} syntax, the type is already an array, use it directly
+        // but validate that all elements match the element type
+        Type *elem_type = specified_type->array.elem_type;
 
-    // check all elements match expected type
-    for (int i = 0; i < elem_count; i++)
-    {
-        Type *elem_expr_type = semantic_analyze_expression(analyzer, expr->array_expr.elems->items[i]);
-        if (!elem_expr_type)
-            return NULL;
-
-        AstNode *elem_node = expr->array_expr.elems->items[i];
-
-        // special handling for literal values with bounds checking
-        if (elem_node->kind == AST_LIT_EXPR)
+        if (expr->array_expr.elems)
         {
-            if (!type_can_accept_literal(elem_type, elem_node))
+            for (int i = 0; i < expr->array_expr.elems->count; i++)
             {
-                semantic_error(analyzer, elem_node, "Array element %d: literal value out of range for type %s", i, type_to_string(elem_type));
-                return NULL;
+                Type *elem_result = semantic_analyze_expr_with_hint(analyzer, expr->array_expr.elems->items[i], elem_type);
+                if (!elem_result)
+                    return NULL;
+
+                if (!semantic_check_assignment(analyzer, elem_type, elem_result, expr->array_expr.elems->items[i]))
+                {
+                    return NULL;
+                }
             }
         }
-        else if (!type_is_assignable(elem_type, elem_expr_type))
-        {
-            semantic_error(analyzer, elem_node, "Array element %d: cannot assign %s to array of %s", i, type_to_string(elem_expr_type), type_to_string(elem_type));
-            return NULL;
-        }
-    }
 
-    // for bound arrays, use the declared type; for unbound arrays, keep the unbound type
-    Type *result_type;
-    if (array_type->array.size >= 0)
-    {
-        result_type = array_type; // use declared bound type
+        // return the specified array type as-is (preserving unbound/bound nature)
+        expr->type = specified_type;
+        return expr->type;
     }
     else
     {
-        result_type = array_type; // keep the unbound type []T
+        // for T{...} syntax, create a new bound array of type T
+        Type *elem_type = specified_type;
+
+        if (expr->array_expr.elems)
+        {
+            for (int i = 0; i < expr->array_expr.elems->count; i++)
+            {
+                Type *elem_result = semantic_analyze_expr_with_hint(analyzer, expr->array_expr.elems->items[i], elem_type);
+                if (!elem_result)
+                    return NULL;
+
+                if (!semantic_check_assignment(analyzer, elem_type, elem_result, expr->array_expr.elems->items[i]))
+                {
+                    return NULL;
+                }
+            }
+        }
+
+        size_t length = expr->array_expr.elems ? expr->array_expr.elems->count : 0;
+        expr->type    = type_array_create(elem_type, length, false);
+        return expr->type;
     }
-    expr->type = result_type;
-    return result_type;
 }
 
 Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    Type *struct_type = semantic_analyze_type(analyzer, expr->struct_expr.type);
+    Type *struct_type = resolve_type(analyzer, expr->struct_expr.type);
     if (!struct_type)
-        return NULL;
-
-    // follow aliases
-    while (struct_type->kind == TYPE_ALIAS)
-        struct_type = struct_type->alias.target;
-
-    if (struct_type->kind != TYPE_STRUCT && struct_type->kind != TYPE_UNION)
     {
-        semantic_error(analyzer, expr, "Cannot initialize non-struct/union type %s", type_to_string(struct_type));
+        semantic_error(analyzer, expr, "cannot resolve struct type");
         return NULL;
     }
 
-    // validate field initializers
+    if (struct_type->kind != TYPE_STRUCT && struct_type->kind != TYPE_UNION)
+    {
+        semantic_error(analyzer, expr, "not a struct or union type");
+        return NULL;
+    }
+
+    // analyze field initializers
     if (expr->struct_expr.fields)
     {
         for (int i = 0; i < expr->struct_expr.fields->count; i++)
         {
             AstNode *field_init = expr->struct_expr.fields->items[i];
-            if (field_init->kind != AST_FIELD_EXPR)
-            {
-                semantic_error(analyzer, field_init, "Invalid field initializer");
-                return NULL;
-            }
 
-            const char *field_name       = field_init->field_expr.field;
-            AstNode    *field_value_expr = field_init->field_expr.object;
-
-            // find field in struct
-            Symbol *field_symbol = NULL;
-            for (int j = 0; j < struct_type->composite.field_count; j++)
+            // field initializers should be field expressions or assignments
+            if (field_init->kind == AST_EXPR_FIELD)
             {
-                if (strcmp(struct_type->composite.fields[j]->name, field_name) == 0)
+                // find the field in the struct type
+                Symbol *field_sym = NULL;
+                for (Symbol *field = struct_type->composite.fields; field; field = field->next)
                 {
-                    field_symbol = struct_type->composite.fields[j];
-                    break;
+                    if (field->name && strcmp(field->name, field_init->field_expr.field) == 0)
+                    {
+                        field_sym = field;
+                        break;
+                    }
+                }
+
+                if (!field_sym)
+                {
+                    semantic_error(analyzer, field_init, "no field named '%s' in struct", field_init->field_expr.field);
+                    return NULL;
+                }
+
+                // analyze the initializer value with field type as hint
+                Type *init_type = semantic_analyze_expr_with_hint(analyzer, field_init->field_expr.object, field_sym->type);
+                if (!init_type)
+                {
+                    return NULL;
+                }
+
+                // check type compatibility
+                if (!semantic_check_assignment(analyzer, field_sym->type, init_type, field_init))
+                {
+                    return NULL;
                 }
             }
-
-            if (!field_symbol)
+            else
             {
-                semantic_error(analyzer, field_init, "Field '%s' not found in struct %s", field_name, struct_type->composite.name);
-                return NULL;
-            }
-
-            // analyze field value expression with expected type context
-            Type *field_value_type = semantic_analyze_expression(analyzer, field_value_expr);
-            if (!field_value_type)
-                return NULL;
-
-            // check type compatibility
-            if (!type_is_assignable(field_symbol->type, field_value_type))
-            {
-                semantic_error(analyzer, field_value_expr, "Cannot assign %s to field '%s' of type %s", type_to_string(field_value_type), field_name, type_to_string(field_symbol->type));
-                return NULL;
-            }
-
-            // check literal bounds if it's a literal
-            if (field_value_expr->kind == AST_LIT_EXPR)
-            {
-                if (!type_can_accept_literal(field_symbol->type, field_value_expr))
+                // for other expressions, just analyze them
+                if (!semantic_analyze_expr(analyzer, field_init))
                 {
-                    semantic_error(analyzer, field_value_expr, "Literal value out of range for field '%s' of type %s", field_name, type_to_string(field_symbol->type));
                     return NULL;
                 }
             }
@@ -1481,166 +1491,172 @@ Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     return struct_type;
 }
 
-Type *semantic_analyze_type(SemanticAnalyzer *analyzer, AstNode *type_node)
+bool semantic_check_assignment(SemanticAnalyzer *analyzer, Type *target, Type *source, AstNode *node)
 {
-    if (!type_node)
-        return NULL;
+    if (type_equals(target, source))
+        return true;
 
-    switch (type_node->kind)
+    // for assignments, be more restrictive than general casting
+    if (!type_can_assign_to(source, target))
     {
-    case AST_TYPE_NAME:
-    {
-        Symbol *sym = symbol_table_lookup(analyzer->current_scope, type_node->type_name.name);
-        if (!sym)
-        {
-            semantic_error(analyzer, type_node, "Unknown type '%s'", type_node->type_name.name);
-            return NULL;
-        }
+        char target_str[256] = {0};
+        char source_str[256] = {0};
+        format_type_name(target, target_str, sizeof(target_str));
+        format_type_name(source, source_str, sizeof(source_str));
 
-        if (sym->kind != SYMBOL_TYPE)
-        {
-            semantic_error(analyzer, type_node, "'%s' is not a type", type_node->type_name.name);
-            return NULL;
-        }
-
-        type_node->type = sym->type;
-        return sym->type;
-    }
-
-    case AST_TYPE_PTR:
-    {
-        Type *base = NULL;
-        if (type_node->type_ptr.base)
-        {
-            base = semantic_analyze_type(analyzer, type_node->type_ptr.base);
-            if (!base)
-                return NULL;
-        }
-
-        Type *ptr_type  = type_create_ptr(base);
-        type_node->type = ptr_type;
-        return ptr_type;
-    }
-
-    case AST_TYPE_ARRAY:
-    {
-        Type *elem_type = semantic_analyze_type(analyzer, type_node->type_array.elem_type);
-        if (!elem_type)
-            return NULL;
-
-        int size = -1;
-        if (type_node->type_array.size)
-        {
-            Type *size_type = semantic_analyze_expression(analyzer, type_node->type_array.size);
-            if (!size_type)
-                return NULL;
-
-            if (!type_is_integer(size_type))
-            {
-                semantic_error(analyzer, type_node->type_array.size, "Array size must be integer");
-                return NULL;
-            }
-
-            // TODO: evaluate constant expression
-            if (type_node->type_array.size->kind == AST_LIT_EXPR)
-            {
-                size = (int)type_node->type_array.size->lit_expr.int_val;
-            }
-        }
-
-        Type *array_type = type_create_array(elem_type, size);
-        type_node->type  = array_type;
-        return array_type;
-    }
-
-    case AST_TYPE_FUN:
-    {
-        Type **param_types = NULL;
-        int    param_count = 0;
-
-        if (type_node->type_fun.params)
-        {
-            param_count = type_node->type_fun.params->count;
-            param_types = malloc(sizeof(Type *) * param_count);
-
-            for (int i = 0; i < param_count; i++)
-            {
-                param_types[i] = semantic_analyze_type(analyzer, type_node->type_fun.params->items[i]);
-                if (!param_types[i])
-                {
-                    free(param_types);
-                    return NULL;
-                }
-            }
-        }
-
-        Type *return_type = NULL;
-        if (type_node->type_fun.return_type)
-        {
-            return_type = semantic_analyze_type(analyzer, type_node->type_fun.return_type);
-            if (!return_type)
-            {
-                free(param_types);
-                return NULL;
-            }
-        }
-
-        Type *fun_type  = type_create_function(param_types, param_count, return_type);
-        type_node->type = fun_type;
-        return fun_type;
-    }
-
-    case AST_TYPE_STR:
-    {
-        // handle inline struct type
-        AstNode str_decl         = {0};
-        str_decl.kind            = AST_STR_DECL;
-        str_decl.str_decl.name   = type_node->type_str.name;
-        str_decl.str_decl.fields = type_node->type_str.fields;
-
-        if (!semantic_analyze_str_decl(analyzer, &str_decl))
-            return NULL;
-
-        type_node->type = str_decl.type;
-        return str_decl.type;
-    }
-
-    case AST_TYPE_UNI:
-    {
-        // handle inline union type
-        AstNode uni_decl         = {0};
-        uni_decl.kind            = AST_UNI_DECL;
-        uni_decl.uni_decl.name   = type_node->type_uni.name;
-        uni_decl.uni_decl.fields = type_node->type_uni.fields;
-
-        if (!semantic_analyze_uni_decl(analyzer, &uni_decl))
-            return NULL;
-
-        type_node->type = uni_decl.type;
-        return uni_decl.type;
-    }
-
-    default:
-        semantic_error(analyzer, type_node, "Unknown type kind");
-        return NULL;
-    }
-}
-
-Type *semantic_get_builtin_type(SemanticAnalyzer *analyzer, const char *name)
-{
-    Symbol *sym = symbol_table_lookup(analyzer->global_scope, name);
-    if (sym && sym->kind == SYMBOL_TYPE)
-        return sym->type;
-    return NULL;
-}
-
-bool semantic_check_cast_validity(SemanticAnalyzer *analyzer, Type *from, Type *to, AstNode *node)
-{
-    if (!type_can_cast(from, to))
-    {
-        semantic_error(analyzer, node, "Cannot cast %s to %s", type_to_string(from), type_to_string(to));
+        semantic_error(analyzer, node, "incompatible types in assignment: expected `%s`, got `%s`", target_str, source_str);
         return false;
     }
+
+    return true;
+}
+
+bool semantic_check_binary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *left, Type *right, AstNode *node)
+{
+    switch (op)
+    {
+    case TOKEN_PLUS:
+    case TOKEN_MINUS:
+    case TOKEN_STAR:
+    case TOKEN_SLASH:
+    case TOKEN_PERCENT:
+        if (!type_is_numeric(left) || !type_is_numeric(right))
+        {
+            semantic_error(analyzer, node, "arithmetic requires numeric operands");
+            return false;
+        }
+        return true;
+
+    case TOKEN_EQUAL_EQUAL:
+    case TOKEN_BANG_EQUAL:
+        if (!type_equals(left, right) && !type_can_cast_to(left, right) && !type_can_cast_to(right, left))
+        {
+            char left_str[256]  = {0};
+            char right_str[256] = {0};
+            format_type_name(left, left_str, sizeof(left_str));
+            format_type_name(right, right_str, sizeof(right_str));
+
+            semantic_error(analyzer, node, "incompatible types for comparison: `%s` and `%s`", left_str, right_str);
+            return false;
+        }
+        return true;
+
+    case TOKEN_LESS:
+    case TOKEN_LESS_EQUAL:
+    case TOKEN_GREATER:
+    case TOKEN_GREATER_EQUAL:
+        if (!type_is_numeric(left) || !type_is_numeric(right))
+        {
+            semantic_error(analyzer, node, "ordering comparison requires numeric operands");
+            return false;
+        }
+        return true;
+
+    case TOKEN_AMPERSAND_AMPERSAND:
+    case TOKEN_PIPE_PIPE:
+        // in Mach, logical operators work on any type (truthiness)
+        return true;
+
+    case TOKEN_AMPERSAND:
+    case TOKEN_PIPE:
+    case TOKEN_CARET:
+    case TOKEN_LESS_LESS:
+    case TOKEN_GREATER_GREATER:
+        if (!type_is_integer(left) || !type_is_integer(right))
+        {
+            semantic_error(analyzer, node, "bitwise operations require integer operands");
+            return false;
+        }
+        return true;
+
+    case TOKEN_EQUAL:
+        // assignment: check if right can be assigned to left
+        if (!semantic_check_assignment(analyzer, left, right, node))
+        {
+            return false;
+        }
+        return true;
+
+    default:
+        semantic_error(analyzer, node, "unknown binary operator");
+        return false;
+    }
+}
+
+bool semantic_check_unary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *operand, AstNode *node)
+{
+    switch (op)
+    {
+    case TOKEN_PLUS:
+    case TOKEN_MINUS:
+        if (!type_is_numeric(operand))
+        {
+            semantic_error(analyzer, node, "arithmetic unary requires numeric operand");
+            return false;
+        }
+        return true;
+
+    case TOKEN_BANG:
+        // logical not works on any type
+        return true;
+
+    case TOKEN_TILDE:
+        if (!type_is_integer(operand))
+        {
+            semantic_error(analyzer, node, "bitwise not requires integer operand");
+            return false;
+        }
+        return true;
+
+    case TOKEN_QUESTION:
+        // address-of requires an lvalue
+        if (!is_lvalue(node->unary_expr.expr))
+        {
+            semantic_error(analyzer, node, "address-of operator requires an lvalue");
+            return false;
+        }
+        return true;
+
+    case TOKEN_AT:
+        if (!type_is_pointer_like(operand))
+        {
+            semantic_error(analyzer, node, "dereference requires pointer-like operand");
+            return false;
+        }
+        return true;
+
+    default:
+        semantic_error(analyzer, node, "unknown unary operator");
+        return false;
+    }
+}
+
+bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, AstList *args, AstNode *node)
+{
+    size_t expected_count = func_type->function.param_count;
+    size_t actual_count   = args ? args->count : 0;
+
+    if (expected_count != actual_count)
+    {
+        semantic_error(analyzer, node, "function expects %zu arguments, got %zu", expected_count, actual_count);
+        return false;
+    }
+
+    for (size_t i = 0; i < expected_count; i++)
+    {
+        Type *param_type = func_type->function.param_types[i];
+        // use parameter type as hint for better literal inference
+        Type *arg_type = semantic_analyze_expr_with_hint(analyzer, args->items[i], param_type);
+
+        if (!arg_type)
+            return false;
+
+        if (!semantic_check_assignment(analyzer, param_type, arg_type, args->items[i]))
+        {
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1655,12 +1671,17 @@ void semantic_error_list_dnit(SemanticErrorList *list)
 {
     for (int i = 0; i < list->count; i++)
     {
+        if (list->errors[i].token)
+        {
+            token_dnit(list->errors[i].token);
+            free(list->errors[i].token);
+        }
         free(list->errors[i].message);
     }
     free(list->errors);
 }
 
-void semantic_error_list_add(SemanticErrorList *list, AstNode *node, const char *message)
+void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *message)
 {
     if (list->count >= list->capacity)
     {
@@ -1668,7 +1689,17 @@ void semantic_error_list_add(SemanticErrorList *list, AstNode *node, const char 
         list->errors   = realloc(list->errors, sizeof(SemanticError) * list->capacity);
     }
 
-    list->errors[list->count].node    = node;
+    Token *error_token = NULL;
+    if (token)
+    {
+        error_token = malloc(sizeof(Token));
+        if (error_token)
+        {
+            token_copy(token, error_token);
+        }
+    }
+
+    list->errors[list->count].token   = error_token;
     list->errors[list->count].message = strdup(message);
     list->count++;
 }
@@ -1677,29 +1708,64 @@ void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char
 {
     for (int i = 0; i < list->count; i++)
     {
-        SemanticError *err = &list->errors[i];
-        if (err->node && err->node->token)
+        Token *token = list->errors[i].token;
+
+        printf("error: %s\n", list->errors[i].message);
+
+        if (token && lexer && file_path)
         {
-            Token *token     = err->node->token;
-            int    line      = lexer_get_pos_line(lexer, token->pos);
-            int    col       = lexer_get_pos_line_offset(lexer, token->pos);
-            char  *line_text = lexer_get_line_text(lexer, line);
-            if (line_text == NULL)
+            int   line      = lexer_get_pos_line(lexer, token->pos);
+            int   col       = lexer_get_pos_line_offset(lexer, token->pos);
+            char *line_text = lexer_get_line_text(lexer, line);
+
+            if (!line_text)
             {
                 line_text = strdup("unable to retrieve line text");
             }
 
-            printf("error: %s\n", err->message);
             printf("%s:%d:%d\n", file_path, line + 1, col);
             printf("%5d | %-*s\n", line + 1, col > 1 ? col - 1 : 0, line_text);
             printf("      | %*s^\n", col - 1, "");
 
             free(line_text);
         }
-        else
-        {
-            printf("error: %s\n", err->message);
-            printf("%s:0:0\n", file_path);
-        }
     }
+}
+
+void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...)
+{
+    analyzer->has_errors = true;
+
+    // format the message
+    va_list args;
+    va_start(args, fmt);
+
+    size_t len = vsnprintf(NULL, 0, fmt, args) + 1;
+    va_end(args);
+
+    char *message = malloc(len);
+    va_start(args, fmt);
+    vsnprintf(message, len, fmt, args);
+    va_end(args);
+
+    // add to error list
+    Token *token = (node && node->token) ? node->token : NULL;
+    semantic_error_list_add(&analyzer->errors, token, message);
+
+    free(message);
+}
+
+void semantic_warning(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...)
+{
+    (void)analyzer; // unused for now
+    (void)node;     // unused for now
+
+    printf("semantic warning: ");
+
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+
+    printf("\n");
 }

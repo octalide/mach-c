@@ -2,19 +2,18 @@
 #define SEMANTIC_H
 
 #include "ast.h"
-#include "lexer.h"
 #include "module.h"
 #include "symbol.h"
 #include "type.h"
 #include <stdbool.h>
 
 // forward declarations
-typedef struct SymbolTable SymbolTable;
+typedef struct Lexer Lexer;
 
 typedef struct SemanticError
 {
-    AstNode *node;
-    char    *message;
+    Token *token;
+    char  *message;
 } SemanticError;
 
 typedef struct SemanticErrorList
@@ -26,74 +25,67 @@ typedef struct SemanticErrorList
 
 typedef struct SemanticAnalyzer
 {
-    SymbolTable      *global_scope;
-    SymbolTable      *current_scope;
-    ModuleManager    *module_manager;
-    Type            **builtin_types;
-    int               builtin_count;
-    Type             *current_function_return_type;
-    SemanticErrorList errors;
-    bool              had_error;
-    int               loop_depth;
+    SymbolTable       symbol_table;
+    ModuleManager     module_manager;   // for cross-module analysis
+    SemanticErrorList errors;           // error tracking
+    AstNode          *current_function; // for return type checking
+    int               loop_depth;       // for break/continue checking
+    bool              has_errors;
 } SemanticAnalyzer;
 
-// analyzer lifecycle
-void semantic_analyzer_init(SemanticAnalyzer *analyzer, ModuleManager *manager);
+// semantic analyzer operations
+void semantic_analyzer_init(SemanticAnalyzer *analyzer);
 void semantic_analyzer_dnit(SemanticAnalyzer *analyzer);
 
-// scope management
-void semantic_push_scope(SemanticAnalyzer *analyzer);
-void semantic_pop_scope(SemanticAnalyzer *analyzer);
+// main analysis entry point
+bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root);
 
-// error handling
-void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *format, ...);
-
-// analysis functions
-bool semantic_analyze_program(SemanticAnalyzer *analyzer, AstNode *program);
-bool semantic_analyze_module(SemanticAnalyzer *analyzer, Module *module);
-bool semantic_analyze_declaration(SemanticAnalyzer *analyzer, AstNode *decl);
-
-// declaration analysis
-bool semantic_analyze_use_decl(SemanticAnalyzer *analyzer, AstNode *decl);
-bool semantic_analyze_ext_decl(SemanticAnalyzer *analyzer, AstNode *decl);
-bool semantic_analyze_def_decl(SemanticAnalyzer *analyzer, AstNode *decl);
-bool semantic_analyze_var_decl(SemanticAnalyzer *analyzer, AstNode *decl);
-bool semantic_analyze_fun_decl(SemanticAnalyzer *analyzer, AstNode *decl);
-bool semantic_analyze_str_decl(SemanticAnalyzer *analyzer, AstNode *decl);
-bool semantic_analyze_uni_decl(SemanticAnalyzer *analyzer, AstNode *decl);
+// convenience function to print all semantic errors
+void semantic_print_errors(SemanticAnalyzer *analyzer, Lexer *lexer, const char *file_path);
 
 // statement analysis
-bool semantic_analyze_statement(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_block_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_ret_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_stmt);
+bool semantic_analyze_ext_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_def_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
 bool semantic_analyze_if_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_or_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
 bool semantic_analyze_for_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_brk_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_cnt_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_ret_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+bool semantic_analyze_block_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
 
 // expression analysis
-Type *semantic_analyze_expression(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
 Type *semantic_analyze_binary_expr(SemanticAnalyzer *analyzer, AstNode *expr);
 Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr);
 Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_cast_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr);
 Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_cast_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr);
 Type *semantic_analyze_lit_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
 Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr);
 Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_builtin_expr(SemanticAnalyzer *analyzer, AstNode *expr);
 
-// type analysis
-Type *semantic_analyze_type(SemanticAnalyzer *analyzer, AstNode *type_node);
-Type *semantic_get_builtin_type(SemanticAnalyzer *analyzer, const char *name);
-bool  semantic_check_cast_validity(SemanticAnalyzer *analyzer, Type *from, Type *to, AstNode *node);
+// type checking utilities
+bool semantic_check_assignment(SemanticAnalyzer *analyzer, Type *target, Type *source, AstNode *node);
+bool semantic_check_binary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *left, Type *right, AstNode *node);
+bool semantic_check_unary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *operand, AstNode *node);
+bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, AstList *args, AstNode *node);
 
-// error list management
+// error handling
 void semantic_error_list_init(SemanticErrorList *list);
 void semantic_error_list_dnit(SemanticErrorList *list);
-void semantic_error_list_add(SemanticErrorList *list, AstNode *node, const char *message);
+void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *message);
 void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char *file_path);
+void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...);
+void semantic_warning(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...);
 
 #endif

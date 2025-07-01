@@ -11,6 +11,7 @@ General guidelines:
 - Do not attempt to execute code to test it. If you need to test code, ask the user to do so.
 - Do NOT, under any circumstances, leave written code unimplemented.
 - Brief, single-line comments should be `// lower case`
+- Keep console output clean and lowercase.
 
 Project guidelines:
 - Target C23 using clang

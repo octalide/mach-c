@@ -764,8 +764,26 @@ Type *semantic_analyze_expression(SemanticAnalyzer *analyzer, AstNode *expr)
         return semantic_analyze_array_expr(analyzer, expr);
     case AST_STRUCT_EXPR:
         return semantic_analyze_struct_expr(analyzer, expr);
+    case AST_TYPE_NAME:
+        // type names can appear in expressions (e.g., size_of(i32))
+        // but when they appear as variable references, we need to check if it's actually an identifier
+        {
+            Symbol *sym = symbol_table_lookup(analyzer->current_scope, expr->type_name.name);
+            if (sym && (sym->kind == SYMBOL_VAR || sym->kind == SYMBOL_PARAM))
+            {
+                // this is actually a variable reference misclassified as a type name
+                expr->symbol = sym;
+                expr->type   = sym->type;
+                return sym->type;
+            }
+            else
+            {
+                // this is actually a type reference - analyze it as a type
+                return semantic_analyze_type(analyzer, expr);
+            }
+        }
     default:
-        semantic_error(analyzer, expr, "Unknown expression kind");
+        semantic_error(analyzer, expr, "Unknown expression kind: %d (expected AST_IDENT_EXPR=%d)", expr->kind, AST_IDENT_EXPR);
         return NULL;
     }
 }
@@ -965,6 +983,16 @@ Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 
 Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
+    // check builtin functions first
+    if (expr->call_expr.func->kind == AST_IDENT_EXPR)
+    {
+        const char *name = expr->call_expr.func->ident_expr.name;
+        if (strcmp(name, "len") == 0 || strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0 || strcmp(name, "offset_of") == 0)
+        {
+            return semantic_analyze_builtin_expr(analyzer, expr);
+        }
+    }
+
     Type *func_type = semantic_analyze_expression(analyzer, expr->call_expr.func);
     if (!func_type)
         return NULL;
@@ -982,16 +1010,6 @@ Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     {
         semantic_error(analyzer, expr, "Cannot call non-function type %s", type_to_string(func_type));
         return NULL;
-    }
-
-    // check builtin functions
-    if (expr->call_expr.func->kind == AST_IDENT_EXPR)
-    {
-        const char *name = expr->call_expr.func->ident_expr.name;
-        if (strcmp(name, "len") == 0 || strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0 || strcmp(name, "offset_of") == 0)
-        {
-            return semantic_analyze_builtin_expr(analyzer, expr);
-        }
     }
 
     // check argument count
@@ -1066,7 +1084,7 @@ Type *semantic_analyze_builtin_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             return NULL;
         }
 
-        expr->type = semantic_get_builtin_type(analyzer, "u32");
+        expr->type = semantic_get_builtin_type(analyzer, "u64");
         return expr->type;
     }
     else if (strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0)
@@ -1241,6 +1259,17 @@ Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     Symbol *sym = symbol_table_lookup(analyzer->current_scope, expr->ident_expr.name);
     if (!sym)
     {
+        // check if this is a builtin function
+        const char *name = expr->ident_expr.name;
+        if (strcmp(name, "len") == 0 || strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0 || strcmp(name, "offset_of") == 0)
+        {
+            // builtin functions don't have symbols but are valid identifiers in call context
+            // the actual type checking will happen in semantic_analyze_builtin_expr
+            expr->symbol = NULL;
+            expr->type   = NULL; // type will be determined when used in call expression
+            return NULL;         // return NULL to indicate special handling needed
+        }
+
         semantic_error(analyzer, expr, "Undefined identifier '%s'", expr->ident_expr.name);
         return NULL;
     }
@@ -1330,6 +1359,13 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 
     int elem_count = expr->array_expr.elems ? expr->array_expr.elems->count : 0;
 
+    // check element count for bound arrays
+    if (array_type->array.size >= 0 && elem_count > array_type->array.size)
+    {
+        semantic_error(analyzer, expr, "Array literal has %d elements but declared size is %d", elem_count, array_type->array.size);
+        return NULL;
+    }
+
     // check all elements match expected type
     for (int i = 0; i < elem_count; i++)
     {
@@ -1355,9 +1391,17 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         }
     }
 
-    // create array type with actual element count for unbound arrays
-    Type *result_type = type_create_array(elem_type, elem_count);
-    expr->type        = result_type;
+    // for bound arrays, use the declared type; for unbound arrays, keep the unbound type
+    Type *result_type;
+    if (array_type->array.size >= 0)
+    {
+        result_type = array_type; // use declared bound type
+    }
+    else
+    {
+        result_type = array_type; // keep the unbound type []T
+    }
+    expr->type = result_type;
     return result_type;
 }
 
@@ -1377,7 +1421,61 @@ Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         return NULL;
     }
 
-    // TODO: validate field initializers
+    // validate field initializers
+    if (expr->struct_expr.fields)
+    {
+        for (int i = 0; i < expr->struct_expr.fields->count; i++)
+        {
+            AstNode *field_init = expr->struct_expr.fields->items[i];
+            if (field_init->kind != AST_FIELD_EXPR)
+            {
+                semantic_error(analyzer, field_init, "Invalid field initializer");
+                return NULL;
+            }
+
+            const char *field_name       = field_init->field_expr.field;
+            AstNode    *field_value_expr = field_init->field_expr.object;
+
+            // find field in struct
+            Symbol *field_symbol = NULL;
+            for (int j = 0; j < struct_type->composite.field_count; j++)
+            {
+                if (strcmp(struct_type->composite.fields[j]->name, field_name) == 0)
+                {
+                    field_symbol = struct_type->composite.fields[j];
+                    break;
+                }
+            }
+
+            if (!field_symbol)
+            {
+                semantic_error(analyzer, field_init, "Field '%s' not found in struct %s", field_name, struct_type->composite.name);
+                return NULL;
+            }
+
+            // analyze field value expression with expected type context
+            Type *field_value_type = semantic_analyze_expression(analyzer, field_value_expr);
+            if (!field_value_type)
+                return NULL;
+
+            // check type compatibility
+            if (!type_is_assignable(field_symbol->type, field_value_type))
+            {
+                semantic_error(analyzer, field_value_expr, "Cannot assign %s to field '%s' of type %s", type_to_string(field_value_type), field_name, type_to_string(field_symbol->type));
+                return NULL;
+            }
+
+            // check literal bounds if it's a literal
+            if (field_value_expr->kind == AST_LIT_EXPR)
+            {
+                if (!type_can_accept_literal(field_symbol->type, field_value_expr))
+                {
+                    semantic_error(analyzer, field_value_expr, "Literal value out of range for field '%s' of type %s", field_name, type_to_string(field_symbol->type));
+                    return NULL;
+                }
+            }
+        }
+    }
 
     expr->type = struct_type;
     return struct_type;

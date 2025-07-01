@@ -4,6 +4,66 @@
 #include <stdlib.h>
 #include <string.h>
 
+// helper functions
+static AstNode *parser_alloc_node(Parser *parser, AstKind kind, Token *token)
+{
+    AstNode *node = malloc(sizeof(AstNode));
+    if (node == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed");
+        return NULL;
+    }
+    ast_node_init(node, kind);
+
+    if (token)
+    {
+        node->token = malloc(sizeof(Token));
+        if (node->token == NULL)
+        {
+            parser_error_at_current(parser, "memory allocation failed for token");
+            free(node);
+            return NULL;
+        }
+        token_copy(token, node->token);
+    }
+
+    return node;
+}
+
+static AstList *parser_alloc_list(Parser *parser)
+{
+    AstList *list = malloc(sizeof(AstList));
+    if (list == NULL)
+    {
+        parser_error_at_current(parser, "memory allocation failed for list");
+        return NULL;
+    }
+    ast_list_init(list);
+    return list;
+}
+
+// helper to safely free a node and return NULL
+static AstNode *parser_free_node(AstNode *node)
+{
+    if (node)
+    {
+        ast_node_dnit(node);
+        free(node);
+    }
+    return NULL;
+}
+
+// helper to safely free a list and return NULL
+static AstList *parser_free_list(AstList *list)
+{
+    if (list)
+    {
+        ast_list_dnit(list);
+        free(list);
+    }
+    return NULL;
+}
+
 // parser lifecycle
 void parser_init(Parser *parser, Lexer *lexer)
 {
@@ -243,23 +303,17 @@ char *parser_parse_identifier(Parser *parser)
 // main parsing function
 AstNode *parser_parse_program(Parser *parser)
 {
-    AstNode *program = malloc(sizeof(AstNode));
+    AstNode *program = parser_alloc_node(parser, AST_PROGRAM, NULL);
     if (program == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for program node");
         return NULL;
     }
-    ast_node_init(program, AST_PROGRAM);
 
-    program->program.stmts = malloc(sizeof(AstList));
+    program->program.stmts = parser_alloc_list(parser);
     if (program->program.stmts == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for program statements list");
-        ast_node_dnit(program);
-        free(program);
-        return NULL;
+        return parser_free_node(program);
     }
-    ast_list_init(program->program.stmts);
 
     while (!parser_is_at_end(parser))
     {
@@ -352,23 +406,11 @@ AstNode *parser_parse_stmt_use(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_USE, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for use statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_USE);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for use statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // check for alias first
     char *alias = NULL;
@@ -379,9 +421,7 @@ AstNode *parser_parse_stmt_use(Parser *parser)
     if (first == NULL)
     {
         parser_error_at_current(parser, "expected identifier after 'use'");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     if (parser_match(parser, TOKEN_COLON))
@@ -392,9 +432,8 @@ AstNode *parser_parse_stmt_use(Parser *parser)
         if (path == NULL)
         {
             parser_error_at_current(parser, "expected module path after alias");
-            ast_node_dnit(node);
-            free(node);
-            return NULL;
+            free(alias);
+            return parser_free_node(node);
         }
 
         // parse rest of module path like `.bar.baz`
@@ -430,9 +469,7 @@ AstNode *parser_parse_stmt_use(Parser *parser)
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after use statement"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     return node;
@@ -445,32 +482,18 @@ AstNode *parser_parse_stmt_ext(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_EXT, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for external statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_EXT);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for external statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // identifier
     node->ext_stmt.name = parser_parse_identifier(parser);
     if (node->ext_stmt.name == NULL)
     {
         parser_error_at_current(parser, "expected identifier after 'ext'");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // type
@@ -507,56 +530,36 @@ AstNode *parser_parse_stmt_def(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_DEF, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for definition statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_DEF);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for definition statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // identifier
     node->def_stmt.name = parser_parse_identifier(parser);
     if (node->def_stmt.name == NULL)
     {
         parser_error_at_current(parser, "expected identifier after 'def'");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // type
     if (!parser_consume(parser, TOKEN_COLON, "expected ':' after definition name"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     node->def_stmt.type = parser_parse_type(parser);
     if (node->def_stmt.type == NULL)
     {
         parser_error_at_current(parser, "expected type after ':' in definition statement");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after type definition"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     return node;
@@ -569,23 +572,11 @@ AstNode *parser_parse_stmt_val(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_VAL, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for val statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_VAL);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for val statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // mark as read only constant
     node->var_stmt.is_val = true;
@@ -595,50 +586,38 @@ AstNode *parser_parse_stmt_val(Parser *parser)
     if (node->var_stmt.name == NULL)
     {
         parser_error_at_current(parser, "expected identifier after 'val'");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // type
     if (!parser_consume(parser, TOKEN_COLON, "expected ':' after val name"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     node->var_stmt.type = parser_parse_type(parser);
     if (node->var_stmt.type == NULL)
     {
         parser_error_at_current(parser, "expected type after ':' in val statement");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // initialization
     if (!parser_consume(parser, TOKEN_EQUAL, "expected '=' in val statement"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     node->var_stmt.init = parser_parse_expr(parser);
     if (node->var_stmt.init == NULL)
     {
         parser_error_at_current(parser, "expected expression after '=' in val statement");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after val statement"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     return node;
@@ -651,23 +630,11 @@ AstNode *parser_parse_stmt_var(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_VAR, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for var statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_VAR);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for var statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // mark as mutable variable
     node->var_stmt.is_val = false;
@@ -677,26 +644,20 @@ AstNode *parser_parse_stmt_var(Parser *parser)
     if (node->var_stmt.name == NULL)
     {
         parser_error_at_current(parser, "expected identifier after 'var'");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // type
     if (!parser_consume(parser, TOKEN_COLON, "expected ':' after var name"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     node->var_stmt.type = parser_parse_type(parser);
     if (node->var_stmt.type == NULL)
     {
         parser_error_at_current(parser, "expected type after ':' in var statement");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // optional initialization
@@ -706,9 +667,7 @@ AstNode *parser_parse_stmt_var(Parser *parser)
         if (node->var_stmt.init == NULL)
         {
             parser_error_at_current(parser, "expected expression after '=' in var statement");
-            ast_node_dnit(node);
-            free(node);
-            return NULL;
+            return parser_free_node(node);
         }
     }
     else
@@ -733,40 +692,24 @@ AstNode *parser_parse_stmt_fun(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_FUN, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for function statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_FUN);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for function statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // identifier
     node->fun_stmt.name = parser_parse_identifier(parser);
     if (node->fun_stmt.name == NULL)
     {
         parser_error_at_current(parser, "expected identifier after 'fun'");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // parameters
     if (!parser_consume(parser, TOKEN_L_PAREN, "expected '(' after function name"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     node->fun_stmt.params = parser_parse_parameter_list(parser);
@@ -774,16 +717,12 @@ AstNode *parser_parse_stmt_fun(Parser *parser)
     {
         // NOTE: no parameters is valid, but returns an empty list, not null
         parser_error_at_current(parser, "expected parameter list after '(' in function statement");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after parameters"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // optional return type
@@ -826,32 +765,18 @@ AstNode *parser_parse_stmt_str(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_STR, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for struct statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_STR);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for struct statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // identifier
     node->str_stmt.name = parser_parse_identifier(parser);
     if (node->str_stmt.name == NULL)
     {
         parser_error_at_current(parser, "expected identifier after 'str'");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' after struct name"))
@@ -888,23 +813,11 @@ AstNode *parser_parse_stmt_uni(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_UNI, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for union statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_UNI);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for union statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // identifier
     node->uni_stmt.name = parser_parse_identifier(parser);
@@ -950,46 +863,28 @@ AstNode *parser_parse_stmt_if(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_IF, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for if statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_IF);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for if statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // condition
     if (!parser_consume(parser, TOKEN_L_PAREN, "expected '('"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     node->cond_stmt.cond = parser_parse_expr(parser);
     if (node->cond_stmt.cond == NULL)
     {
         parser_error_at_current(parser, "expected condition expression after '('");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after condition"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // body
@@ -1008,25 +903,11 @@ AstNode *parser_parse_stmt_if(Parser *parser)
     // condition. Only the last `or` in a chain can be without a condition.
     while (parser_match(parser, TOKEN_KW_OR))
     {
-        AstNode *or_node = malloc(sizeof(AstNode));
+        AstNode *or_node = parser_alloc_node(parser, AST_STMT_OR, parser->previous);
         if (or_node == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for or statement");
-            ast_node_dnit(node);
-            free(node);
-            return NULL;
+            return parser_free_node(node);
         }
-        ast_node_init(or_node, AST_STMT_OR);
-
-        or_node->token = malloc(sizeof(Token));
-        if (or_node->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for or statement token");
-            ast_node_dnit(or_node);
-            free(or_node);
-            return NULL;
-        }
-        token_copy(parser->previous, or_node->token);
 
         // condition
         if (parser_match(parser, TOKEN_L_PAREN))
@@ -1088,23 +969,11 @@ AstNode *parser_parse_for_stmt(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_FOR, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for for statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_FOR);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for for statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     // optional condition
     if (parser_match(parser, TOKEN_L_PAREN))
@@ -1150,29 +1019,15 @@ AstNode *parser_parse_brk_stmt(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_BRK, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for break statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_BRK);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for break statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after 'brk'"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     return node;
@@ -1185,29 +1040,15 @@ AstNode *parser_parse_cnt_stmt(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_CNT, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for continue statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_CNT);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for continue statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after 'cnt'"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     return node;
@@ -1220,23 +1061,11 @@ AstNode *parser_parse_stmt_ret(Parser *parser)
         return NULL;
     }
 
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_RET, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for return statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_RET);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for return statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     if (!parser_check(parser, TOKEN_SEMICOLON))
     {
@@ -1267,39 +1096,21 @@ AstNode *parser_parse_stmt_ret(Parser *parser)
 // statement parsing
 AstNode *parser_parse_stmt_block(Parser *parser)
 {
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_BLOCK, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for block statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_BLOCK);
 
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for block statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
-
-    node->block_stmt.stmts = malloc(sizeof(AstList));
+    node->block_stmt.stmts = parser_alloc_list(parser);
     if (node->block_stmt.stmts == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for block statement");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
-    ast_list_init(node->block_stmt.stmts);
 
     if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' at the start of block statement"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     // parse statements until we reach the end of the block
@@ -1329,37 +1140,21 @@ AstNode *parser_parse_stmt_block(Parser *parser)
 
 AstNode *parser_parse_stmt_expr(Parser *parser)
 {
-    AstNode *node = malloc(sizeof(AstNode));
+    AstNode *node = parser_alloc_node(parser, AST_STMT_EXPR, parser->previous);
     if (node == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for expression statement");
         return NULL;
     }
-    ast_node_init(node, AST_STMT_EXPR);
-
-    node->token = malloc(sizeof(Token));
-    if (node->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for expression statement token");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
-    }
-    token_copy(parser->previous, node->token);
 
     node->expr_stmt.expr = parser_parse_expr(parser);
     if (node->expr_stmt.expr == NULL)
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after expression"))
     {
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        return parser_free_node(node);
     }
 
     return node;
@@ -1377,37 +1172,18 @@ AstNode *parser_parse_expr_assignment(Parser *parser)
 
     if (parser_match(parser, TOKEN_EQUAL))
     {
-        AstNode *assign = malloc(sizeof(AstNode));
+        AstNode *assign = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (assign == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for assignment expression");
-            ast_node_dnit(expr);
-            free(expr);
-            return NULL;
+            return parser_free_node(expr);
         }
-        ast_node_init(assign, AST_EXPR_BINARY);
-
-        assign->token = malloc(sizeof(Token));
-        if (assign->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for assignment expression token");
-            ast_node_dnit(assign);
-            ast_node_dnit(expr);
-            free(assign);
-            free(expr);
-            return NULL;
-        }
-        token_copy(parser->previous, assign->token);
 
         assign->binary_expr.right = parser_parse_expr_assignment(parser);
         if (assign->binary_expr.right == NULL)
         {
             parser_error_at_current(parser, "expected expression after '=' in assignment");
-            ast_node_dnit(assign);
-            ast_node_dnit(expr);
-            free(assign);
-            free(expr);
-            return NULL;
+            parser_free_node(expr);
+            return parser_free_node(assign);
         }
 
         assign->binary_expr.left = expr;
@@ -1425,24 +1201,11 @@ AstNode *parser_parse_expr_logical_or(Parser *parser)
 
     while (parser_match(parser, TOKEN_PIPE_PIPE))
     {
-        AstNode *binary = malloc(sizeof(AstNode));
+        AstNode *binary = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (binary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for binary expression");
-            return NULL;
+            return parser_free_node(expr);
         }
-        ast_node_init(binary, AST_EXPR_BINARY);
-
-        binary->token = malloc(sizeof(Token));
-        if (binary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for binary expression token");
-            ast_node_dnit(expr);
-            free(binary);
-            free(expr);
-            return NULL;
-        }
-        token_copy(parser->previous, binary->token);
 
         binary->binary_expr.op = parser->previous->kind;
 
@@ -1450,11 +1213,8 @@ AstNode *parser_parse_expr_logical_or(Parser *parser)
         if (binary->binary_expr.right == NULL)
         {
             parser_error_at_current(parser, "expected expression after '||'");
-            ast_node_dnit(expr);
-            ast_node_dnit(binary);
-            free(binary);
-            free(expr);
-            return NULL;
+            parser_free_node(expr);
+            return parser_free_node(binary);
         }
 
         binary->binary_expr.left = expr;
@@ -1470,24 +1230,11 @@ AstNode *parser_parse_expr_logical_and(Parser *parser)
 
     while (parser_match(parser, TOKEN_AMPERSAND_AMPERSAND))
     {
-        AstNode *binary = malloc(sizeof(AstNode));
+        AstNode *binary = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (binary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for binary expression");
-            return NULL;
+            return parser_free_node(expr);
         }
-        ast_node_init(binary, AST_EXPR_BINARY);
-
-        binary->token = malloc(sizeof(Token));
-        if (binary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for binary expression token");
-            ast_node_dnit(expr);
-            free(binary);
-            free(expr);
-            return NULL;
-        }
-        token_copy(parser->previous, binary->token);
 
         binary->binary_expr.op = parser->previous->kind;
 
@@ -1495,11 +1242,8 @@ AstNode *parser_parse_expr_logical_and(Parser *parser)
         if (binary->binary_expr.right == NULL)
         {
             parser_error_at_current(parser, "expected expression after '&&'");
-            ast_node_dnit(expr);
-            ast_node_dnit(binary);
-            free(binary);
-            free(expr);
-            return NULL;
+            parser_free_node(expr);
+            return parser_free_node(binary);
         }
 
         binary->binary_expr.left = expr;
@@ -1516,26 +1260,11 @@ AstNode *parser_parse_expr_bitwise(Parser *parser)
     while (parser->current->kind == TOKEN_PIPE || parser->current->kind == TOKEN_CARET || parser->current->kind == TOKEN_AMPERSAND)
     {
         parser_advance(parser);
-        AstNode *binary = malloc(sizeof(AstNode));
+        AstNode *binary = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (binary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for binary expression");
-            ast_node_dnit(expr);
-            free(expr);
-            return NULL;
+            return parser_free_node(expr);
         }
-        ast_node_init(binary, AST_EXPR_BINARY);
-
-        binary->token = malloc(sizeof(Token));
-        if (binary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for binary expression token");
-            ast_node_dnit(expr);
-            free(binary);
-            free(expr);
-            return NULL;
-        }
-        token_copy(parser->previous, binary->token);
 
         binary->binary_expr.op = parser->previous->kind;
 
@@ -1543,11 +1272,8 @@ AstNode *parser_parse_expr_bitwise(Parser *parser)
         if (binary->binary_expr.right == NULL)
         {
             parser_error_at_current(parser, "expected expression after bitwise operator");
-            ast_node_dnit(expr);
-            ast_node_dnit(binary);
-            free(binary);
-            free(expr);
-            return NULL;
+            parser_free_node(expr);
+            return parser_free_node(binary);
         }
 
         binary->binary_expr.left = expr;
@@ -1564,26 +1290,11 @@ AstNode *parser_parse_expr_equality(Parser *parser)
     while (parser->current->kind == TOKEN_EQUAL_EQUAL || parser->current->kind == TOKEN_BANG_EQUAL)
     {
         parser_advance(parser);
-        AstNode *binary = malloc(sizeof(AstNode));
+        AstNode *binary = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (binary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for binary expression");
-            ast_node_dnit(expr);
-            free(expr);
-            return NULL;
+            return parser_free_node(expr);
         }
-        ast_node_init(binary, AST_EXPR_BINARY);
-
-        binary->token = malloc(sizeof(Token));
-        if (binary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for binary expression token");
-            ast_node_dnit(expr);
-            free(binary);
-            free(expr);
-            return NULL;
-        }
-        token_copy(parser->previous, binary->token);
 
         binary->binary_expr.op = parser->previous->kind;
 
@@ -1591,11 +1302,8 @@ AstNode *parser_parse_expr_equality(Parser *parser)
         if (binary->binary_expr.right == NULL)
         {
             parser_error_at_current(parser, "expected expression after equality operator");
-            ast_node_dnit(expr);
-            ast_node_dnit(binary);
-            free(binary);
-            free(expr);
-            return NULL;
+            parser_free_node(expr);
+            return parser_free_node(binary);
         }
 
         binary->binary_expr.left = expr;
@@ -1612,26 +1320,11 @@ AstNode *parser_parse_expr_comparison(Parser *parser)
     while (parser->current->kind == TOKEN_LESS || parser->current->kind == TOKEN_GREATER || parser->current->kind == TOKEN_LESS_EQUAL || parser->current->kind == TOKEN_GREATER_EQUAL)
     {
         parser_advance(parser);
-        AstNode *binary = malloc(sizeof(AstNode));
+        AstNode *binary = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (binary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for binary expression");
-            ast_node_dnit(expr);
-            free(expr);
-            return NULL;
+            return parser_free_node(expr);
         }
-        ast_node_init(binary, AST_EXPR_BINARY);
-
-        binary->token = malloc(sizeof(Token));
-        if (binary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for binary expression token");
-            ast_node_dnit(expr);
-            free(binary);
-            free(expr);
-            return NULL;
-        }
-        token_copy(parser->previous, binary->token);
 
         binary->binary_expr.op = parser->previous->kind;
 
@@ -1639,11 +1332,8 @@ AstNode *parser_parse_expr_comparison(Parser *parser)
         if (binary->binary_expr.right == NULL)
         {
             parser_error_at_current(parser, "expected expression after comparison operator");
-            ast_node_dnit(expr);
-            ast_node_dnit(binary);
-            free(binary);
-            free(expr);
-            return NULL;
+            parser_free_node(expr);
+            return parser_free_node(binary);
         }
 
         binary->binary_expr.left = expr;
@@ -1660,24 +1350,10 @@ AstNode *parser_parse_expr_bit_shift(Parser *parser)
     while (parser->current->kind == TOKEN_LESS_LESS || parser->current->kind == TOKEN_GREATER_GREATER)
     {
         parser_advance(parser);
-        AstNode *binary = malloc(sizeof(AstNode));
+        AstNode *binary = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (binary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for binary expression");
-            ast_node_dnit(expr);
-            free(expr);
-            return NULL;
-        }
-        ast_node_init(binary, AST_EXPR_BINARY);
-
-        binary->token = malloc(sizeof(Token));
-        if (binary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for binary expression token");
-            ast_node_dnit(expr);
-            free(binary);
-            free(expr);
-            return NULL;
+            return parser_free_node(expr);
         }
         token_copy(parser->previous, binary->token);
 
@@ -1708,26 +1384,11 @@ AstNode *parser_parse_expr_addition(Parser *parser)
     while (parser->current->kind == TOKEN_PLUS || parser->current->kind == TOKEN_MINUS)
     {
         parser_advance(parser);
-        AstNode *binary = malloc(sizeof(AstNode));
+        AstNode *binary = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (binary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for binary expression");
-            ast_node_dnit(expr);
-            free(expr);
-            return NULL;
+            return parser_free_node(expr);
         }
-        ast_node_init(binary, AST_EXPR_BINARY);
-
-        binary->token = malloc(sizeof(Token));
-        if (binary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for binary expression token");
-            ast_node_dnit(expr);
-            free(binary);
-            free(expr);
-            return NULL;
-        }
-        token_copy(parser->previous, binary->token);
 
         binary->binary_expr.op = parser->previous->kind;
 
@@ -1735,11 +1396,8 @@ AstNode *parser_parse_expr_addition(Parser *parser)
         if (binary->binary_expr.right == NULL)
         {
             parser_error_at_current(parser, "expected expression after addition operator");
-            ast_node_dnit(expr);
-            ast_node_dnit(binary);
-            free(binary);
-            free(expr);
-            return NULL;
+            parser_free_node(expr);
+            return parser_free_node(binary);
         }
 
         binary->binary_expr.left = expr;
@@ -1756,26 +1414,11 @@ AstNode *parser_parse_expr_multiplication(Parser *parser)
     while (parser->current->kind == TOKEN_STAR || parser->current->kind == TOKEN_SLASH || parser->current->kind == TOKEN_PERCENT)
     {
         parser_advance(parser);
-        AstNode *binary = malloc(sizeof(AstNode));
+        AstNode *binary = parser_alloc_node(parser, AST_EXPR_BINARY, parser->previous);
         if (binary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for binary expression");
-            ast_node_dnit(expr);
-            free(expr);
-            return NULL;
+            return parser_free_node(expr);
         }
-        ast_node_init(binary, AST_EXPR_BINARY);
-
-        binary->token = malloc(sizeof(Token));
-        if (binary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for binary expression token");
-            ast_node_dnit(expr);
-            free(binary);
-            free(expr);
-            return NULL;
-        }
-        token_copy(parser->previous, binary->token);
 
         binary->binary_expr.op = parser->previous->kind;
 
@@ -1783,11 +1426,8 @@ AstNode *parser_parse_expr_multiplication(Parser *parser)
         if (binary->binary_expr.right == NULL)
         {
             parser_error_at_current(parser, "expected expression after multiplication operator");
-            ast_node_dnit(expr);
-            ast_node_dnit(binary);
-            free(binary);
-            free(expr);
-            return NULL;
+            parser_free_node(expr);
+            return parser_free_node(binary);
         }
 
         binary->binary_expr.left = expr;
@@ -1804,23 +1444,11 @@ AstNode *parser_parse_expr_unary(Parser *parser)
     {
         parser_advance(parser);
 
-        AstNode *unary = malloc(sizeof(AstNode));
+        AstNode *unary = parser_alloc_node(parser, AST_EXPR_UNARY, parser->previous);
         if (unary == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for unary expression");
             return NULL;
         }
-        ast_node_init(unary, AST_EXPR_UNARY);
-
-        unary->token = malloc(sizeof(Token));
-        if (unary->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for unary expression token");
-            ast_node_dnit(unary);
-            free(unary);
-            return NULL;
-        }
-        token_copy(parser->previous, unary->token);
 
         unary->unary_expr.op = parser->previous->kind;
 
@@ -1828,9 +1456,7 @@ AstNode *parser_parse_expr_unary(Parser *parser)
         if (unary->unary_expr.expr == NULL)
         {
             parser_error_at_current(parser, "expected expression after unary operator");
-            ast_node_dnit(unary);
-            free(unary);
-            return NULL;
+            return parser_free_node(unary);
         }
 
         return unary;
@@ -1847,23 +1473,11 @@ AstNode *parser_parse_expr_postfix(Parser *parser)
     {
         if (parser_match(parser, TOKEN_L_PAREN))
         {
-            AstNode *call = malloc(sizeof(AstNode));
+            AstNode *call = parser_alloc_node(parser, AST_EXPR_CALL, parser->previous);
             if (call == NULL)
             {
-                parser_error_at_current(parser, "memory allocation failed for function call expression");
-                return NULL;
+                return parser_free_node(expr);
             }
-            ast_node_init(call, AST_EXPR_CALL);
-
-            call->token = malloc(sizeof(Token));
-            if (call->token == NULL)
-            {
-                parser_error_at_current(parser, "memory allocation failed for function call expression token");
-                ast_node_dnit(call);
-                free(call);
-                return NULL;
-            }
-            token_copy(parser->previous, call->token);
 
             call->call_expr.func = expr;
 
@@ -1888,23 +1502,11 @@ AstNode *parser_parse_expr_postfix(Parser *parser)
         }
         else if (parser_match(parser, TOKEN_L_BRACKET))
         {
-            AstNode *index_expr = malloc(sizeof(AstNode));
+            AstNode *index_expr = parser_alloc_node(parser, AST_EXPR_INDEX, parser->previous);
             if (index_expr == NULL)
             {
-                parser_error_at_current(parser, "memory allocation failed for index expression");
-                return NULL;
+                return parser_free_node(expr);
             }
-            ast_node_init(index_expr, AST_EXPR_INDEX);
-
-            index_expr->token = malloc(sizeof(Token));
-            if (index_expr->token == NULL)
-            {
-                parser_error_at_current(parser, "memory allocation failed for index expression token");
-                ast_node_dnit(index_expr);
-                free(index_expr);
-                return NULL;
-            }
-            token_copy(parser->previous, index_expr->token);
 
             index_expr->index_expr.array = expr;
 
@@ -1913,9 +1515,7 @@ AstNode *parser_parse_expr_postfix(Parser *parser)
             if (index_expr->index_expr.index == NULL)
             {
                 parser_error_at_current(parser, "expected expression for array index");
-                ast_node_dnit(index_expr);
-                free(index_expr);
-                return NULL;
+                return parser_free_node(index_expr);
             }
 
             if (!parser_consume(parser, TOKEN_R_BRACKET, "expected ']' after array index"))
@@ -1927,23 +1527,11 @@ AstNode *parser_parse_expr_postfix(Parser *parser)
         }
         else if (parser_match(parser, TOKEN_DOT))
         {
-            AstNode *field_expr = malloc(sizeof(AstNode));
+            AstNode *field_expr = parser_alloc_node(parser, AST_EXPR_FIELD, parser->previous);
             if (field_expr == NULL)
             {
-                parser_error_at_current(parser, "memory allocation failed for field expression");
-                return NULL;
+                return parser_free_node(expr);
             }
-            ast_node_init(field_expr, AST_EXPR_FIELD);
-
-            field_expr->token = malloc(sizeof(Token));
-            if (field_expr->token == NULL)
-            {
-                parser_error_at_current(parser, "memory allocation failed for field expression token");
-                ast_node_dnit(field_expr);
-                free(field_expr);
-                return NULL;
-            }
-            token_copy(parser->previous, field_expr->token);
 
             field_expr->field_expr.object = expr;
 
@@ -1952,32 +1540,18 @@ AstNode *parser_parse_expr_postfix(Parser *parser)
             if (field_expr->field_expr.field == NULL)
             {
                 parser_error_at_current(parser, "expected identifier after '.' for field access");
-                ast_node_dnit(field_expr);
-                free(field_expr);
-                return NULL;
+                return parser_free_node(field_expr);
             }
 
             expr = field_expr;
         }
         else if (parser_match(parser, TOKEN_COLON_COLON))
         {
-            AstNode *cast = malloc(sizeof(AstNode));
+            AstNode *cast = parser_alloc_node(parser, AST_EXPR_CAST, parser->previous);
             if (cast == NULL)
             {
-                parser_error_at_current(parser, "memory allocation failed for cast expression");
-                return NULL;
+                return parser_free_node(expr);
             }
-            ast_node_init(cast, AST_EXPR_CAST);
-
-            cast->token = malloc(sizeof(Token));
-            if (cast->token == NULL)
-            {
-                parser_error_at_current(parser, "memory allocation failed for cast expression token");
-                ast_node_dnit(cast);
-                free(cast);
-                return NULL;
-            }
-            token_copy(parser->previous, cast->token);
 
             cast->cast_expr.expr = expr;
 
@@ -2007,23 +1581,11 @@ AstNode *parser_parse_expr_primary(Parser *parser)
     // literal integer
     if (parser->current->kind == TOKEN_LIT_INT)
     {
-        AstNode *lit = malloc(sizeof(AstNode));
+        AstNode *lit = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
         if (lit == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for integer literal");
             return NULL;
         }
-        ast_node_init(lit, AST_EXPR_LIT);
-
-        lit->token = malloc(sizeof(Token));
-        if (lit->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for integer literal token");
-            ast_node_dnit(lit);
-            free(lit);
-            return NULL;
-        }
-        token_copy(parser->current, lit->token);
 
         lit->lit_expr.kind    = TOKEN_LIT_INT;
         lit->lit_expr.int_val = lexer_eval_lit_int(parser->lexer, parser->current);
@@ -2034,23 +1596,11 @@ AstNode *parser_parse_expr_primary(Parser *parser)
     // floating-point literals
     if (parser->current->kind == TOKEN_LIT_FLOAT)
     {
-        AstNode *lit = malloc(sizeof(AstNode));
+        AstNode *lit = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
         if (lit == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for float literal");
             return NULL;
         }
-        ast_node_init(lit, AST_EXPR_LIT);
-
-        lit->token = malloc(sizeof(Token));
-        if (lit->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for float literal token");
-            ast_node_dnit(lit);
-            free(lit);
-            return NULL;
-        }
-        token_copy(parser->current, lit->token);
 
         lit->lit_expr.kind      = TOKEN_LIT_FLOAT;
         lit->lit_expr.float_val = lexer_eval_lit_float(parser->lexer, parser->current);
@@ -2061,23 +1611,11 @@ AstNode *parser_parse_expr_primary(Parser *parser)
     // string literal
     if (parser->current->kind == TOKEN_LIT_CHAR)
     {
-        AstNode *lit = malloc(sizeof(AstNode));
+        AstNode *lit = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
         if (lit == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for character literal");
             return NULL;
         }
-        ast_node_init(lit, AST_EXPR_LIT);
-
-        lit->token = malloc(sizeof(Token));
-        if (lit->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for character literal token");
-            ast_node_dnit(lit);
-            free(lit);
-            return NULL;
-        }
-        token_copy(parser->current, lit->token);
 
         lit->lit_expr.kind     = TOKEN_LIT_CHAR;
         lit->lit_expr.char_val = lexer_eval_lit_char(parser->lexer, parser->current);
@@ -2088,23 +1626,11 @@ AstNode *parser_parse_expr_primary(Parser *parser)
     // string literal
     if (parser->current->kind == TOKEN_LIT_STRING)
     {
-        AstNode *lit = malloc(sizeof(AstNode));
+        AstNode *lit = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
         if (lit == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for string literal");
             return NULL;
         }
-        ast_node_init(lit, AST_EXPR_LIT);
-
-        lit->token = malloc(sizeof(Token));
-        if (lit->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for string literal token");
-            ast_node_dnit(lit);
-            free(lit);
-            return NULL;
-        }
-        token_copy(parser->current, lit->token);
 
         lit->lit_expr.kind       = TOKEN_LIT_STRING;
         lit->lit_expr.string_val = lexer_eval_lit_string(parser->lexer, parser->current);
@@ -2152,45 +1678,23 @@ AstNode *parser_parse_expr_primary(Parser *parser)
         // check for struct or union literal
         if (parser->current->kind == TOKEN_L_BRACE)
         {
-            AstNode *type = malloc(sizeof(AstNode));
+            AstNode *type = parser_alloc_node(parser, AST_TYPE_NAME, &token);
             if (type == NULL)
             {
-                parser_error_at_current(parser, "memory allocation failed for struct type node");
+                free(name);
                 return NULL;
             }
-            ast_node_init(type, AST_TYPE_NAME);
-
-            type->token = malloc(sizeof(Token));
-            if (type->token == NULL)
-            {
-                parser_error_at_current(parser, "memory allocation failed for struct type token");
-                ast_node_dnit(type);
-                free(type);
-                return NULL;
-            }
-            token_copy(&token, type->token);
 
             type->type_name.name = name;
             return parser_parse_struct_literal(parser, type);
         }
 
-        AstNode *ident = malloc(sizeof(AstNode));
+        AstNode *ident = parser_alloc_node(parser, AST_EXPR_IDENT, &token);
         if (ident == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for identifier node");
+            free(name);
             return NULL;
         }
-        ast_node_init(ident, AST_EXPR_IDENT);
-
-        ident->token = malloc(sizeof(Token));
-        if (ident->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for identifier token");
-            ast_node_dnit(ident);
-            free(ident);
-            return NULL;
-        }
-        token_copy(&token, ident->token);
 
         ident->ident_expr.name = name;
         return ident;
@@ -2207,47 +1711,21 @@ AstNode *parser_parse_expr_primary(Parser *parser)
 
 AstNode *parser_parse_lit_array(Parser *parser)
 {
-    AstNode *array = malloc(sizeof(AstNode));
+    AstNode *array = parser_alloc_node(parser, AST_EXPR_ARRAY, parser->current);
     if (array == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for array literal");
         return NULL;
     }
-    ast_node_init(array, AST_EXPR_ARRAY);
-
-    array->token = malloc(sizeof(Token));
-    if (array->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for array literal token");
-        ast_node_dnit(array);
-        free(array);
-        return NULL;
-    }
-    token_copy(parser->current, array->token);
 
     // parse array type
     if (parser_check(parser, TOKEN_R_BRACKET))
     {
         // unbound array - empty brackets []
-        array->array_expr.type = malloc(sizeof(AstNode));
+        array->array_expr.type = parser_alloc_node(parser, AST_TYPE_ARRAY, parser->previous);
         if (array->array_expr.type == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for array type");
-            ast_node_dnit(array);
-            free(array);
-            return NULL;
+            return parser_free_node(array);
         }
-        ast_node_init(array->array_expr.type, AST_TYPE_ARRAY);
-
-        array->array_expr.type->token = malloc(sizeof(Token));
-        if (array->array_expr.type->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for array type token");
-            ast_node_dnit(array);
-            free(array);
-            return NULL;
-        }
-        token_copy(parser->previous, array->array_expr.type->token);
 
         array->array_expr.type->type_array.size = NULL;
     }
@@ -2262,25 +1740,11 @@ AstNode *parser_parse_lit_array(Parser *parser)
             return NULL;
         }
 
-        array->array_expr.type = malloc(sizeof(AstNode));
+        array->array_expr.type = parser_alloc_node(parser, AST_TYPE_ARRAY, parser->previous);
         if (array->array_expr.type == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for array type");
-            ast_node_dnit(array);
-            free(array);
-            return NULL;
+            return parser_free_node(array);
         }
-        ast_node_init(array->array_expr.type, AST_TYPE_ARRAY);
-
-        array->array_expr.type->token = malloc(sizeof(Token));
-        if (array->array_expr.type->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for array type token");
-            ast_node_dnit(array);
-            free(array->array_expr.type);
-            return NULL;
-        }
-        token_copy(parser->previous, array->array_expr.type->token);
 
         array->array_expr.type->type_array.size = size;
     }
@@ -2310,15 +1774,11 @@ AstNode *parser_parse_lit_array(Parser *parser)
     }
 
     // parse elements
-    array->array_expr.elems = malloc(sizeof(AstList));
+    array->array_expr.elems = parser_alloc_list(parser);
     if (array->array_expr.elems == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for array elements");
-        ast_node_dnit(array);
-        free(array);
-        return NULL;
+        return parser_free_node(array);
     }
-    ast_list_init(array->array_expr.elems);
 
     if (!parser_check(parser, TOKEN_R_BRACE))
     {
@@ -2355,61 +1815,30 @@ AstNode *parser_parse_struct_literal(Parser *parser, AstNode *type)
         return NULL;
     }
 
-    AstNode *struct_lit = malloc(sizeof(AstNode));
+    AstNode *struct_lit = parser_alloc_node(parser, AST_EXPR_STRUCT, parser->previous);
     if (struct_lit == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for struct literal");
+        parser_free_node(type);
         return NULL;
     }
-    ast_node_init(struct_lit, AST_EXPR_STRUCT);
-
-    struct_lit->token = malloc(sizeof(Token));
-    if (struct_lit->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for struct literal token");
-        ast_node_dnit(struct_lit);
-        free(struct_lit);
-        return NULL;
-    }
-    token_copy(parser->previous, struct_lit->token);
 
     struct_lit->struct_expr.type = type;
 
-    struct_lit->struct_expr.fields = malloc(sizeof(AstList));
+    struct_lit->struct_expr.fields = parser_alloc_list(parser);
     if (struct_lit->struct_expr.fields == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for struct fields");
-        ast_node_dnit(struct_lit);
-        free(struct_lit);
-        return NULL;
+        return parser_free_node(struct_lit);
     }
-    ast_list_init(struct_lit->struct_expr.fields);
 
     if (!parser_check(parser, TOKEN_R_BRACE))
     {
         do
         {
-            AstNode *field = malloc(sizeof(AstNode));
+            AstNode *field = parser_alloc_node(parser, AST_EXPR_FIELD, parser->previous);
             if (field == NULL)
             {
-                parser_error_at_current(parser, "memory allocation failed for struct field");
-                ast_node_dnit(struct_lit);
-                free(struct_lit);
-                return NULL;
+                return parser_free_node(struct_lit);
             }
-            ast_node_init(field, AST_EXPR_FIELD);
-
-            field->token = malloc(sizeof(Token));
-            if (field->token == NULL)
-            {
-                parser_error_at_current(parser, "memory allocation failed for struct field token");
-                ast_node_dnit(field);
-                free(field);
-                ast_node_dnit(struct_lit);
-                free(struct_lit);
-                return NULL;
-            }
-            token_copy(parser->previous, field->token);
 
             field->field_expr.field = parser_parse_identifier(parser);
             if (field->field_expr.field == NULL)
@@ -2488,31 +1917,17 @@ AstNode *parser_parse_type(Parser *parser)
 
 AstNode *parser_parse_type_name(Parser *parser)
 {
-    AstNode *type = malloc(sizeof(AstNode));
+    AstNode *type = parser_alloc_node(parser, AST_TYPE_NAME, parser->current);
     if (type == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for type name");
         return NULL;
     }
-    ast_node_init(type, AST_TYPE_NAME);
-
-    type->token = malloc(sizeof(Token));
-    if (type->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for type name token");
-        ast_node_dnit(type);
-        free(type);
-        return NULL;
-    }
-    token_copy(parser->current, type->token);
 
     type->type_name.name = parser_parse_identifier(parser);
     if (type->type_name.name == NULL)
     {
         parser_error_at_current(parser, "expected identifier for type name");
-        ast_node_dnit(type);
-        free(type);
-        return NULL;
+        return parser_free_node(type);
     }
 
     return type;
@@ -2520,23 +1935,11 @@ AstNode *parser_parse_type_name(Parser *parser)
 
 AstNode *parser_parse_type_ptr(Parser *parser)
 {
-    AstNode *ptr = malloc(sizeof(AstNode));
+    AstNode *ptr = parser_alloc_node(parser, AST_TYPE_PTR, parser->previous);
     if (ptr == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for pointer type");
         return NULL;
     }
-    ast_node_init(ptr, AST_TYPE_PTR);
-
-    ptr->token = malloc(sizeof(Token));
-    if (ptr->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for pointer type token");
-        ast_node_dnit(ptr);
-        free(ptr);
-        return NULL;
-    }
-    token_copy(parser->previous, ptr->token);
 
     ptr->type_ptr.base = parser_parse_type(parser);
     if (ptr->type_ptr.base == NULL)
@@ -2551,23 +1954,11 @@ AstNode *parser_parse_type_ptr(Parser *parser)
 
 AstNode *parser_parse_type_array(Parser *parser)
 {
-    AstNode *array = malloc(sizeof(AstNode));
+    AstNode *array = parser_alloc_node(parser, AST_TYPE_ARRAY, parser->previous);
     if (array == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for array type");
         return NULL;
     }
-    ast_node_init(array, AST_TYPE_ARRAY);
-
-    array->token = malloc(sizeof(Token));
-    if (array->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for array type token");
-        ast_node_dnit(array);
-        free(array);
-        return NULL;
-    }
-    token_copy(parser->previous, array->token);
 
     if (parser_check(parser, TOKEN_R_BRACKET))
     {
@@ -2580,25 +1971,19 @@ AstNode *parser_parse_type_array(Parser *parser)
         array->type_array.size = parser_parse_expr_primary(parser);
         if (array->type_array.size == NULL)
         {
-            ast_node_dnit(array);
-            free(array);
-            return NULL;
+            return parser_free_node(array);
         }
     }
 
     if (!parser_consume(parser, TOKEN_R_BRACKET, "expected ']' after array size"))
     {
-        ast_node_dnit(array);
-        free(array);
-        return NULL;
+        return parser_free_node(array);
     }
 
     array->type_array.elem_type = parser_parse_type(parser);
     if (array->type_array.elem_type == NULL)
     {
-        ast_node_dnit(array);
-        free(array);
-        return NULL;
+        return parser_free_node(array);
     }
 
     return array;
@@ -2611,32 +1996,17 @@ AstNode *parser_parse_type_fun(Parser *parser)
         return NULL;
     }
 
-    AstNode *fun = malloc(sizeof(AstNode));
+    AstNode *fun = parser_alloc_node(parser, AST_TYPE_FUN, parser->previous);
     if (fun == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for function type");
         return NULL;
     }
-    ast_node_init(fun, AST_TYPE_FUN);
 
-    fun->token = malloc(sizeof(Token));
-    if (fun->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for function type token");
-        ast_node_dnit(fun);
-        free(fun);
-        return NULL;
-    }
-    token_copy(parser->previous, fun->token);
-
-    fun->type_fun.params = malloc(sizeof(AstList));
+    fun->type_fun.params = parser_alloc_list(parser);
     if (fun->type_fun.params == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for function parameters");
-        free(fun);
-        return NULL;
+        return parser_free_node(fun);
     }
-    ast_list_init(fun->type_fun.params);
 
     // parse parameter types
     if (!parser_check(parser, TOKEN_R_PAREN))
@@ -2646,9 +2016,7 @@ AstNode *parser_parse_type_fun(Parser *parser)
             AstNode *param_type = parser_parse_type(parser);
             if (param_type == NULL)
             {
-                ast_node_dnit(fun);
-                free(fun);
-                return NULL;
+                return parser_free_node(fun);
             }
 
             ast_list_append(fun->type_fun.params, param_type);
@@ -2657,9 +2025,7 @@ AstNode *parser_parse_type_fun(Parser *parser)
 
     if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after function type parameters"))
     {
-        ast_node_dnit(fun);
-        free(fun);
-        return NULL;
+        return parser_free_node(fun);
     }
 
     // parse optional return type
@@ -2683,23 +2049,11 @@ AstNode *parser_parse_type_fun(Parser *parser)
 
 AstNode *parser_parse_type_str(Parser *parser)
 {
-    AstNode *str = malloc(sizeof(AstNode));
+    AstNode *str = parser_alloc_node(parser, AST_TYPE_STR, parser->previous);
     if (str == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for string type");
         return NULL;
     }
-    ast_node_init(str, AST_TYPE_STR);
-
-    str->token = malloc(sizeof(Token));
-    if (str->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for string type token");
-        ast_node_dnit(str);
-        free(str);
-        return NULL;
-    }
-    token_copy(parser->previous, str->token);
 
     if (parser->current->kind == TOKEN_IDENTIFIER)
     {
@@ -2742,23 +2096,11 @@ AstNode *parser_parse_type_str(Parser *parser)
 
 AstNode *parser_parse_type_uni(Parser *parser)
 {
-    AstNode *uni = malloc(sizeof(AstNode));
+    AstNode *uni = parser_alloc_node(parser, AST_TYPE_UNI, parser->previous);
     if (uni == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for union type");
         return NULL;
     }
-    ast_node_init(uni, AST_TYPE_UNI);
-
-    uni->token = malloc(sizeof(Token));
-    if (uni->token == NULL)
-    {
-        parser_error_at_current(parser, "memory allocation failed for union type token");
-        ast_node_dnit(uni);
-        free(uni);
-        return NULL;
-    }
-    token_copy(parser->previous, uni->token);
 
     if (parser->current->kind == TOKEN_IDENTIFIER)
     {
@@ -2800,37 +2142,19 @@ AstNode *parser_parse_type_uni(Parser *parser)
 
 AstList *parser_parse_field_list(Parser *parser)
 {
-    AstList *list = malloc(sizeof(AstList));
+    AstList *list = parser_alloc_list(parser);
     if (list == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for field list");
         return NULL;
     }
-    ast_list_init(list);
 
     while (!parser_check(parser, TOKEN_R_BRACE) && !parser_is_at_end(parser))
     {
-        AstNode *field = malloc(sizeof(AstNode));
+        AstNode *field = parser_alloc_node(parser, AST_STMT_FIELD, parser->current);
         if (field == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for field statement");
-            ast_list_dnit(list);
-            free(list);
-            return NULL;
+            return parser_free_list(list);
         }
-        ast_node_init(field, AST_STMT_FIELD);
-
-        field->token = malloc(sizeof(Token));
-        if (field->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for field token");
-            ast_node_dnit(field);
-            ast_list_dnit(list);
-            free(field);
-            free(list);
-            return NULL;
-        }
-        token_copy(field->token, parser->current);
 
         // field name
         field->field_stmt.name = parser_parse_identifier(parser);
@@ -2882,13 +2206,11 @@ AstList *parser_parse_field_list(Parser *parser)
 
 AstList *parser_parse_parameter_list(Parser *parser)
 {
-    AstList *list = malloc(sizeof(AstList));
+    AstList *list = parser_alloc_list(parser);
     if (list == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for parameter list");
         return NULL;
     }
-    ast_list_init(list);
 
     // check for empty parameter list
     if (parser_check(parser, TOKEN_R_PAREN))
@@ -2898,27 +2220,11 @@ AstList *parser_parse_parameter_list(Parser *parser)
 
     do
     {
-        AstNode *param = malloc(sizeof(AstNode));
+        AstNode *param = parser_alloc_node(parser, AST_STMT_PARAM, parser->current);
         if (param == NULL)
         {
-            parser_error_at_current(parser, "memory allocation failed for parameter statement");
-            ast_list_dnit(list);
-            free(list);
-            return NULL;
+            return parser_free_list(list);
         }
-        ast_node_init(param, AST_STMT_PARAM);
-
-        param->token = malloc(sizeof(Token));
-        if (param->token == NULL)
-        {
-            parser_error_at_current(parser, "memory allocation failed for parameter token");
-            ast_node_dnit(param);
-            ast_list_dnit(list);
-            free(param);
-            free(list);
-            return NULL;
-        }
-        token_copy(param->token, parser->current);
 
         // parameter name
         param->param_stmt.name = parser_parse_identifier(parser);
@@ -2961,13 +2267,11 @@ AstList *parser_parse_parameter_list(Parser *parser)
 
 AstList *parser_parse_argument_list(Parser *parser)
 {
-    AstList *list = malloc(sizeof(AstList));
+    AstList *list = parser_alloc_list(parser);
     if (list == NULL)
     {
-        parser_error_at_current(parser, "memory allocation failed for argument list");
         return NULL;
     }
-    ast_list_init(list);
 
     if (parser_check(parser, TOKEN_R_PAREN))
     {

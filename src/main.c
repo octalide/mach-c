@@ -181,13 +181,15 @@ static int build_command(int argc, char **argv)
     Parser parser;
     parser_init(&parser, &lexer);
 
+    printf("parsing `%s`... ", filename);
+
     // parse program
     AstNode *program = parser_parse_program(&parser);
 
     // check for parse errors
     if (parser.had_error)
     {
-        fprintf(stderr, "\nParsing failed with %d error(s):\n", parser.errors.count);
+        fprintf(stderr, "\nparsing failed with %d error(s):\n", parser.errors.count);
         parser_error_list_print(&parser.errors, &lexer, filename);
 
         // cleanup
@@ -201,7 +203,8 @@ static int build_command(int argc, char **argv)
         return 1;
     }
 
-    printf("Parsing successful!\n");
+    printf("done\n");
+    printf("resolving dependencies... ");
 
     // initialize module manager and resolve dependencies
     ModuleManager module_manager;
@@ -209,7 +212,7 @@ static int build_command(int argc, char **argv)
 
     if (!module_manager_resolve_dependencies(&module_manager, program))
     {
-        fprintf(stderr, "error: Failed to resolve module dependencies\n");
+        fprintf(stderr, "\nerror: failed to resolve module dependencies\n");
 
         // cleanup
         module_manager_dnit(&module_manager);
@@ -223,7 +226,8 @@ static int build_command(int argc, char **argv)
         return 1;
     }
 
-    printf("Module dependencies resolved successfully!\n");
+    printf("done\n");
+    printf("analyzing program... ");
 
     // perform semantic analysis
     SemanticAnalyzer semantic_analyzer;
@@ -231,15 +235,8 @@ static int build_command(int argc, char **argv)
 
     if (!semantic_analyze_program(&semantic_analyzer, program))
     {
-        if (semantic_analyzer.errors.count > 0)
-        {
-            fprintf(stderr, "\nSemantic analysis failed with %d error(s):\n", semantic_analyzer.errors.count);
-            semantic_error_list_print(&semantic_analyzer.errors, &lexer, filename);
-        }
-        else
-        {
-            fprintf(stderr, "error: Semantic analysis failed (internal error)\n");
-        }
+        fprintf(stderr, "\nsemantic analysis failed with %d error(s):\n", semantic_analyzer.errors.count);
+        semantic_error_list_print(&semantic_analyzer.errors, &lexer, filename);
 
         // cleanup
         semantic_analyzer_dnit(&semantic_analyzer);
@@ -254,7 +251,8 @@ static int build_command(int argc, char **argv)
         return 1;
     }
 
-    printf("Semantic analysis successful!\n");
+    printf("done\n");
+    printf("compiling... ");
 
     // initialize codegen
     CodegenContext codegen_ctx;
@@ -264,7 +262,7 @@ static int build_command(int argc, char **argv)
     // generate code
     if (!codegen_program(&codegen_ctx, program))
     {
-        fprintf(stderr, "error: Code generation failed\n");
+        fprintf(stderr, "\nerror: code generation failed\n");
 
         // cleanup
         codegen_context_dnit(&codegen_ctx);
@@ -281,7 +279,8 @@ static int build_command(int argc, char **argv)
         return 1;
     }
 
-    printf("Code generation successful!\n");
+    printf("done\n");
+    printf("writing outputs...\n");
 
     // emit requested outputs
     bool  success     = true;
@@ -314,7 +313,7 @@ static int build_command(int argc, char **argv)
         }
         else
         {
-            printf("Bitcode written to %s\n", bc_file);
+            printf("bitcode written to %s\n", bc_file);
         }
 
         if (bc_file != options.output_file)
@@ -341,7 +340,7 @@ static int build_command(int argc, char **argv)
         else
         {
             if (options.emit_object && !options.link_executable)
-                printf("Object file written to %s\n", obj_file);
+                printf("object file written to %s\n", obj_file);
         }
     }
 
@@ -353,7 +352,7 @@ static int build_command(int argc, char **argv)
         }
         else
         {
-            printf("Executable created: %s\n", options.output_file);
+            printf("executable created: %s\n", options.output_file);
         }
 
         // clean up temporary object file

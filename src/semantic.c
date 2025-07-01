@@ -342,14 +342,17 @@ bool semantic_analyze_fun_decl(SemanticAnalyzer *analyzer, AstNode *decl)
 
         for (int i = 0; i < param_count; i++)
         {
-            AstNode *param      = decl->fun_decl.params->items[i];
-            Type    *param_type = semantic_analyze_type(analyzer, param->param_decl.type);
+            AstNode *param = decl->fun_decl.params->items[i];
+
+            Type *param_type = semantic_analyze_type(analyzer, param->param_decl.type);
             if (!param_type)
             {
                 free(param_types);
                 return false;
             }
             param_types[i] = param_type;
+
+            param->symbol = NULL;
         }
     }
 
@@ -389,7 +392,7 @@ bool semantic_analyze_fun_decl(SemanticAnalyzer *analyzer, AstNode *decl)
             AstNode *param      = decl->fun_decl.params->items[i];
             Type    *param_type = param_types[i];
 
-            // follow type aliases to see if this is a function type
+            // check if this is a function type (either direct or through alias)
             Type *resolved_type = param_type;
             while (resolved_type->kind == TYPE_ALIAS)
                 resolved_type = resolved_type->alias.target;
@@ -401,7 +404,15 @@ bool semantic_analyze_fun_decl(SemanticAnalyzer *analyzer, AstNode *decl)
             }
 
             Symbol *param_sym = symbol_table_declare(analyzer->current_scope, param->param_decl.name, SYMBOL_PARAM, param_type, param);
-            param->symbol     = param_sym;
+            if (!param_sym)
+            {
+                semantic_error(analyzer, param, "Parameter '%s' already declared", param->param_decl.name);
+                semantic_pop_scope(analyzer);
+                return false;
+            }
+
+            param->symbol = param_sym;
+            param->type   = param_type;
         }
 
         // set current function return type

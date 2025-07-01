@@ -28,8 +28,12 @@ void symbol_table_dnit(SymbolTable *table)
         while (symbol)
         {
             Symbol *next = symbol->next;
-            free(symbol->name);
-            free(symbol);
+            // don't free parameter or variable symbols - they need to persist for codegen
+            if (symbol->kind != SYMBOL_PARAM && symbol->kind != SYMBOL_VAR)
+            {
+                free(symbol->name);
+                free(symbol);
+            }
             symbol = next;
         }
     }

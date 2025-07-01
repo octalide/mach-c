@@ -5,6 +5,7 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
+#include <llvm-c/Transforms/PassBuilder.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -282,25 +283,86 @@ LLVMTypeRef codegen_type(CodegenContext *ctx, Type *type)
         // cache early to handle recursive types
         codegen_cache_type(ctx, type, llvm_type);
 
-        // set body for struct
-        if (type->composite.field_count > 0)
+        // handle struct vs union differently
+        if (type->kind == TYPE_UNION)
         {
-            LLVMTypeRef *field_types = malloc(sizeof(LLVMTypeRef) * type->composite.field_count);
-            for (int i = 0; i < type->composite.field_count; i++)
+            // For unions in LLVM, we create a struct that can hold the largest field
+            // All fields are accessed at offset 0 using GEP + bitcast
+            if (type->composite.field_count > 0)
             {
-                field_types[i] = codegen_type(ctx, type->composite.fields[i]->type);
-            }
+                // Find the field type with maximum size and alignment requirements
+                LLVMTypeRef union_storage_type = NULL;
+                unsigned    max_size           = 0;
+                unsigned    max_align          = 1;
 
-            if (name)
-            {
-                LLVMStructSetBody(llvm_type, field_types, type->composite.field_count, false);
-            }
-            else
-            {
-                llvm_type = LLVMStructTypeInContext(ctx->llvm_context, field_types, type->composite.field_count, false);
-            }
+                for (int i = 0; i < type->composite.field_count; i++)
+                {
+                    Type       *field_type_mach = type->composite.fields[i]->type;
+                    LLVMTypeRef field_type      = codegen_type(ctx, field_type_mach);
+                    if (!field_type)
+                        continue;
 
-            free(field_types);
+                    unsigned field_size  = field_type_mach->size;
+                    unsigned field_align = field_type_mach->alignment;
+
+                    if (field_size > max_size || (field_size == max_size && field_align > max_align))
+                    {
+                        max_size           = field_size;
+                        max_align          = field_align;
+                        union_storage_type = field_type;
+                    }
+                }
+
+                if (union_storage_type)
+                {
+                    // Create union as a struct containing just the storage type
+                    // This ensures correct size and alignment for the union
+                    if (name)
+                    {
+                        LLVMStructSetBody(llvm_type, &union_storage_type, 1, false);
+                    }
+                    else
+                    {
+                        llvm_type = LLVMStructTypeInContext(ctx->llvm_context, &union_storage_type, 1, false);
+                    }
+                }
+                else
+                {
+                    // Fallback: empty union
+                    LLVMTypeRef empty_type = LLVMArrayType(LLVMInt8TypeInContext(ctx->llvm_context), 1);
+                    if (name)
+                    {
+                        LLVMStructSetBody(llvm_type, &empty_type, 1, false);
+                    }
+                    else
+                    {
+                        llvm_type = LLVMStructTypeInContext(ctx->llvm_context, &empty_type, 1, false);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // for structs, set body as normal
+            if (type->composite.field_count > 0)
+            {
+                LLVMTypeRef *field_types = malloc(sizeof(LLVMTypeRef) * type->composite.field_count);
+                for (int i = 0; i < type->composite.field_count; i++)
+                {
+                    field_types[i] = codegen_type(ctx, type->composite.fields[i]->type);
+                }
+
+                if (name)
+                {
+                    LLVMStructSetBody(llvm_type, field_types, type->composite.field_count, false);
+                }
+                else
+                {
+                    llvm_type = LLVMStructTypeInContext(ctx->llvm_context, field_types, type->composite.field_count, false);
+                }
+
+                free(field_types);
+            }
         }
 
         return llvm_type; // already cached
@@ -471,9 +533,21 @@ bool codegen_declaration(CodegenContext *ctx, AstNode *decl)
 
 bool codegen_use_decl(CodegenContext *ctx, AstNode *decl)
 {
-    (void)ctx;
-    (void)decl; // unused
-    // use declarations don't generate code directly
+    if (!decl->use_decl.module_sym || !decl->use_decl.module_sym->module)
+    {
+        codegen_error(ctx, "use declaration missing module reference");
+        return false;
+    }
+
+    Module *module = decl->use_decl.module_sym->module;
+
+    // process the imported module to ensure its symbols are available
+    if (!codegen_module(ctx, module))
+    {
+        codegen_error(ctx, "failed to process imported module '%s'", decl->use_decl.module_path);
+        return false;
+    }
+
     return true;
 }
 
@@ -1557,9 +1631,18 @@ LLVMValueRef codegen_lvalue_address(CodegenContext *ctx, AstNode *expr)
         }
 
         // get field pointer
-        LLVMValueRef indices[] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), field_index, false)};
+        LLVMValueRef indices[] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), object_type->kind == TYPE_UNION ? 0 : field_index, false)};
 
-        return LLVMBuildGEP2(ctx->llvm_builder, codegen_type(ctx, object_type), object_addr, indices, 2, "");
+        LLVMValueRef field_ptr = LLVMBuildGEP2(ctx->llvm_builder, codegen_type(ctx, object_type), object_addr, indices, 2, "");
+
+        // for unions, we need to bitcast to the correct field type
+        if (object_type->kind == TYPE_UNION)
+        {
+            LLVMTypeRef field_type = codegen_type(ctx, expr->type);
+            field_ptr              = LLVMBuildBitCast(ctx->llvm_builder, field_ptr, LLVMPointerType(field_type, 0), "");
+        }
+
+        return field_ptr;
     }
 
     default:
@@ -1895,6 +1978,12 @@ LLVMValueRef codegen_field_expr(CodegenContext *ctx, AstNode *expr)
         return NULL;
     }
 
+    // for array types, return the pointer directly (arrays are not first-class values in LLVM)
+    if (expr->type->kind == TYPE_ARRAY)
+    {
+        return addr;
+    }
+
     LLVMTypeRef field_type = codegen_type(ctx, expr->type);
     return LLVMBuildLoad2(ctx->llvm_builder, field_type, addr, "");
 }
@@ -1991,6 +2080,18 @@ LLVMValueRef codegen_cast_expr(CodegenContext *ctx, AstNode *expr)
         return LLVMBuildBitCast(ctx->llvm_builder, value, to_llvm, "");
     }
 
+    // integer to pointer
+    if (type_is_integer(from_type) && to_type->kind == TYPE_PTR)
+    {
+        return LLVMBuildIntToPtr(ctx->llvm_builder, value, to_llvm, "");
+    }
+
+    // pointer to integer
+    if (from_type->kind == TYPE_PTR && type_is_integer(to_type))
+    {
+        return LLVMBuildPtrToInt(ctx->llvm_builder, value, to_llvm, "");
+    }
+
     // fallback to bitcast
     return LLVMBuildBitCast(ctx->llvm_builder, value, to_llvm, "");
 }
@@ -2010,70 +2111,95 @@ LLVMValueRef codegen_array_expr(CodegenContext *ctx, AstNode *expr)
 
     if (array_type->array.size >= 0)
     {
-        // BOUND ARRAY [N]T - store as LLVM array
-        LLVMTypeRef  array_llvm_type = LLVMArrayType(elem_llvm_type, array_type->array.size);
-        LLVMValueRef array_alloca    = LLVMBuildAlloca(ctx->llvm_builder, array_llvm_type, "array_temp");
+        // BOUND ARRAY [N]T - create global constant array
+        LLVMTypeRef array_llvm_type = LLVMArrayType(elem_llvm_type, array_type->array.size);
 
-        // initialize to zero
-        LLVMValueRef zero = LLVMConstNull(array_llvm_type);
-        LLVMBuildStore(ctx->llvm_builder, zero, array_alloca);
+        // create array of constant values
+        LLVMValueRef *elements = malloc(sizeof(LLVMValueRef) * array_type->array.size);
 
-        // set elements
-        for (int i = 0; i < elem_count; i++)
+        // initialize all elements to zero first
+        LLVMValueRef zero_elem = LLVMConstNull(elem_llvm_type);
+        for (int i = 0; i < array_type->array.size; i++)
+        {
+            elements[i] = zero_elem;
+        }
+
+        // set provided elements
+        for (int i = 0; i < elem_count && i < array_type->array.size; i++)
         {
             LLVMValueRef elem_value = codegen_expression(ctx, expr->array_expr.elems->items[i]);
             if (!elem_value)
+            {
+                free(elements);
                 return NULL;
-
-            LLVMValueRef indices[2] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), 0, 0), LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), i, 0)};
-            LLVMValueRef elem_ptr   = LLVMBuildGEP2(ctx->llvm_builder, array_llvm_type, array_alloca, indices, 2, "");
-            LLVMBuildStore(ctx->llvm_builder, elem_value, elem_ptr);
+            }
+            elements[i] = elem_value;
         }
 
-        return array_alloca;
+        // create global constant array
+        LLVMValueRef global_array = LLVMConstArray(elem_llvm_type, elements, array_type->array.size);
+        LLVMValueRef global_var   = LLVMAddGlobal(ctx->llvm_module, array_llvm_type, ".array_literal");
+        LLVMSetInitializer(global_var, global_array);
+        LLVMSetLinkage(global_var, LLVMPrivateLinkage);
+        LLVMSetGlobalConstant(global_var, 1);
+        LLVMSetUnnamedAddress(global_var, LLVMGlobalUnnamedAddr);
+
+        free(elements);
+        return global_var;
     }
     else
     {
-        // UNBOUND ARRAY []T - store as {ptr, len} struct
-        LLVMTypeRef  slice_type   = codegen_type(ctx, array_type); // {ptr, len}
-        LLVMValueRef slice_alloca = LLVMBuildAlloca(ctx->llvm_builder, slice_type, "slice_temp");
-
+        // UNBOUND ARRAY []T - create global constant and return slice pointing to it
         if (elem_count > 0)
         {
-            // allocate memory for elements
-            LLVMValueRef count      = LLVMConstInt(LLVMInt64TypeInContext(ctx->llvm_context), elem_count, 0);
-            LLVMValueRef elem_size  = LLVMConstInt(LLVMInt64TypeInContext(ctx->llvm_context), elem_type->size, 0);
-            LLVMValueRef total_size = LLVMBuildMul(ctx->llvm_builder, count, elem_size, "");
-
-            // malloc call (for now, simple allocation)
-            LLVMTypeRef  malloc_type = LLVMFunctionType(LLVMPointerType(LLVMInt8TypeInContext(ctx->llvm_context), 0), &(LLVMTypeRef){LLVMInt64TypeInContext(ctx->llvm_context)}, 1, false);
-            LLVMValueRef malloc_func = LLVMAddFunction(ctx->llvm_module, "malloc", malloc_type);
-            LLVMValueRef raw_ptr     = LLVMBuildCall2(ctx->llvm_builder, malloc_type, malloc_func, &total_size, 1, "");
-            LLVMValueRef typed_ptr   = LLVMBuildBitCast(ctx->llvm_builder, raw_ptr, LLVMPointerType(elem_llvm_type, 0), "");
-
-            // store ptr in struct
-            LLVMValueRef ptr_field = LLVMBuildStructGEP2(ctx->llvm_builder, slice_type, slice_alloca, 0, "");
-            LLVMBuildStore(ctx->llvm_builder, typed_ptr, ptr_field);
-
-            // store length in struct
-            LLVMValueRef len_field = LLVMBuildStructGEP2(ctx->llvm_builder, slice_type, slice_alloca, 1, "");
-            LLVMBuildStore(ctx->llvm_builder, count, len_field);
-
-            // initialize elements
+            // create global constant array for the elements
+            LLVMValueRef *elements = malloc(sizeof(LLVMValueRef) * elem_count);
             for (int i = 0; i < elem_count; i++)
             {
                 LLVMValueRef elem_value = codegen_expression(ctx, expr->array_expr.elems->items[i]);
                 if (!elem_value)
+                {
+                    free(elements);
                     return NULL;
-
-                LLVMValueRef index    = LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), i, 0);
-                LLVMValueRef elem_ptr = LLVMBuildGEP2(ctx->llvm_builder, elem_llvm_type, typed_ptr, &index, 1, "");
-                LLVMBuildStore(ctx->llvm_builder, elem_value, elem_ptr);
+                }
+                elements[i] = elem_value;
             }
+
+            // create global constant array
+            LLVMValueRef global_array = LLVMConstArray(elem_llvm_type, elements, elem_count);
+            LLVMValueRef global_var   = LLVMAddGlobal(ctx->llvm_module, LLVMTypeOf(global_array), ".array_literal");
+            LLVMSetInitializer(global_var, global_array);
+            LLVMSetLinkage(global_var, LLVMPrivateLinkage);
+            LLVMSetGlobalConstant(global_var, 1);
+            LLVMSetUnnamedAddress(global_var, LLVMGlobalUnnamedAddr);
+
+            free(elements);
+
+            // create slice struct {ptr, len} on the stack
+            LLVMTypeRef  slice_type   = codegen_type(ctx, array_type);
+            LLVMValueRef slice_alloca = LLVMBuildAlloca(ctx->llvm_builder, slice_type, "slice_temp");
+
+            // get pointer to first element of global array
+            LLVMValueRef indices[2] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), 0, 0), LLVMConstInt(LLVMInt32TypeInContext(ctx->llvm_context), 0, 0)};
+            LLVMValueRef array_ptr  = LLVMBuildGEP2(ctx->llvm_builder, LLVMTypeOf(global_array), global_var, indices, 2, "");
+
+            // store ptr in slice struct
+            LLVMValueRef ptr_field = LLVMBuildStructGEP2(ctx->llvm_builder, slice_type, slice_alloca, 0, "");
+            LLVMBuildStore(ctx->llvm_builder, array_ptr, ptr_field);
+
+            // store length in slice struct
+            LLVMValueRef count     = LLVMConstInt(LLVMInt64TypeInContext(ctx->llvm_context), elem_count, 0);
+            LLVMValueRef len_field = LLVMBuildStructGEP2(ctx->llvm_builder, slice_type, slice_alloca, 1, "");
+            LLVMBuildStore(ctx->llvm_builder, count, len_field);
+
+            return slice_alloca;
         }
         else
         {
-            // empty array
+            // empty array - create slice with null pointer and zero length
+            LLVMTypeRef  slice_type   = codegen_type(ctx, array_type);
+            LLVMValueRef slice_alloca = LLVMBuildAlloca(ctx->llvm_builder, slice_type, "slice_temp");
+
             LLVMValueRef null_ptr = LLVMConstNull(LLVMPointerType(elem_llvm_type, 0));
             LLVMValueRef zero_len = LLVMConstInt(LLVMInt64TypeInContext(ctx->llvm_context), 0, 0);
 
@@ -2082,9 +2208,9 @@ LLVMValueRef codegen_array_expr(CodegenContext *ctx, AstNode *expr)
 
             LLVMValueRef len_field = LLVMBuildStructGEP2(ctx->llvm_builder, slice_type, slice_alloca, 1, "");
             LLVMBuildStore(ctx->llvm_builder, zero_len, len_field);
-        }
 
-        return slice_alloca;
+            return slice_alloca;
+        }
     }
 }
 
@@ -2152,8 +2278,21 @@ LLVMValueRef codegen_struct_expr(CodegenContext *ctx, AstNode *expr)
             }
 
             // get pointer to the field and store the value
-            LLVMValueRef field_ptr = LLVMBuildStructGEP2(ctx->llvm_builder, llvm_composite_type, composite_alloca, field_index, "");
-            LLVMBuildStore(ctx->llvm_builder, field_value, field_ptr);
+            if (composite_type->kind == TYPE_UNION)
+            {
+                // for unions, all fields are at the same location (index 0)
+                // but we need to bitcast to the correct type
+                LLVMTypeRef  field_type = codegen_type(ctx, composite_type->composite.fields[field_index]->type);
+                LLVMValueRef field_ptr  = LLVMBuildStructGEP2(ctx->llvm_builder, llvm_composite_type, composite_alloca, 0, "");
+                field_ptr               = LLVMBuildBitCast(ctx->llvm_builder, field_ptr, LLVMPointerType(field_type, 0), "");
+                LLVMBuildStore(ctx->llvm_builder, field_value, field_ptr);
+            }
+            else
+            {
+                // for structs, use the actual field index
+                LLVMValueRef field_ptr = LLVMBuildStructGEP2(ctx->llvm_builder, llvm_composite_type, composite_alloca, field_index, "");
+                LLVMBuildStore(ctx->llvm_builder, field_value, field_ptr);
+            }
         }
     }
 

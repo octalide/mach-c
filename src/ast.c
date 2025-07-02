@@ -764,3 +764,432 @@ void ast_print(AstNode *node, int indent)
         break;
     }
 }
+
+const char *ast_node_kind_to_string(AstKind kind)
+{
+    switch (kind)
+    {
+    case AST_PROGRAM:
+        return "PROGRAM";
+    case AST_MODULE:
+        return "MODULE";
+    case AST_STMT_USE:
+        return "USE";
+    case AST_STMT_EXT:
+        return "EXT";
+    case AST_STMT_DEF:
+        return "DEF";
+    case AST_STMT_VAL:
+        return "VAL";
+    case AST_STMT_VAR:
+        return "VAR";
+    case AST_STMT_FUN:
+        return "FUN";
+    case AST_STMT_STR:
+        return "STR";
+    case AST_STMT_UNI:
+        return "UNI";
+    case AST_STMT_FIELD:
+        return "FIELD";
+    case AST_STMT_PARAM:
+        return "PARAM";
+    case AST_STMT_BLOCK:
+        return "BLOCK";
+    case AST_STMT_EXPR:
+        return "EXPR_STMT";
+    case AST_STMT_RET:
+        return "RET";
+    case AST_STMT_IF:
+        return "IF";
+    case AST_STMT_OR:
+        return "OR";
+    case AST_STMT_FOR:
+        return "FOR";
+    case AST_STMT_BRK:
+        return "BRK";
+    case AST_STMT_CNT:
+        return "CNT";
+
+    case AST_EXPR_BINARY:
+        return "BINARY_EXPR";
+    case AST_EXPR_UNARY:
+        return "UNARY_EXPR";
+    case AST_EXPR_CALL:
+        return "CALL_EXPR";
+    case AST_EXPR_INDEX:
+        return "INDEX_EXPR";
+    case AST_EXPR_FIELD:
+        return "FIELD_EXPR";
+    case AST_EXPR_CAST:
+        return "CAST_EXPR";
+    case AST_EXPR_IDENT:
+        return "IDENT_EXPR";
+    case AST_EXPR_LIT:
+        return "LIT_EXPR";
+    case AST_EXPR_ARRAY:
+        return "ARRAY_EXPR";
+    case AST_EXPR_STRUCT:
+        return "STRUCT_LIT";
+
+    case AST_TYPE_NAME:
+        return "TYPE_NAME";
+    case AST_TYPE_PTR:
+        return "TYPE_PTR";
+    case AST_TYPE_ARRAY:
+        return "TYPE_ARRAY";
+    case AST_TYPE_FUN:
+        return "TYPE_FUN";
+    case AST_TYPE_STR:
+        return "TYPE_STR";
+    case AST_TYPE_UNI:
+        return "TYPE_UNI";
+
+    default:
+        return "UNKNOWN";
+    }
+}
+
+// helper for printing to file
+static void print_indent_to_file(FILE *file, int indent)
+{
+    for (int i = 0; i < indent; i++)
+    {
+        fprintf(file, "  ");
+    }
+}
+
+static void ast_print_to_file(AstNode *node, FILE *file, int indent)
+{
+    if (!node)
+    {
+        print_indent_to_file(file, indent);
+        fprintf(file, "(null)\n");
+        return;
+    }
+
+    print_indent_to_file(file, indent);
+
+    switch (node->kind)
+    {
+    case AST_PROGRAM:
+        fprintf(file, "PROGRAM\n");
+        for (int i = 0; i < node->program.stmts->count; i++)
+        {
+            ast_print_to_file(node->program.stmts->items[i], file, indent + 1);
+        }
+        break;
+    case AST_MODULE:
+        fprintf(file, "MODULE %s\n", node->module.name);
+        for (int i = 0; i < node->module.stmts->count; i++)
+        {
+            ast_print_to_file(node->module.stmts->items[i], file, indent + 1);
+        }
+        break;
+    case AST_STMT_USE:
+        fprintf(file, "USE %s", node->use_stmt.module_path);
+        if (node->use_stmt.alias)
+        {
+            fprintf(file, " as %s", node->use_stmt.alias);
+        }
+        fprintf(file, "\n");
+        break;
+    case AST_STMT_EXT:
+        fprintf(file, "EXT %s:\n", node->ext_stmt.name);
+        ast_print_to_file(node->ext_stmt.type, file, indent + 1);
+        break;
+    case AST_STMT_DEF:
+        fprintf(file, "DEF %s:\n", node->def_stmt.name);
+        ast_print_to_file(node->def_stmt.type, file, indent + 1);
+        break;
+    case AST_STMT_VAL:
+        fprintf(file, "VAL %s:\n", node->var_stmt.name);
+        if (node->var_stmt.type)
+        {
+            ast_print_to_file(node->var_stmt.type, file, indent + 1);
+        }
+        if (node->var_stmt.init)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "= \n");
+            ast_print_to_file(node->var_stmt.init, file, indent + 2);
+        }
+        break;
+    case AST_STMT_VAR:
+        fprintf(file, "VAR %s:\n", node->var_stmt.name);
+        if (node->var_stmt.type)
+        {
+            ast_print_to_file(node->var_stmt.type, file, indent + 1);
+        }
+        if (node->var_stmt.init)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "= \n");
+            ast_print_to_file(node->var_stmt.init, file, indent + 2);
+        }
+        break;
+    case AST_STMT_FUN:
+        fprintf(file, "FUN %s\n", node->fun_stmt.name);
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "params:\n");
+        for (int i = 0; i < node->fun_stmt.params->count; i++)
+        {
+            ast_print_to_file(node->fun_stmt.params->items[i], file, indent + 2);
+        }
+        if (node->fun_stmt.return_type)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "returns:\n");
+            ast_print_to_file(node->fun_stmt.return_type, file, indent + 2);
+        }
+        if (node->fun_stmt.body)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "body:\n");
+            ast_print_to_file(node->fun_stmt.body, file, indent + 2);
+        }
+        break;
+    case AST_STMT_STR:
+        fprintf(file, "STR %s\n", node->str_stmt.name);
+        for (int i = 0; i < node->str_stmt.fields->count; i++)
+        {
+            ast_print_to_file(node->str_stmt.fields->items[i], file, indent + 1);
+        }
+        break;
+    case AST_STMT_UNI:
+        fprintf(file, "UNI %s\n", node->uni_stmt.name);
+        for (int i = 0; i < node->uni_stmt.fields->count; i++)
+        {
+            ast_print_to_file(node->uni_stmt.fields->items[i], file, indent + 1);
+        }
+        break;
+    case AST_STMT_FIELD:
+        fprintf(file, "FIELD %s:\n", node->field_stmt.name);
+        ast_print_to_file(node->field_stmt.type, file, indent + 1);
+        break;
+    case AST_STMT_PARAM:
+        fprintf(file, "PARAM %s:\n", node->param_stmt.name);
+        ast_print_to_file(node->param_stmt.type, file, indent + 1);
+        break;
+    case AST_STMT_BLOCK:
+        fprintf(file, "BLOCK\n");
+        for (int i = 0; i < node->block_stmt.stmts->count; i++)
+        {
+            ast_print_to_file(node->block_stmt.stmts->items[i], file, indent + 1);
+        }
+        break;
+    case AST_STMT_EXPR:
+        fprintf(file, "EXPR_STMT\n");
+        ast_print_to_file(node->expr_stmt.expr, file, indent + 1);
+        break;
+    case AST_STMT_RET:
+        fprintf(file, "RET\n");
+        if (node->ret_stmt.expr)
+        {
+            ast_print_to_file(node->ret_stmt.expr, file, indent + 1);
+        }
+        break;
+    case AST_STMT_IF:
+        fprintf(file, "IF\n");
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "cond:\n");
+        ast_print_to_file(node->cond_stmt.cond, file, indent + 2);
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "then:\n");
+        ast_print_to_file(node->cond_stmt.body, file, indent + 2);
+        if (node->cond_stmt.stmt_or)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "else:\n");
+            ast_print_to_file(node->cond_stmt.stmt_or, file, indent + 2);
+        }
+        break;
+    case AST_STMT_OR:
+        fprintf(file, "OR\n");
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "cond:\n");
+        ast_print_to_file(node->cond_stmt.cond, file, indent + 2);
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "then:\n");
+        ast_print_to_file(node->cond_stmt.body, file, indent + 2);
+        if (node->cond_stmt.stmt_or)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "or:\n");
+            ast_print_to_file(node->cond_stmt.stmt_or, file, indent + 2);
+        }
+        break;
+    case AST_STMT_FOR:
+        fprintf(file, "FOR\n");
+        if (node->for_stmt.cond)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "cond:\n");
+            ast_print_to_file(node->for_stmt.cond, file, indent + 2);
+        }
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "body:\n");
+        ast_print_to_file(node->for_stmt.body, file, indent + 2);
+        break;
+    case AST_STMT_BRK:
+        fprintf(file, "BRK\n");
+        break;
+    case AST_STMT_CNT:
+        fprintf(file, "CNT\n");
+        break;
+    case AST_EXPR_BINARY:
+        fprintf(file, "BINARY %s\n", token_kind_to_string(node->binary_expr.op));
+        ast_print_to_file(node->binary_expr.left, file, indent + 1);
+        ast_print_to_file(node->binary_expr.right, file, indent + 1);
+        break;
+    case AST_EXPR_UNARY:
+        fprintf(file, "UNARY %s\n", token_kind_to_string(node->unary_expr.op));
+        ast_print_to_file(node->unary_expr.expr, file, indent + 1);
+        break;
+    case AST_EXPR_CALL:
+        fprintf(file, "CALL\n");
+        ast_print_to_file(node->call_expr.func, file, indent + 1);
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "args:\n");
+        for (int i = 0; i < node->call_expr.args->count; i++)
+        {
+            ast_print_to_file(node->call_expr.args->items[i], file, indent + 2);
+        }
+        break;
+    case AST_EXPR_INDEX:
+        fprintf(file, "INDEX\n");
+        ast_print_to_file(node->index_expr.array, file, indent + 1);
+        ast_print_to_file(node->index_expr.index, file, indent + 1);
+        break;
+    case AST_EXPR_FIELD:
+        fprintf(file, "FIELD .%s\n", node->field_expr.field);
+        ast_print_to_file(node->field_expr.object, file, indent + 1);
+        break;
+    case AST_EXPR_CAST:
+        fprintf(file, "CAST\n");
+        ast_print_to_file(node->cast_expr.expr, file, indent + 1);
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "to:\n");
+        ast_print_to_file(node->cast_expr.type, file, indent + 2);
+        break;
+    case AST_EXPR_IDENT:
+        fprintf(file, "IDENT %s\n", node->ident_expr.name);
+        break;
+    case AST_EXPR_LIT:
+        fprintf(file, "LIT ");
+        switch (node->lit_expr.kind)
+        {
+        case TOKEN_LIT_INT:
+            fprintf(file, "INT %llu\n", node->lit_expr.int_val);
+            break;
+        case TOKEN_LIT_FLOAT:
+            fprintf(file, "FLOAT %f\n", node->lit_expr.float_val);
+            break;
+        case TOKEN_LIT_CHAR:
+            fprintf(file, "CHAR '%c'\n", node->lit_expr.char_val);
+            break;
+        case TOKEN_LIT_STRING:
+            fprintf(file, "STRING \"%s\"\n", node->lit_expr.string_val);
+            break;
+        default:
+            fprintf(file, "???\n");
+        }
+        break;
+    case AST_EXPR_ARRAY:
+        fprintf(file, "ARRAY\n");
+        ast_print_to_file(node->array_expr.type, file, indent + 1);
+        for (int i = 0; i < node->array_expr.elems->count; i++)
+        {
+            ast_print_to_file(node->array_expr.elems->items[i], file, indent + 1);
+        }
+        break;
+    case AST_EXPR_STRUCT:
+        fprintf(file, "STRUCT_LIT\n");
+        ast_print_to_file(node->struct_expr.type, file, indent + 1);
+        for (int i = 0; i < node->struct_expr.fields->count; i++)
+        {
+            ast_print_to_file(node->struct_expr.fields->items[i], file, indent + 1);
+        }
+        break;
+    case AST_TYPE_NAME:
+        fprintf(file, "TYPE %s\n", node->type_name.name);
+        break;
+    case AST_TYPE_PTR:
+        fprintf(file, "TYPE_PTR\n");
+        ast_print_to_file(node->type_ptr.base, file, indent + 1);
+        break;
+    case AST_TYPE_ARRAY:
+        fprintf(file, "TYPE_ARRAY\n");
+        if (node->type_array.size)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "size:\n");
+            ast_print_to_file(node->type_array.size, file, indent + 2);
+        }
+        else
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "size: unbound\n");
+        }
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "elem:\n");
+        ast_print_to_file(node->type_array.elem_type, file, indent + 2);
+        break;
+    case AST_TYPE_FUN:
+        fprintf(file, "TYPE_FUN\n");
+        print_indent_to_file(file, indent + 1);
+        fprintf(file, "params:\n");
+        for (int i = 0; i < node->type_fun.params->count; i++)
+        {
+            ast_print_to_file(node->type_fun.params->items[i], file, indent + 2);
+        }
+        if (node->type_fun.return_type)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "returns:\n");
+            ast_print_to_file(node->type_fun.return_type, file, indent + 2);
+        }
+        break;
+    case AST_TYPE_STR:
+        fprintf(file, "TYPE_STR");
+        if (node->type_str.name)
+        {
+            fprintf(file, " %s", node->type_str.name);
+        }
+        fprintf(file, "\n");
+        for (int i = 0; i < node->type_str.fields->count; i++)
+        {
+            ast_print_to_file(node->type_str.fields->items[i], file, indent + 1);
+        }
+        break;
+    case AST_TYPE_UNI:
+        fprintf(file, "TYPE_UNI");
+        if (node->type_uni.name)
+        {
+            fprintf(file, " %s", node->type_uni.name);
+        }
+        fprintf(file, "\n");
+        for (int i = 0; i < node->type_uni.fields->count; i++)
+        {
+            ast_print_to_file(node->type_uni.fields->items[i], file, indent + 1);
+        }
+        break;
+    }
+}
+
+bool ast_emit(AstNode *node, const char *file_path)
+{
+    if (!node || !file_path)
+        return false;
+
+    FILE *file = fopen(file_path, "w");
+    if (!file)
+    {
+        perror("failed to open AST file for writing");
+        return false;
+    }
+
+    ast_print_to_file(node, file, 0);
+
+    fclose(file);
+    return true;
+}

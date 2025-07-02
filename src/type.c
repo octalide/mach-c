@@ -347,16 +347,30 @@ bool type_can_assign_to(Type *from, Type *to)
 
     // numeric conversions (more restrictive than casting)
     if (type_is_numeric(from) && type_is_numeric(to))
-        return true;
+    {
+        // only allow safe conversions: same type or smaller-to-larger
+        // disallow potentially lossy conversions like u64 -> i32
+        return from->size <= to->size;
+    }
 
-    // pointer conversions (same pointer types)
-    if (type_is_pointer_like(from) && type_is_pointer_like(to))
+    // pointer conversions (same pointer types, but not functions)
+    if (type_is_pointer_like(from) && type_is_pointer_like(to) && from->kind != TYPE_FUNCTION && to->kind != TYPE_FUNCTION)
         return true;
 
     // array to pointer decay
     if (from->kind == TYPE_ARRAY && to->kind == TYPE_POINTER)
     {
         return type_equals(from->array.elem_type, to->pointer.base);
+    }
+
+    // fixed-size array to unbounded array conversion
+    if (from->kind == TYPE_ARRAY && to->kind == TYPE_ARRAY)
+    {
+        // allow fixed-size array to be passed to unbounded array parameter
+        if (!from->array.is_unbound && to->array.is_unbound)
+        {
+            return type_equals(from->array.elem_type, to->array.elem_type);
+        }
     }
 
     // NO implicit pointer ↔ integer conversions for assignments

@@ -34,13 +34,8 @@ bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
     // initialize type system
     type_system_init();
 
-    // add built-in functions
-    Type **len_params  = malloc(sizeof(Type *) * 1);
-    len_params[0]      = type_pointer_create(type_u8()); // accepts any pointer/array
-    Type   *len_type   = type_function_create(type_u64(), len_params, 1);
-    Symbol *len_symbol = symbol_create(SYMBOL_FUNC, "len", len_type, NULL);
-    symbol_add(analyzer->symbol_table.global_scope, len_symbol);
-    free(len_params);
+    // NOTE: Built-in intrinsic functions like len, size_of, align_of are handled
+    // directly in both semantic analysis and codegen as special cases
 
     // resolve module dependencies first
     if (root->kind == AST_PROGRAM)
@@ -970,12 +965,31 @@ Type *semantic_analyze_binary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         return left_type;
     }
 
-    // for other operations, analyze both sides
+    // for other operations, analyze both sides with context-aware literal promotion
     Type *left_type  = semantic_analyze_expr(analyzer, expr->binary_expr.left);
     Type *right_type = semantic_analyze_expr(analyzer, expr->binary_expr.right);
 
     if (!left_type || !right_type)
         return NULL;
+
+    // if one operand is a literal and the other is a concrete type, promote the literal
+    bool left_is_literal  = expr->binary_expr.left->kind == AST_EXPR_LIT;
+    bool right_is_literal = expr->binary_expr.right->kind == AST_EXPR_LIT;
+
+    if (left_is_literal && !right_is_literal && type_is_integer(left_type) && type_is_integer(right_type))
+    {
+        // re-analyze left literal with right type as hint
+        Type *promoted_left = semantic_analyze_expr_with_hint(analyzer, expr->binary_expr.left, right_type);
+        if (promoted_left)
+            left_type = promoted_left;
+    }
+    else if (right_is_literal && !left_is_literal && type_is_integer(right_type) && type_is_integer(left_type))
+    {
+        // re-analyze right literal with left type as hint
+        Type *promoted_right = semantic_analyze_expr_with_hint(analyzer, expr->binary_expr.right, left_type);
+        if (promoted_right)
+            right_type = promoted_right;
+    }
 
     // determine result type based on operation
     Type *result_type = NULL;
@@ -1081,6 +1095,74 @@ Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 
 Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
+    // check for builtin/intrinsic functions first
+    if (expr->call_expr.func->kind == AST_EXPR_IDENT)
+    {
+        const char *func_name = expr->call_expr.func->ident_expr.name;
+
+        // handle len() intrinsic
+        if (strcmp(func_name, "len") == 0)
+        {
+            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            {
+                semantic_error(analyzer, expr, "len() expects exactly one argument");
+                return NULL;
+            }
+
+            AstNode *arg      = expr->call_expr.args->items[0];
+            Type    *arg_type = semantic_analyze_expr(analyzer, arg);
+            if (!arg_type)
+                return NULL;
+
+            arg_type = type_resolve_alias(arg_type);
+
+            if (arg_type->kind != TYPE_ARRAY)
+            {
+                semantic_error(analyzer, expr, "len() can only be applied to arrays");
+                return NULL;
+            }
+
+            expr->type = type_u64(); // len() returns u64
+            return expr->type;
+        }
+
+        // handle size_of() intrinsic
+        if (strcmp(func_name, "size_of") == 0)
+        {
+            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            {
+                semantic_error(analyzer, expr, "size_of() expects exactly one argument");
+                return NULL;
+            }
+
+            AstNode *arg      = expr->call_expr.args->items[0];
+            Type    *arg_type = semantic_analyze_expr(analyzer, arg);
+            if (!arg_type)
+                return NULL;
+
+            expr->type = type_u64(); // size_of() returns u64
+            return expr->type;
+        }
+
+        // handle align_of() intrinsic
+        if (strcmp(func_name, "align_of") == 0)
+        {
+            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            {
+                semantic_error(analyzer, expr, "align_of() expects exactly one argument");
+                return NULL;
+            }
+
+            AstNode *arg      = expr->call_expr.args->items[0];
+            Type    *arg_type = semantic_analyze_expr(analyzer, arg);
+            if (!arg_type)
+                return NULL;
+
+            expr->type = type_u64(); // align_of() returns u64
+            return expr->type;
+        }
+    }
+
     Type *func_type = semantic_analyze_expr(analyzer, expr->call_expr.func);
     if (!func_type)
         return NULL;

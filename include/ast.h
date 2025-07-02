@@ -314,4 +314,8 @@ void ast_list_append(AstList *list, AstNode *node);
 // pretty printing for debugging
 void ast_print(AstNode *node, int indent);
 
+const char *ast_node_kind_to_string(AstKind kind);
+
+bool ast_emit(AstNode *node, const char *file_path);
+
 #endif

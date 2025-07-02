@@ -1,0 +1,1551 @@
+#include "codegen.h"
+#include "token.h"
+#include "type.h"
+#include <llvm-c/Analysis.h>
+#include <llvm-c/Transforms/PassBuilder.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_pie)
+{
+    ctx->context = LLVMContextCreate();
+    ctx->module  = LLVMModuleCreateWithNameInContext(module_name, ctx->context);
+    ctx->builder = LLVMCreateBuilderInContext(ctx->context);
+    ctx->no_pie  = no_pie;
+
+    // initialize target
+    LLVMInitializeAllTargetInfos();
+    LLVMInitializeAllTargets();
+    LLVMInitializeAllTargetMCs();
+    LLVMInitializeAllAsmParsers();
+    LLVMInitializeAllAsmPrinters();
+
+    char         *error = NULL;
+    LLVMTargetRef target;
+    if (LLVMGetTargetFromTriple(LLVMGetDefaultTargetTriple(), &target, &error) != 0)
+    {
+        fprintf(stderr, "error: failed to get target: %s\n", error);
+        LLVMDisposeMessage(error);
+        exit(EXIT_FAILURE);
+    }
+
+    ctx->target_machine = LLVMCreateTargetMachine(target, LLVMGetDefaultTargetTriple(), LLVMGetHostCPUName(), LLVMGetHostCPUFeatures(), LLVMCodeGenLevelDefault, ctx->no_pie ? LLVMRelocStatic : LLVMRelocPIC, LLVMCodeModelDefault);
+
+    ctx->data_layout = LLVMCreateTargetDataLayout(ctx->target_machine);
+    LLVMSetModuleDataLayout(ctx->module, ctx->data_layout);
+    LLVMSetTarget(ctx->module, LLVMGetDefaultTargetTriple());
+
+    // initialize maps
+    ctx->symbol_map.symbols  = NULL;
+    ctx->symbol_map.values   = NULL;
+    ctx->symbol_map.count    = 0;
+    ctx->symbol_map.capacity = 0;
+
+    ctx->type_cache.types      = NULL;
+    ctx->type_cache.llvm_types = NULL;
+    ctx->type_cache.count      = 0;
+    ctx->type_cache.capacity   = 0;
+
+    ctx->current_function = NULL;
+    ctx->break_block      = NULL;
+    ctx->continue_block   = NULL;
+
+    ctx->errors     = NULL;
+    ctx->has_errors = false;
+
+    ctx->opt_level  = 2;
+    ctx->debug_info = false;
+}
+
+void codegen_context_dnit(CodegenContext *ctx)
+{
+    // clean up errors
+    CodegenError *error = ctx->errors;
+    while (error)
+    {
+        CodegenError *next = error->next;
+        free(error->message);
+        free(error);
+        error = next;
+    }
+
+    // clean up maps
+    free(ctx->symbol_map.symbols);
+    free(ctx->symbol_map.values);
+    free(ctx->type_cache.types);
+    free(ctx->type_cache.llvm_types);
+
+    // clean up llvm
+    LLVMDisposeBuilder(ctx->builder);
+    LLVMDisposeModule(ctx->module);
+    LLVMDisposeTargetMachine(ctx->target_machine);
+    LLVMContextDispose(ctx->context);
+}
+
+bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *analyzer)
+{
+    if (root->kind != AST_PROGRAM)
+    {
+        codegen_error(ctx, root, "expected program node");
+        return false;
+    }
+
+    // note: builtin intrinsic functions like len() are handled directly in codegen_expr_call
+    // and do not need external declarations
+    (void)analyzer; // suppress unused warning
+
+    // generate top-level statements
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+        codegen_stmt(ctx, stmt);
+    }
+
+    // verify module
+    char *error = NULL;
+    if (LLVMVerifyModule(ctx->module, LLVMAbortProcessAction, &error) != 0)
+    {
+        fprintf(stderr, "error: module verification failed: %s\n", error);
+        LLVMDisposeMessage(error);
+        ctx->has_errors = true;
+    }
+
+    // run optimization passes
+    if (ctx->opt_level > 0 && !ctx->has_errors)
+    {
+        LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+
+        char opt_str[16];
+        snprintf(opt_str, sizeof(opt_str), "default<O%d>", ctx->opt_level);
+
+        LLVMRunPasses(ctx->module, opt_str, ctx->target_machine, options);
+        LLVMDisposePassBuilderOptions(options);
+    }
+
+    return !ctx->has_errors;
+}
+
+bool codegen_emit_object(CodegenContext *ctx, const char *filename)
+{
+    char *error = NULL;
+    if (LLVMTargetMachineEmitToFile(ctx->target_machine, ctx->module, (char *)filename, LLVMObjectFile, &error) != 0)
+    {
+        fprintf(stderr, "error: failed to emit object file: %s\n", error);
+        LLVMDisposeMessage(error);
+        return false;
+    }
+    return true;
+}
+
+bool codegen_emit_llvm_ir(CodegenContext *ctx, const char *filename)
+{
+    char *error = NULL;
+    if (LLVMPrintModuleToFile(ctx->module, filename, &error) != 0)
+    {
+        fprintf(stderr, "error: failed to emit llvm ir: %s\n", error);
+        LLVMDisposeMessage(error);
+        return false;
+    }
+    return true;
+}
+
+bool codegen_emit_assembly(CodegenContext *ctx, const char *filename)
+{
+    char *error = NULL;
+    if (LLVMTargetMachineEmitToFile(ctx->target_machine, ctx->module, (char *)filename, LLVMAssemblyFile, &error) != 0)
+    {
+        fprintf(stderr, "error: failed to emit assembly: %s\n", error);
+        LLVMDisposeMessage(error);
+        return false;
+    }
+    return true;
+}
+
+void codegen_error(CodegenContext *ctx, AstNode *node, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+
+    size_t len = vsnprintf(NULL, 0, fmt, args) + 1;
+    va_end(args);
+
+    char *message = malloc(len);
+    va_start(args, fmt);
+    vsnprintf(message, len, fmt, args);
+    va_end(args);
+
+    CodegenError *error = malloc(sizeof(CodegenError));
+    error->message      = message;
+    error->node         = node;
+    error->next         = ctx->errors;
+    ctx->errors         = error;
+    ctx->has_errors     = true;
+}
+
+void codegen_print_errors(CodegenContext *ctx)
+{
+    for (CodegenError *error = ctx->errors; error; error = error->next)
+    {
+        fprintf(stderr, "codegen error: %s\n", error->message);
+    }
+}
+
+LLVMTypeRef codegen_get_llvm_type(CodegenContext *ctx, Type *type)
+{
+    if (!type)
+        return NULL;
+
+    // check cache
+    for (int i = 0; i < ctx->type_cache.count; i++)
+    {
+        if (ctx->type_cache.types[i] == type)
+        {
+            return ctx->type_cache.llvm_types[i];
+        }
+    }
+
+    LLVMTypeRef llvm_type = NULL;
+
+    switch (type->kind)
+    {
+    case TYPE_U8:
+        llvm_type = LLVMInt8TypeInContext(ctx->context);
+        break;
+    case TYPE_U16:
+        llvm_type = LLVMInt16TypeInContext(ctx->context);
+        break;
+    case TYPE_U32:
+        llvm_type = LLVMInt32TypeInContext(ctx->context);
+        break;
+    case TYPE_U64:
+        llvm_type = LLVMInt64TypeInContext(ctx->context);
+        break;
+    case TYPE_I8:
+        llvm_type = LLVMInt8TypeInContext(ctx->context);
+        break;
+    case TYPE_I16:
+        llvm_type = LLVMInt16TypeInContext(ctx->context);
+        break;
+    case TYPE_I32:
+        llvm_type = LLVMInt32TypeInContext(ctx->context);
+        break;
+    case TYPE_I64:
+        llvm_type = LLVMInt64TypeInContext(ctx->context);
+        break;
+    case TYPE_F16:
+        llvm_type = LLVMHalfTypeInContext(ctx->context);
+        break;
+    case TYPE_F32:
+        llvm_type = LLVMFloatTypeInContext(ctx->context);
+        break;
+    case TYPE_F64:
+        llvm_type = LLVMDoubleTypeInContext(ctx->context);
+        break;
+    case TYPE_PTR:
+        llvm_type = LLVMPointerTypeInContext(ctx->context, 0);
+        break;
+    case TYPE_POINTER:
+        llvm_type = LLVMPointerTypeInContext(ctx->context, 0);
+        break;
+    case TYPE_ARRAY:
+    {
+        LLVMTypeRef elem_type = codegen_get_llvm_type(ctx, type->array.elem_type);
+        if (type->array.is_unbound)
+        {
+            // unbounded arrays are represented as fat pointers: {ptr data, u64 length}
+            LLVMTypeRef fat_ptr_fields[2] = {
+                LLVMPointerTypeInContext(ctx->context, 0), // data pointer
+                LLVMInt64TypeInContext(ctx->context)       // length (u64)
+            };
+            llvm_type = LLVMStructTypeInContext(ctx->context, fat_ptr_fields, 2, false);
+        }
+        else
+        {
+            llvm_type = LLVMArrayType2(elem_type, type->array.length);
+        }
+    }
+    break;
+    case TYPE_STRUCT:
+    {
+        // create opaque struct type first
+        llvm_type = LLVMStructCreateNamed(ctx->context, type->name);
+
+        // count fields
+        int field_count = 0;
+        for (Symbol *field = type->composite.fields; field; field = field->next)
+        {
+            field_count++;
+        }
+
+        // collect field types
+        LLVMTypeRef *field_types = malloc(sizeof(LLVMTypeRef) * field_count);
+        int          i           = 0;
+        for (Symbol *field = type->composite.fields; field; field = field->next)
+        {
+            field_types[i++] = codegen_get_llvm_type(ctx, field->type);
+        }
+
+        LLVMStructSetBody(llvm_type, field_types, field_count, false);
+        free(field_types);
+    }
+    break;
+    case TYPE_UNION:
+    {
+        // unions are represented as a struct with a single field of the largest member type
+        size_t      max_size     = 0;
+        LLVMTypeRef largest_type = NULL;
+
+        for (Symbol *field = type->composite.fields; field; field = field->next)
+        {
+            if (field->type->size > max_size)
+            {
+                max_size     = field->type->size;
+                largest_type = codegen_get_llvm_type(ctx, field->type);
+            }
+        }
+
+        if (largest_type)
+        {
+            llvm_type = LLVMStructTypeInContext(ctx->context, &largest_type, 1, false);
+        }
+        else
+        {
+            llvm_type = LLVMStructTypeInContext(ctx->context, NULL, 0, false);
+        }
+    }
+    break;
+    case TYPE_FUNCTION:
+    {
+        // functions are always represented as pointers in LLVM
+        llvm_type = LLVMPointerTypeInContext(ctx->context, 0);
+    }
+    break;
+    case TYPE_ALIAS:
+        llvm_type = codegen_get_llvm_type(ctx, type->alias.target);
+        break;
+    }
+
+    // cache the result
+    if (llvm_type)
+    {
+        if (ctx->type_cache.count >= ctx->type_cache.capacity)
+        {
+            ctx->type_cache.capacity   = ctx->type_cache.capacity ? ctx->type_cache.capacity * 2 : 16;
+            ctx->type_cache.types      = realloc(ctx->type_cache.types, sizeof(Type *) * ctx->type_cache.capacity);
+            ctx->type_cache.llvm_types = realloc(ctx->type_cache.llvm_types, sizeof(LLVMTypeRef) * ctx->type_cache.capacity);
+        }
+
+        ctx->type_cache.types[ctx->type_cache.count]      = type;
+        ctx->type_cache.llvm_types[ctx->type_cache.count] = llvm_type;
+        ctx->type_cache.count++;
+    }
+
+    return llvm_type;
+}
+
+LLVMValueRef codegen_get_symbol_value(CodegenContext *ctx, Symbol *symbol)
+{
+    for (int i = 0; i < ctx->symbol_map.count; i++)
+    {
+        if (ctx->symbol_map.symbols[i] == symbol)
+        {
+            return ctx->symbol_map.values[i];
+        }
+    }
+    return NULL;
+}
+
+void codegen_set_symbol_value(CodegenContext *ctx, Symbol *symbol, LLVMValueRef value)
+{
+    // check if already exists
+    for (int i = 0; i < ctx->symbol_map.count; i++)
+    {
+        if (ctx->symbol_map.symbols[i] == symbol)
+        {
+            ctx->symbol_map.values[i] = value;
+            return;
+        }
+    }
+
+    // add new mapping
+    if (ctx->symbol_map.count >= ctx->symbol_map.capacity)
+    {
+        ctx->symbol_map.capacity = ctx->symbol_map.capacity ? ctx->symbol_map.capacity * 2 : 16;
+        ctx->symbol_map.symbols  = realloc(ctx->symbol_map.symbols, sizeof(Symbol *) * ctx->symbol_map.capacity);
+        ctx->symbol_map.values   = realloc(ctx->symbol_map.values, sizeof(LLVMValueRef) * ctx->symbol_map.capacity);
+    }
+
+    ctx->symbol_map.symbols[ctx->symbol_map.count] = symbol;
+    ctx->symbol_map.values[ctx->symbol_map.count]  = value;
+    ctx->symbol_map.count++;
+}
+
+LLVMValueRef codegen_stmt(CodegenContext *ctx, AstNode *stmt)
+{
+    if (!stmt)
+        return NULL;
+
+    switch (stmt->kind)
+    {
+    case AST_STMT_VAR:
+    case AST_STMT_VAL:
+        return codegen_stmt_var(ctx, stmt);
+    case AST_STMT_FUN:
+        return codegen_stmt_fun(ctx, stmt);
+    case AST_STMT_RET:
+        return codegen_stmt_ret(ctx, stmt);
+    case AST_STMT_IF:
+        return codegen_stmt_if(ctx, stmt);
+    case AST_STMT_OR:
+        return codegen_stmt_if(ctx, stmt); // or statements have same structure as if
+    case AST_STMT_FOR:
+        return codegen_stmt_for(ctx, stmt);
+    case AST_STMT_BLOCK:
+        return codegen_stmt_block(ctx, stmt);
+    case AST_STMT_EXPR:
+        return codegen_stmt_expr(ctx, stmt);
+    case AST_STMT_BRK:
+        if (ctx->break_block)
+        {
+            LLVMBuildBr(ctx->builder, ctx->break_block);
+        }
+        else
+        {
+            codegen_error(ctx, stmt, "break outside loop");
+        }
+        return NULL;
+    case AST_STMT_CNT:
+        if (ctx->continue_block)
+        {
+            LLVMBuildBr(ctx->builder, ctx->continue_block);
+        }
+        else
+        {
+            codegen_error(ctx, stmt, "continue outside loop");
+        }
+        return NULL;
+    case AST_STMT_EXT:
+        // external declarations are handled during symbol resolution
+        return NULL;
+    case AST_STMT_DEF:
+        // type definitions don't generate code
+        return NULL;
+    case AST_STMT_STR:
+    case AST_STMT_UNI:
+        // struct/union definitions don't generate code directly
+        return NULL;
+    case AST_STMT_USE:
+        // use statements don't generate code
+        return NULL;
+    default:
+        codegen_error(ctx, stmt, "unimplemented statement kind: %s", ast_node_kind_to_string(stmt->kind));
+        return NULL;
+    }
+}
+
+LLVMValueRef codegen_stmt_block(CodegenContext *ctx, AstNode *stmt)
+{
+    LLVMValueRef last = NULL;
+
+    if (stmt->block_stmt.stmts)
+    {
+        for (int i = 0; i < stmt->block_stmt.stmts->count; i++)
+        {
+            last = codegen_stmt(ctx, stmt->block_stmt.stmts->items[i]);
+        }
+    }
+
+    return last;
+}
+
+LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
+{
+    if (!stmt->symbol || !stmt->type)
+    {
+        codegen_error(ctx, stmt, "variable declaration missing symbol or type info");
+        return NULL;
+    }
+
+    LLVMTypeRef llvm_type = codegen_get_llvm_type(ctx, stmt->type);
+    if (!llvm_type)
+    {
+        codegen_error(ctx, stmt, "failed to get llvm type for variable");
+        return NULL;
+    }
+
+    // allocate space for the variable
+    LLVMValueRef alloca = codegen_create_alloca(ctx, llvm_type, stmt->var_stmt.name);
+    codegen_set_symbol_value(ctx, stmt->symbol, alloca);
+
+    // initialize if needed
+    if (stmt->var_stmt.init)
+    {
+        LLVMValueRef init_value = codegen_expr(ctx, stmt->var_stmt.init);
+        if (!init_value)
+        {
+            codegen_error(ctx, stmt, "failed to generate initializer");
+            return NULL;
+        }
+
+        // handle struct literals specially - they return allocas that need to be copied
+        if (stmt->var_stmt.init->kind == AST_EXPR_STRUCT)
+        {
+            // copy the struct data from the temporary alloca to our variable
+            LLVMValueRef loaded_struct = LLVMBuildLoad2(ctx->builder, llvm_type, init_value, "");
+            LLVMBuildStore(ctx->builder, loaded_struct, alloca);
+        }
+        else
+        {
+            // for other expressions, load if needed and store
+            init_value = codegen_load_if_needed(ctx, init_value, stmt->var_stmt.init->type);
+            LLVMBuildStore(ctx->builder, init_value, alloca);
+        }
+    }
+
+    return alloca;
+}
+
+LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
+{
+    if (!stmt->symbol || !stmt->type)
+    {
+        codegen_error(ctx, stmt, "function declaration missing symbol or type info");
+        return NULL;
+    }
+
+    // get or create function
+    LLVMValueRef func = LLVMGetNamedFunction(ctx->module, stmt->fun_stmt.name);
+    if (!func)
+    {
+        // build proper function type
+        Type       *func_type   = stmt->type;
+        LLVMTypeRef return_type = func_type->function.return_type ? codegen_get_llvm_type(ctx, func_type->function.return_type) : LLVMVoidTypeInContext(ctx->context);
+
+        LLVMTypeRef *param_types = NULL;
+        if (func_type->function.param_count > 0)
+        {
+            param_types = malloc(sizeof(LLVMTypeRef) * func_type->function.param_count);
+            for (size_t i = 0; i < func_type->function.param_count; i++)
+            {
+                param_types[i] = codegen_get_llvm_type(ctx, func_type->function.param_types[i]);
+            }
+        }
+
+        LLVMTypeRef llvm_func_type = LLVMFunctionType(return_type, param_types, func_type->function.param_count, false);
+        func                       = LLVMAddFunction(ctx->module, stmt->fun_stmt.name, llvm_func_type);
+        free(param_types);
+    }
+
+    codegen_set_symbol_value(ctx, stmt->symbol, func);
+
+    // generate body if present
+    if (stmt->fun_stmt.body)
+    {
+        LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(ctx->context, func, "entry");
+        LLVMPositionBuilderAtEnd(ctx->builder, entry);
+
+        // save current function
+        LLVMValueRef prev_function = ctx->current_function;
+        ctx->current_function      = func;
+
+        // set parameter names and create allocas
+        if (stmt->fun_stmt.params)
+        {
+            for (int i = 0; i < stmt->fun_stmt.params->count; i++)
+            {
+                AstNode     *param       = stmt->fun_stmt.params->items[i];
+                LLVMValueRef param_value = LLVMGetParam(func, i);
+                LLVMSetValueName2(param_value, param->param_stmt.name, strlen(param->param_stmt.name));
+
+                // create alloca for parameter
+                LLVMTypeRef  param_type   = codegen_get_llvm_type(ctx, param->type);
+                LLVMValueRef param_alloca = codegen_create_alloca(ctx, param_type, param->param_stmt.name);
+                LLVMBuildStore(ctx->builder, param_value, param_alloca);
+
+                if (param->symbol)
+                {
+                    codegen_set_symbol_value(ctx, param->symbol, param_alloca);
+                }
+            }
+        }
+
+        // generate body
+        codegen_stmt(ctx, stmt->fun_stmt.body);
+
+        // add implicit return if needed
+        if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(ctx->builder)))
+        {
+            if (stmt->type->function.return_type == NULL)
+            {
+                LLVMBuildRetVoid(ctx->builder);
+            }
+            else
+            {
+                // missing return - this should have been caught by semantic analysis
+                codegen_error(ctx, stmt, "function missing return statement");
+            }
+        }
+
+        // restore previous function
+        ctx->current_function = prev_function;
+    }
+
+    return func;
+}
+
+LLVMValueRef codegen_stmt_ret(CodegenContext *ctx, AstNode *stmt)
+{
+    if (stmt->ret_stmt.expr)
+    {
+        LLVMValueRef value = codegen_expr(ctx, stmt->ret_stmt.expr);
+        if (!value)
+        {
+            codegen_error(ctx, stmt, "failed to generate return value");
+            return NULL;
+        }
+        value = codegen_load_if_needed(ctx, value, stmt->ret_stmt.expr->type);
+        return LLVMBuildRet(ctx->builder, value);
+    }
+    else
+    {
+        return LLVMBuildRetVoid(ctx->builder);
+    }
+}
+
+LLVMValueRef codegen_stmt_if(CodegenContext *ctx, AstNode *stmt)
+{
+    LLVMValueRef cond_value = codegen_expr(ctx, stmt->cond_stmt.cond);
+    if (!cond_value)
+    {
+        codegen_error(ctx, stmt, "failed to generate if condition");
+        return NULL;
+    }
+
+    // convert to i1
+    cond_value = LLVMBuildICmp(ctx->builder, LLVMIntNE, cond_value, LLVMConstInt(LLVMTypeOf(cond_value), 0, false), "ifcond");
+
+    LLVMBasicBlockRef then_block  = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "then");
+    LLVMBasicBlockRef else_block  = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "else");
+    LLVMBasicBlockRef merge_block = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "ifcont");
+
+    LLVMBuildCondBr(ctx->builder, cond_value, then_block, else_block);
+
+    // generate then block
+    LLVMPositionBuilderAtEnd(ctx->builder, then_block);
+    codegen_stmt(ctx, stmt->cond_stmt.body);
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(ctx->builder)))
+    {
+        LLVMBuildBr(ctx->builder, merge_block);
+    }
+
+    // generate else block (or chain)
+    LLVMPositionBuilderAtEnd(ctx->builder, else_block);
+    if (stmt->cond_stmt.stmt_or)
+    {
+        codegen_stmt(ctx, stmt->cond_stmt.stmt_or);
+    }
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(ctx->builder)))
+    {
+        LLVMBuildBr(ctx->builder, merge_block);
+    }
+
+    // continue at merge block
+    LLVMPositionBuilderAtEnd(ctx->builder, merge_block);
+
+    return NULL;
+}
+
+LLVMValueRef codegen_stmt_for(CodegenContext *ctx, AstNode *stmt)
+{
+    LLVMBasicBlockRef loop_block = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "loop");
+    LLVMBasicBlockRef body_block = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "loop.body");
+    LLVMBasicBlockRef exit_block = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "loop.exit");
+
+    // save loop context
+    LLVMBasicBlockRef prev_break    = ctx->break_block;
+    LLVMBasicBlockRef prev_continue = ctx->continue_block;
+    ctx->break_block                = exit_block;
+    ctx->continue_block             = loop_block;
+
+    // jump to loop header
+    LLVMBuildBr(ctx->builder, loop_block);
+
+    // generate loop header
+    LLVMPositionBuilderAtEnd(ctx->builder, loop_block);
+
+    if (stmt->for_stmt.cond)
+    {
+        LLVMValueRef cond_value = codegen_expr(ctx, stmt->for_stmt.cond);
+        if (!cond_value)
+        {
+            codegen_error(ctx, stmt, "failed to generate loop condition");
+            return NULL;
+        }
+
+        // convert to i1
+        cond_value = LLVMBuildICmp(ctx->builder, LLVMIntNE, cond_value, LLVMConstInt(LLVMTypeOf(cond_value), 0, false), "loopcond");
+
+        LLVMBuildCondBr(ctx->builder, cond_value, body_block, exit_block);
+    }
+    else
+    {
+        // infinite loop
+        LLVMBuildBr(ctx->builder, body_block);
+    }
+
+    // generate body
+    LLVMPositionBuilderAtEnd(ctx->builder, body_block);
+    codegen_stmt(ctx, stmt->for_stmt.body);
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(ctx->builder)))
+    {
+        LLVMBuildBr(ctx->builder, loop_block);
+    }
+
+    // restore loop context
+    ctx->break_block    = prev_break;
+    ctx->continue_block = prev_continue;
+
+    // continue at exit block
+    LLVMPositionBuilderAtEnd(ctx->builder, exit_block);
+
+    return NULL;
+}
+
+LLVMValueRef codegen_stmt_expr(CodegenContext *ctx, AstNode *stmt)
+{
+    return codegen_expr(ctx, stmt->expr_stmt.expr);
+}
+
+LLVMValueRef codegen_expr(CodegenContext *ctx, AstNode *expr)
+{
+    if (!expr)
+        return NULL;
+
+    switch (expr->kind)
+    {
+    case AST_EXPR_LIT:
+        return codegen_expr_lit(ctx, expr);
+    case AST_EXPR_IDENT:
+        return codegen_expr_ident(ctx, expr);
+    case AST_EXPR_BINARY:
+        return codegen_expr_binary(ctx, expr);
+    case AST_EXPR_UNARY:
+        return codegen_expr_unary(ctx, expr);
+    case AST_EXPR_CALL:
+        return codegen_expr_call(ctx, expr);
+    case AST_EXPR_CAST:
+        return codegen_expr_cast(ctx, expr);
+    case AST_EXPR_FIELD:
+        return codegen_expr_field(ctx, expr);
+    case AST_EXPR_INDEX:
+        return codegen_expr_index(ctx, expr);
+    case AST_EXPR_ARRAY:
+        return codegen_expr_array(ctx, expr);
+    case AST_EXPR_STRUCT:
+        return codegen_expr_struct(ctx, expr);
+    default:
+        codegen_error(ctx, expr, "unimplemented expression kind");
+        return NULL;
+    }
+}
+
+LLVMValueRef codegen_expr_lit(CodegenContext *ctx, AstNode *expr)
+{
+    switch (expr->lit_expr.kind)
+    {
+    case TOKEN_LIT_INT:
+    {
+        LLVMTypeRef type = codegen_get_llvm_type(ctx, expr->type);
+        return LLVMConstInt(type, expr->lit_expr.int_val, type_is_signed(expr->type));
+    }
+    case TOKEN_LIT_FLOAT:
+    {
+        LLVMTypeRef type = codegen_get_llvm_type(ctx, expr->type);
+        return LLVMConstReal(type, expr->lit_expr.float_val);
+    }
+    case TOKEN_LIT_CHAR:
+    {
+        LLVMTypeRef type = codegen_get_llvm_type(ctx, expr->type);
+        return LLVMConstInt(type, expr->lit_expr.char_val, false);
+    }
+    case TOKEN_LIT_STRING:
+    {
+        // create global string constant
+        LLVMValueRef str = LLVMBuildGlobalStringPtr(ctx->builder, expr->lit_expr.string_val, "str");
+        return str;
+    }
+    default:
+        codegen_error(ctx, expr, "unknown literal kind");
+        return NULL;
+    }
+}
+
+LLVMValueRef codegen_expr_ident(CodegenContext *ctx, AstNode *expr)
+{
+    if (!expr->symbol)
+    {
+        codegen_error(ctx, expr, "identifier has no symbol");
+        return NULL;
+    }
+
+    LLVMValueRef value = codegen_get_symbol_value(ctx, expr->symbol);
+    if (!value)
+    {
+        codegen_error(ctx, expr, "undefined symbol '%s'", expr->ident_expr.name);
+        return NULL;
+    }
+
+    // load value if it's a variable
+    if (expr->symbol->kind == SYMBOL_VAR || expr->symbol->kind == SYMBOL_VAL || expr->symbol->kind == SYMBOL_PARAM)
+    {
+        if (codegen_is_lvalue(expr))
+        {
+            return value; // return address for lvalues
+        }
+        else
+        {
+            return LLVMBuildLoad2(ctx->builder, codegen_get_llvm_type(ctx, expr->type), value, "");
+        }
+    }
+
+    return value;
+}
+
+LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr)
+{
+    // handle assignment specially
+    if (expr->binary_expr.op == TOKEN_EQUAL)
+    {
+        LLVMValueRef lhs = codegen_expr(ctx, expr->binary_expr.left);
+        LLVMValueRef rhs = codegen_expr(ctx, expr->binary_expr.right);
+
+        if (!lhs || !rhs)
+        {
+            codegen_error(ctx, expr, "failed to generate assignment operands");
+            return NULL;
+        }
+
+        // load rhs value if needed
+        rhs = codegen_load_if_needed(ctx, rhs, expr->binary_expr.right->type);
+
+        LLVMBuildStore(ctx->builder, rhs, lhs);
+        return rhs;
+    }
+
+    // generate operands
+    LLVMValueRef lhs = codegen_expr(ctx, expr->binary_expr.left);
+    LLVMValueRef rhs = codegen_expr(ctx, expr->binary_expr.right);
+
+    if (!lhs || !rhs)
+    {
+        codegen_error(ctx, expr, "failed to generate binary operands");
+        return NULL;
+    }
+
+    // load values if needed
+    lhs = codegen_load_if_needed(ctx, lhs, expr->binary_expr.left->type);
+    rhs = codegen_load_if_needed(ctx, rhs, expr->binary_expr.right->type);
+
+    // handle type conversions for comparison operations
+    Type *lhs_type = type_resolve_alias(expr->binary_expr.left->type);
+    Type *rhs_type = type_resolve_alias(expr->binary_expr.right->type);
+
+    // handle integer type mismatches by extending smaller type
+    if (type_is_integer(lhs_type) && type_is_integer(rhs_type) && lhs_type->kind != rhs_type->kind)
+    {
+        size_t lhs_size = type_sizeof(lhs_type);
+        size_t rhs_size = type_sizeof(rhs_type);
+
+        if (lhs_size < rhs_size)
+        {
+            bool        is_signed   = type_is_signed(lhs_type);
+            LLVMTypeRef target_type = codegen_get_llvm_type(ctx, rhs_type);
+            lhs                     = is_signed ? LLVMBuildSExt(ctx->builder, lhs, target_type, "sext") : LLVMBuildZExt(ctx->builder, lhs, target_type, "zext");
+        }
+        else if (rhs_size < lhs_size)
+        {
+            bool        is_signed   = type_is_signed(rhs_type);
+            LLVMTypeRef target_type = codegen_get_llvm_type(ctx, lhs_type);
+            rhs                     = is_signed ? LLVMBuildSExt(ctx->builder, rhs, target_type, "sext") : LLVMBuildZExt(ctx->builder, rhs, target_type, "zext");
+        }
+    }
+
+    // generate operation based on operator and types
+    bool is_float  = type_is_float(expr->type);
+    bool is_signed = type_is_signed(expr->type);
+
+    switch (expr->binary_expr.op)
+    {
+    case TOKEN_PLUS:
+        return is_float ? LLVMBuildFAdd(ctx->builder, lhs, rhs, "add") : LLVMBuildAdd(ctx->builder, lhs, rhs, "add");
+    case TOKEN_MINUS:
+        return is_float ? LLVMBuildFSub(ctx->builder, lhs, rhs, "sub") : LLVMBuildSub(ctx->builder, lhs, rhs, "sub");
+    case TOKEN_STAR:
+        return is_float ? LLVMBuildFMul(ctx->builder, lhs, rhs, "mul") : LLVMBuildMul(ctx->builder, lhs, rhs, "mul");
+    case TOKEN_SLASH:
+        return is_float ? LLVMBuildFDiv(ctx->builder, lhs, rhs, "div") : (is_signed ? LLVMBuildSDiv(ctx->builder, lhs, rhs, "div") : LLVMBuildUDiv(ctx->builder, lhs, rhs, "div"));
+    case TOKEN_PERCENT:
+        return is_signed ? LLVMBuildSRem(ctx->builder, lhs, rhs, "rem") : LLVMBuildURem(ctx->builder, lhs, rhs, "rem");
+    case TOKEN_EQUAL_EQUAL:
+        return LLVMBuildICmp(ctx->builder, LLVMIntEQ, lhs, rhs, "eq");
+    case TOKEN_BANG_EQUAL:
+        return LLVMBuildICmp(ctx->builder, LLVMIntNE, lhs, rhs, "ne");
+    case TOKEN_LESS:
+        return is_float ? LLVMBuildFCmp(ctx->builder, LLVMRealOLT, lhs, rhs, "lt") : LLVMBuildICmp(ctx->builder, LLVMIntSLT, lhs, rhs, "lt");
+    case TOKEN_LESS_EQUAL:
+        return is_float ? LLVMBuildFCmp(ctx->builder, LLVMRealOLE, lhs, rhs, "le") : LLVMBuildICmp(ctx->builder, LLVMIntSLE, lhs, rhs, "le");
+    case TOKEN_GREATER:
+        return is_float ? LLVMBuildFCmp(ctx->builder, LLVMRealOGT, lhs, rhs, "gt") : LLVMBuildICmp(ctx->builder, LLVMIntSGT, lhs, rhs, "gt");
+    case TOKEN_GREATER_EQUAL:
+        return is_float ? LLVMBuildFCmp(ctx->builder, LLVMRealOGE, lhs, rhs, "ge") : LLVMBuildICmp(ctx->builder, LLVMIntSGE, lhs, rhs, "ge");
+    case TOKEN_AMPERSAND_AMPERSAND:
+        return LLVMBuildAnd(ctx->builder, lhs, rhs, "and");
+    case TOKEN_PIPE_PIPE:
+        return LLVMBuildOr(ctx->builder, lhs, rhs, "or");
+    case TOKEN_CARET:
+        return LLVMBuildXor(ctx->builder, lhs, rhs, "xor");
+    case TOKEN_LESS_LESS:
+        return LLVMBuildShl(ctx->builder, lhs, rhs, "shl");
+    case TOKEN_GREATER_GREATER:
+        return is_signed ? LLVMBuildAShr(ctx->builder, lhs, rhs, "shr") : LLVMBuildLShr(ctx->builder, lhs, rhs, "shr");
+        {
+        default:
+            codegen_error(ctx, expr, "unimplemented binary operator");
+            return NULL;
+        }
+    }
+}
+
+LLVMValueRef codegen_expr_unary(CodegenContext *ctx, AstNode *expr)
+{
+    LLVMValueRef operand = codegen_expr(ctx, expr->unary_expr.expr);
+    if (!operand)
+    {
+        codegen_error(ctx, expr, "failed to generate unary operand");
+        return NULL;
+    }
+
+    switch (expr->unary_expr.op)
+    {
+    case TOKEN_MINUS:
+        operand = codegen_load_if_needed(ctx, operand, expr->unary_expr.expr->type);
+        if (type_is_float(expr->type))
+        {
+            return LLVMBuildFNeg(ctx->builder, operand, "neg");
+        }
+        else
+        {
+            return LLVMBuildNeg(ctx->builder, operand, "neg");
+        }
+    case TOKEN_QUESTION: // address-of
+        // for address-of, we want the address, not the value
+        // field expressions already return addresses (GEP), so just return directly
+        return operand;
+    case TOKEN_AT: // dereference
+        // for dereference, we always need to load the pointer value first if it's in an alloca/global
+        if (LLVMIsAAllocaInst(operand) || LLVMIsAGlobalVariable(operand) || LLVMIsAGetElementPtrInst(operand))
+        {
+            LLVMTypeRef ptr_type = codegen_get_llvm_type(ctx, expr->unary_expr.expr->type);
+            operand              = LLVMBuildLoad2(ctx->builder, ptr_type, operand, "");
+        }
+        // then dereference the pointer
+        return LLVMBuildLoad2(ctx->builder, codegen_get_llvm_type(ctx, expr->type), operand, "deref");
+    default:
+        codegen_error(ctx, expr, "unimplemented unary operator");
+        return NULL;
+    }
+}
+
+LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
+{
+    // check for builtin/intrinsic functions first
+    if (expr->call_expr.func->kind == AST_EXPR_IDENT)
+    {
+        const char *func_name = expr->call_expr.func->ident_expr.name;
+
+        // handle len() intrinsic
+        if (strcmp(func_name, "len") == 0)
+        {
+            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            {
+                codegen_error(ctx, expr, "len() expects exactly one argument");
+                return NULL;
+            }
+
+            AstNode *arg      = expr->call_expr.args->items[0];
+            Type    *arg_type = type_resolve_alias(arg->type);
+
+            if (arg_type->kind == TYPE_ARRAY)
+            {
+                // set the expression type for the len() call
+                expr->type = type_u64();
+
+                if (arg_type->array.is_unbound)
+                {
+                    // for unbounded arrays (fat pointers), extract length from struct
+                    LLVMValueRef array_val = codegen_expr(ctx, arg);
+                    if (!array_val)
+                    {
+                        codegen_error(ctx, expr, "failed to generate array argument for len()");
+                        return NULL;
+                    }
+                    array_val = codegen_load_if_needed(ctx, array_val, arg_type);
+                    return LLVMBuildExtractValue(ctx->builder, array_val, 1, "array_length");
+                }
+                else
+                {
+                    // for fixed-size arrays, return compile-time constant
+                    return LLVMConstInt(LLVMInt64TypeInContext(ctx->context), arg_type->array.length, false);
+                }
+            }
+            else
+            {
+                codegen_error(ctx, expr, "len() can only be applied to arrays");
+                return NULL;
+            }
+        }
+
+        // handle size_of() intrinsic
+        if (strcmp(func_name, "size_of") == 0)
+        {
+            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            {
+                codegen_error(ctx, expr, "size_of() expects exactly one argument");
+                return NULL;
+            }
+
+            AstNode *arg      = expr->call_expr.args->items[0];
+            Type    *arg_type = type_resolve_alias(arg->type);
+            size_t   size     = type_sizeof(arg_type);
+
+            // set the expression type for the size_of() call
+            expr->type = type_u64();
+
+            return LLVMConstInt(LLVMInt64TypeInContext(ctx->context), size, false);
+        }
+
+        // handle align_of() intrinsic
+        if (strcmp(func_name, "align_of") == 0)
+        {
+            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            {
+                codegen_error(ctx, expr, "align_of() expects exactly one argument");
+                return NULL;
+            }
+
+            AstNode *arg       = expr->call_expr.args->items[0];
+            Type    *arg_type  = type_resolve_alias(arg->type);
+            size_t   alignment = type_alignof(arg_type);
+
+            // set the expression type for the align_of() call
+            expr->type = type_u64();
+
+            return LLVMConstInt(LLVMInt64TypeInContext(ctx->context), alignment, false);
+        }
+    }
+
+    LLVMValueRef func = codegen_expr(ctx, expr->call_expr.func);
+    if (!func)
+    {
+        codegen_error(ctx, expr, "failed to generate function for call");
+        return NULL;
+    }
+
+    // load function pointer if needed (for function parameters)
+    func = codegen_load_if_needed(ctx, func, expr->call_expr.func->type);
+
+    // get function type early for parameter type checking
+    Type *func_type = type_resolve_alias(expr->call_expr.func->type);
+    if (!func_type || func_type->kind != TYPE_FUNCTION)
+    {
+        codegen_error(ctx, expr, "call expression does not have function type");
+        return NULL;
+    }
+
+    // generate arguments
+    int           arg_count = expr->call_expr.args ? expr->call_expr.args->count : 0;
+    LLVMValueRef *args      = NULL;
+
+    if (arg_count > 0)
+    {
+        args = malloc(sizeof(LLVMValueRef) * arg_count);
+        for (int i = 0; i < arg_count; i++)
+        {
+            args[i] = codegen_expr(ctx, expr->call_expr.args->items[i]);
+            if (!args[i])
+            {
+                free(args);
+                codegen_error(ctx, expr, "failed to generate call argument %d", i);
+                return NULL;
+            }
+
+            // get the expected parameter type
+            Type *param_type = func_type->function.param_types[i];
+            Type *arg_type   = expr->call_expr.args->items[i]->type;
+
+            // handle array-to-pointer conversion for function parameters
+            if (param_type->kind == TYPE_ARRAY && param_type->array.is_unbound && arg_type->kind == TYPE_ARRAY && !arg_type->array.is_unbound)
+            {
+                // convert fixed-size array to fat pointer
+                LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, param_type);
+                LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
+
+                // get pointer to first element of array
+                LLVMValueRef indices[]  = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false)};
+                LLVMTypeRef  array_type = codegen_get_llvm_type(ctx, arg_type);
+                LLVMValueRef data_ptr   = LLVMBuildGEP2(ctx->builder, array_type, args[i], indices, 2, "array_to_ptr");
+
+                // set data pointer in fat pointer
+                fat_ptr = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_ptr, 0, "fat_ptr_data");
+
+                // set length in fat pointer
+                LLVMValueRef length = LLVMConstInt(LLVMInt64TypeInContext(ctx->context), arg_type->array.length, false);
+                fat_ptr             = LLVMBuildInsertValue(ctx->builder, fat_ptr, length, 1, "fat_ptr_len");
+
+                args[i] = fat_ptr;
+            }
+            else
+            {
+                // load values for arguments
+                args[i] = codegen_load_if_needed(ctx, args[i], arg_type);
+            }
+        }
+    }
+
+    // build the actual function type for the call
+    LLVMTypeRef return_type = func_type->function.return_type ? codegen_get_llvm_type(ctx, func_type->function.return_type) : LLVMVoidTypeInContext(ctx->context);
+
+    LLVMTypeRef *param_types = NULL;
+    if (func_type->function.param_count > 0)
+    {
+        param_types = malloc(sizeof(LLVMTypeRef) * func_type->function.param_count);
+        for (size_t i = 0; i < func_type->function.param_count; i++)
+        {
+            param_types[i] = codegen_get_llvm_type(ctx, func_type->function.param_types[i]);
+        }
+    }
+
+    LLVMTypeRef  llvm_func_type = LLVMFunctionType(return_type, param_types, func_type->function.param_count, false);
+    LLVMValueRef result         = LLVMBuildCall2(ctx->builder, llvm_func_type, func, args, arg_count, "");
+
+    free(param_types);
+    free(args);
+    return result;
+}
+
+LLVMValueRef codegen_expr_cast(CodegenContext *ctx, AstNode *expr)
+{
+    LLVMValueRef value = codegen_expr(ctx, expr->cast_expr.expr);
+    if (!value)
+    {
+        codegen_error(ctx, expr, "failed to generate cast operand");
+        return NULL;
+    }
+
+    Type *from_type = expr->cast_expr.expr->type;
+    Type *to_type   = expr->type;
+
+    // for array to pointer decay, don't load the array value
+    bool is_array_decay = (from_type->kind == TYPE_ARRAY && (to_type->kind == TYPE_POINTER || to_type->kind == TYPE_PTR));
+    if (!is_array_decay)
+    {
+        value = codegen_load_if_needed(ctx, value, from_type);
+    }
+
+    LLVMTypeRef to_llvm_type = codegen_get_llvm_type(ctx, to_type);
+
+    // numeric casts
+    if (type_is_numeric(from_type) && type_is_numeric(to_type))
+    {
+        if (type_is_float(from_type) && type_is_float(to_type))
+        {
+            // float to float
+            if (from_type->size < to_type->size)
+            {
+                return LLVMBuildFPExt(ctx->builder, value, to_llvm_type, "fpext");
+            }
+            else if (from_type->size > to_type->size)
+            {
+                return LLVMBuildFPTrunc(ctx->builder, value, to_llvm_type, "fptrunc");
+            }
+            return value;
+        }
+        else if (type_is_float(from_type) && type_is_integer(to_type))
+        {
+            // float to int
+            if (type_is_signed(to_type))
+            {
+                return LLVMBuildFPToSI(ctx->builder, value, to_llvm_type, "fptosi");
+            }
+            else
+            {
+                return LLVMBuildFPToUI(ctx->builder, value, to_llvm_type, "fptoui");
+            }
+        }
+        else if (type_is_integer(from_type) && type_is_float(to_type))
+        {
+            // int to float
+            if (type_is_signed(from_type))
+            {
+                return LLVMBuildSIToFP(ctx->builder, value, to_llvm_type, "sitofp");
+            }
+            else
+            {
+                return LLVMBuildUIToFP(ctx->builder, value, to_llvm_type, "uitofp");
+            }
+        }
+        else
+        {
+            // int to int
+            if (from_type->size < to_type->size)
+            {
+                if (type_is_signed(from_type))
+                {
+                    return LLVMBuildSExt(ctx->builder, value, to_llvm_type, "sext");
+                }
+                else
+                {
+                    return LLVMBuildZExt(ctx->builder, value, to_llvm_type, "zext");
+                }
+            }
+            else if (from_type->size > to_type->size)
+            {
+                return LLVMBuildTrunc(ctx->builder, value, to_llvm_type, "trunc");
+            }
+            return value;
+        }
+    }
+
+    // array to pointer decay
+    if (from_type->kind == TYPE_ARRAY && (to_type->kind == TYPE_POINTER || to_type->kind == TYPE_PTR))
+    {
+        if (from_type->array.is_unbound)
+        {
+            // unbounded array (fat pointer) to pointer - extract data pointer
+            value = codegen_load_if_needed(ctx, value, from_type);
+            return LLVMBuildExtractValue(ctx->builder, value, 0, "array_decay");
+        }
+        else
+        {
+            // bounded array to pointer - get pointer to first element
+            LLVMValueRef indices[]       = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false)};
+            LLVMTypeRef  array_llvm_type = codegen_get_llvm_type(ctx, from_type);
+            return LLVMBuildGEP2(ctx->builder, array_llvm_type, value, indices, 2, "array_decay");
+        }
+    }
+
+    // pointer casts
+    if (type_is_pointer_like(from_type) && type_is_pointer_like(to_type))
+    {
+        return value; // all pointers are opaque in LLVM
+    }
+
+    codegen_error(ctx, expr, "unimplemented cast");
+    return NULL;
+}
+
+LLVMValueRef codegen_create_alloca(CodegenContext *ctx, LLVMTypeRef type, const char *name)
+{
+    // create allocas in entry block for better optimization
+    LLVMBasicBlockRef entry       = LLVMGetEntryBasicBlock(ctx->current_function);
+    LLVMBuilderRef    tmp_builder = LLVMCreateBuilderInContext(ctx->context);
+
+    // position at start of entry block
+    LLVMValueRef first_inst = LLVMGetFirstInstruction(entry);
+    if (first_inst)
+    {
+        LLVMPositionBuilderBefore(tmp_builder, first_inst);
+    }
+    else
+    {
+        LLVMPositionBuilderAtEnd(tmp_builder, entry);
+    }
+
+    LLVMValueRef alloca = LLVMBuildAlloca(tmp_builder, type, name);
+    LLVMDisposeBuilder(tmp_builder);
+
+    return alloca;
+}
+
+LLVMValueRef codegen_load_if_needed(CodegenContext *ctx, LLVMValueRef value, Type *type)
+{
+    // resolve any type aliases first
+    type = type_resolve_alias(type);
+
+    // if the expected type is a pointer (excluding functions), don't load
+    if (type->kind == TYPE_PTR || type->kind == TYPE_POINTER)
+    {
+        return value;
+    }
+
+    // check if this is already a loaded value or a function/constant
+    if (!LLVMIsAAllocaInst(value) && !LLVMIsAGlobalVariable(value) && !LLVMIsAGetElementPtrInst(value))
+    {
+        return value;
+    }
+
+    // load the value
+    LLVMTypeRef llvm_type = codegen_get_llvm_type(ctx, type);
+    return LLVMBuildLoad2(ctx->builder, llvm_type, value, "");
+}
+
+bool codegen_is_lvalue(AstNode *expr)
+{
+    switch (expr->kind)
+    {
+    case AST_EXPR_IDENT:
+        return true;
+    case AST_EXPR_INDEX:
+        return true;
+    case AST_EXPR_FIELD:
+        return codegen_is_lvalue(expr->field_expr.object);
+    case AST_EXPR_UNARY:
+        return expr->unary_expr.op == TOKEN_AT;
+    default:
+        return false;
+    }
+}
+
+LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
+{
+    LLVMValueRef object = codegen_expr(ctx, expr->field_expr.object);
+    if (!object)
+    {
+        codegen_error(ctx, expr, "failed to generate object for field access");
+        return NULL;
+    }
+
+    // get the object type
+    Type *object_type = expr->field_expr.object->type;
+    object_type       = type_resolve_alias(object_type);
+
+    if (object_type->kind != TYPE_STRUCT)
+    {
+        codegen_error(ctx, expr, "field access on non-struct type");
+        return NULL;
+    }
+
+    // find the field
+    Symbol *field_symbol = NULL;
+    int     field_index  = 0;
+    for (Symbol *field = object_type->composite.fields; field; field = field->next)
+    {
+        if (field->name && strcmp(field->name, expr->field_expr.field) == 0)
+        {
+            field_symbol = field;
+            break;
+        }
+        field_index++;
+    }
+
+    if (!field_symbol)
+    {
+        codegen_error(ctx, expr, "no field named '%s'", expr->field_expr.field);
+        return NULL;
+    }
+
+    // generate GEP for field access
+    LLVMValueRef indices[] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), field_index, false)};
+
+    LLVMTypeRef struct_type = codegen_get_llvm_type(ctx, object_type);
+    return LLVMBuildGEP2(ctx->builder, struct_type, object, indices, 2, "field");
+}
+
+LLVMValueRef codegen_expr_index(CodegenContext *ctx, AstNode *expr)
+{
+    LLVMValueRef array = codegen_expr(ctx, expr->index_expr.array);
+    LLVMValueRef index = codegen_expr(ctx, expr->index_expr.index);
+
+    if (!array || !index)
+    {
+        codegen_error(ctx, expr, "failed to generate array indexing operands");
+        return NULL;
+    }
+
+    // load index if needed
+    index = codegen_load_if_needed(ctx, index, expr->index_expr.index->type);
+
+    // get array type
+    Type *array_type = expr->index_expr.array->type;
+    array_type       = type_resolve_alias(array_type);
+
+    if (array_type->kind == TYPE_ARRAY)
+    {
+        if (array_type->array.is_unbound)
+        {
+            // unbounded array (fat pointer) indexing
+            // extract data pointer from fat pointer struct
+            LLVMValueRef fat_ptr   = codegen_load_if_needed(ctx, array, array_type);
+            LLVMValueRef data_ptr  = LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
+            LLVMTypeRef  elem_type = codegen_get_llvm_type(ctx, array_type->array.elem_type);
+            return LLVMBuildGEP2(ctx->builder, elem_type, data_ptr, &index, 1, "index");
+        }
+        else
+        {
+            // static array indexing
+            LLVMValueRef indices[]       = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), index};
+            LLVMTypeRef  llvm_array_type = codegen_get_llvm_type(ctx, array_type);
+            return LLVMBuildGEP2(ctx->builder, llvm_array_type, array, indices, 2, "index");
+        }
+    }
+    else if (array_type->kind == TYPE_POINTER || array_type->kind == TYPE_PTR)
+    {
+        // pointer indexing
+        array                 = codegen_load_if_needed(ctx, array, array_type);
+        LLVMTypeRef elem_type = codegen_get_llvm_type(ctx, expr->type);
+        return LLVMBuildGEP2(ctx->builder, elem_type, array, &index, 1, "index");
+    }
+    else
+    {
+        codegen_error(ctx, expr, "indexing non-array type");
+        return NULL;
+    }
+}
+
+LLVMValueRef codegen_expr_array(CodegenContext *ctx, AstNode *expr)
+{
+    Type *array_type = expr->type;
+    if (!array_type || array_type->kind != TYPE_ARRAY)
+    {
+        codegen_error(ctx, expr, "array literal has invalid type");
+        return NULL;
+    }
+
+    Type       *elem_type      = array_type->array.elem_type;
+    LLVMTypeRef llvm_elem_type = codegen_get_llvm_type(ctx, elem_type);
+    if (!llvm_elem_type)
+    {
+        return NULL;
+    }
+
+    size_t      elem_count      = expr->array_expr.elems ? expr->array_expr.elems->count : 0;
+    LLVMTypeRef llvm_array_type = LLVMArrayType(llvm_elem_type, elem_count);
+
+    // generate element values
+    LLVMValueRef *elem_values = malloc(sizeof(LLVMValueRef) * elem_count);
+    for (size_t i = 0; i < elem_count; i++)
+    {
+        elem_values[i] = codegen_expr(ctx, expr->array_expr.elems->items[i]);
+        if (!elem_values[i])
+        {
+            free(elem_values);
+            return NULL;
+        }
+        elem_values[i] = codegen_load_if_needed(ctx, elem_values[i], expr->array_expr.elems->items[i]->type);
+    }
+
+    // create array constant
+    LLVMValueRef array_const = LLVMConstArray(llvm_elem_type, elem_values, elem_count);
+
+    // for bounded arrays, allocate and store the array
+    if (!array_type->array.is_unbound)
+    {
+        LLVMValueRef alloca = LLVMBuildAlloca(ctx->builder, llvm_array_type, "array_lit");
+        LLVMBuildStore(ctx->builder, array_const, alloca);
+        free(elem_values);
+        return alloca;
+    }
+    else
+    {
+        // for unbounded arrays, create a global constant and return a fat pointer
+        static int global_counter = 0;
+        char       global_name[64];
+        snprintf(global_name, sizeof(global_name), "array_literal_%d", global_counter++);
+
+        LLVMValueRef global = LLVMAddGlobal(ctx->module, llvm_array_type, global_name);
+        LLVMSetInitializer(global, array_const);
+        LLVMSetGlobalConstant(global, 1);
+        LLVMSetLinkage(global, LLVMPrivateLinkage);
+
+        // create fat pointer struct {data, length}
+        LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, array_type);
+        LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
+
+        // set data pointer (cast global array to element pointer)
+        LLVMValueRef indices[2] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, 0), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, 0)};
+        LLVMValueRef data_ptr   = LLVMBuildGEP2(ctx->builder, llvm_array_type, global, indices, 2, "array_data");
+        fat_ptr                 = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_ptr, 0, "fat_ptr_data");
+
+        // set length
+        LLVMValueRef length = LLVMConstInt(LLVMInt64TypeInContext(ctx->context), elem_count, false);
+        fat_ptr             = LLVMBuildInsertValue(ctx->builder, fat_ptr, length, 1, "fat_ptr_len");
+
+        free(elem_values);
+        return fat_ptr;
+    }
+}
+
+LLVMValueRef codegen_expr_struct(CodegenContext *ctx, AstNode *expr)
+{
+    Type *struct_type = expr->type;
+    struct_type       = type_resolve_alias(struct_type);
+
+    if (struct_type->kind != TYPE_STRUCT)
+    {
+        codegen_error(ctx, expr, "struct literal has non-struct type");
+        return NULL;
+    }
+
+    LLVMTypeRef llvm_struct_type = codegen_get_llvm_type(ctx, struct_type);
+
+    // create a temporary alloca for the struct
+    LLVMValueRef struct_alloca = codegen_create_alloca(ctx, llvm_struct_type, "struct_lit");
+
+    // initialize to zero
+    LLVMBuildStore(ctx->builder, LLVMConstNull(llvm_struct_type), struct_alloca);
+
+    // process field initializers if any
+    if (expr->struct_expr.fields && expr->struct_expr.fields->count > 0)
+    {
+        for (int i = 0; i < expr->struct_expr.fields->count; i++)
+        {
+            AstNode *field_init = expr->struct_expr.fields->items[i];
+
+            // field initializers are stored as field expressions
+            if (field_init->kind == AST_EXPR_FIELD)
+            {
+                const char *field_name = field_init->field_expr.field;
+                AstNode    *init_value = field_init->field_expr.object;
+
+                // find the field
+                Symbol *field_symbol = NULL;
+                int     field_index  = 0;
+                for (Symbol *field = struct_type->composite.fields; field; field = field->next)
+                {
+                    if (field->name && strcmp(field->name, field_name) == 0)
+                    {
+                        field_symbol = field;
+                        break;
+                    }
+                    field_index++;
+                }
+
+                if (!field_symbol)
+                {
+                    codegen_error(ctx, field_init, "no field named '%s'", field_name);
+                    return NULL;
+                }
+
+                // generate the initializer value
+                LLVMValueRef value = codegen_expr(ctx, init_value);
+                if (!value)
+                {
+                    codegen_error(ctx, field_init, "failed to generate field initializer");
+                    return NULL;
+                }
+
+                value = codegen_load_if_needed(ctx, value, init_value->type);
+
+                // generate GEP for field and store
+                LLVMValueRef indices[] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), field_index, false)};
+
+                LLVMValueRef field_ptr = LLVMBuildGEP2(ctx->builder, llvm_struct_type, struct_alloca, indices, 2, "field_ptr");
+                LLVMBuildStore(ctx->builder, value, field_ptr);
+            }
+        }
+    }
+
+    return struct_alloca;
+}

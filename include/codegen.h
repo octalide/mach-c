@@ -111,6 +111,4 @@ LLVMValueRef codegen_create_alloca(CodegenContext *ctx, LLVMTypeRef type, const 
 LLVMValueRef codegen_load_if_needed(CodegenContext *ctx, LLVMValueRef value, Type *type);
 bool         codegen_is_lvalue(AstNode *expr);
 
-LLVMValueRef codegen_vla_alloc(CodegenContext *ctx, AstNode *stmt);
-
 #endif

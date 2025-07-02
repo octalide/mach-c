@@ -46,25 +46,23 @@ typedef struct Type
             struct Type *base;
         } pointer;
 
-        // TYPE_ARRAY
+        // TYPE_ARRAY (fat pointer: {data, len})
         struct
         {
             struct Type *elem_type;
-            size_t       length; // 0 for unbound arrays
-            bool         is_unbound;
         } array;
 
         // TYPE_STRUCT, TYPE_UNION
         struct
         {
-            Symbol *fields; // linked list of field symbols
+            Symbol *fields;
             size_t  field_count;
         } composite;
 
         // TYPE_FUNCTION
         struct
         {
-            struct Type  *return_type; // NULL for no return
+            struct Type  *return_type;
             struct Type **param_types;
             size_t        param_count;
         } function;
@@ -97,7 +95,7 @@ Type *type_ptr(void);
 
 // type constructors
 Type *type_pointer_create(Type *base);
-Type *type_array_create(Type *elem_type, size_t length, bool is_unbound);
+Type *type_array_create(Type *elem_type);
 Type *type_struct_create(const char *name);
 Type *type_union_create(const char *name);
 Type *type_function_create(Type *return_type, Type **param_types, size_t param_count);
@@ -121,6 +119,7 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table);
 Type *type_resolve_alias(Type *type); // resolve alias to underlying type
 
 // debug
-void type_print(Type *type);
+void  type_print(Type *type);
+char *type_to_string(Type *type);
 
 #endif // TYPE_H

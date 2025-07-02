@@ -251,20 +251,12 @@ LLVMTypeRef codegen_get_llvm_type(CodegenContext *ctx, Type *type)
         break;
     case TYPE_ARRAY:
     {
-        LLVMTypeRef elem_type = codegen_get_llvm_type(ctx, type->array.elem_type);
-        if (type->array.is_unbound)
-        {
-            // unbounded arrays are represented as fat pointers: {ptr data, u64 length}
-            LLVMTypeRef fat_ptr_fields[2] = {
-                LLVMPointerTypeInContext(ctx->context, 0), // data pointer
-                LLVMInt64TypeInContext(ctx->context)       // length (u64)
-            };
-            llvm_type = LLVMStructTypeInContext(ctx->context, fat_ptr_fields, 2, false);
-        }
-        else
-        {
-            llvm_type = LLVMArrayType2(elem_type, type->array.length);
-        }
+        // all arrays are fat pointers: {ptr data, u64 length}
+        LLVMTypeRef fat_ptr_fields[2] = {
+            LLVMPointerTypeInContext(ctx->context, 0), // data pointer
+            LLVMInt64TypeInContext(ctx->context)       // length (u64)
+        };
+        llvm_type = LLVMStructTypeInContext(ctx->context, fat_ptr_fields, 2, false);
     }
     break;
     case TYPE_STRUCT:
@@ -489,18 +481,34 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
             return NULL;
         }
 
-        // handle struct literals specially - they return allocas that need to be copied
-        if (stmt->var_stmt.init->kind == AST_EXPR_STRUCT)
+        // for global variables, set the initializer directly
+        if (!ctx->current_function)
         {
-            // copy the struct data from the temporary alloca to our variable
-            LLVMValueRef loaded_struct = LLVMBuildLoad2(ctx->builder, llvm_type, init_value, "");
-            LLVMBuildStore(ctx->builder, loaded_struct, alloca);
+            if (LLVMIsConstant(init_value))
+            {
+                LLVMSetInitializer(alloca, init_value);
+            }
+            else
+            {
+                codegen_error(ctx, stmt, "global variable initializer must be constant");
+                return NULL;
+            }
         }
         else
         {
-            // for other expressions, load if needed and store
-            init_value = codegen_load_if_needed(ctx, init_value, stmt->var_stmt.init->type);
-            LLVMBuildStore(ctx->builder, init_value, alloca);
+            // handle struct literals specially - they return allocas that need to be copied
+            if (stmt->var_stmt.init->kind == AST_EXPR_STRUCT)
+            {
+                // copy the struct data from the temporary alloca to our variable
+                LLVMValueRef loaded_struct = LLVMBuildLoad2(ctx->builder, llvm_type, init_value, "");
+                LLVMBuildStore(ctx->builder, loaded_struct, alloca);
+            }
+            else
+            {
+                // for other expressions, load if needed and store
+                init_value = codegen_load_if_needed(ctx, init_value, stmt->var_stmt.init->type);
+                LLVMBuildStore(ctx->builder, init_value, alloca);
+            }
         }
     }
 
@@ -980,25 +988,15 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
             if (arg_type->kind == TYPE_ARRAY)
             {
                 // set the expression type for the len() call
-                expr->type = type_u64();
-
-                if (arg_type->array.is_unbound)
+                expr->type             = type_u64();
+                LLVMValueRef array_val = codegen_expr(ctx, arg);
+                if (!array_val)
                 {
-                    // for unbounded arrays (fat pointers), extract length from struct
-                    LLVMValueRef array_val = codegen_expr(ctx, arg);
-                    if (!array_val)
-                    {
-                        codegen_error(ctx, expr, "failed to generate array argument for len()");
-                        return NULL;
-                    }
-                    array_val = codegen_load_if_needed(ctx, array_val, arg_type);
-                    return LLVMBuildExtractValue(ctx->builder, array_val, 1, "array_length");
+                    codegen_error(ctx, expr, "failed to generate array argument for len()");
+                    return NULL;
                 }
-                else
-                {
-                    // for fixed-size arrays, return compile-time constant
-                    return LLVMConstInt(LLVMInt64TypeInContext(ctx->context), arg_type->array.length, false);
-                }
+                array_val = codegen_load_if_needed(ctx, array_val, arg_type);
+                return LLVMBuildExtractValue(ctx->builder, array_val, 1, "array_length");
             }
             else
             {
@@ -1086,25 +1084,10 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
             Type *arg_type   = expr->call_expr.args->items[i]->type;
 
             // handle array-to-pointer conversion for function parameters
-            if (param_type->kind == TYPE_ARRAY && param_type->array.is_unbound && arg_type->kind == TYPE_ARRAY && !arg_type->array.is_unbound)
+            if (param_type->kind == TYPE_ARRAY && arg_type->kind == TYPE_ARRAY)
             {
-                // convert fixed-size array to fat pointer
-                LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, param_type);
-                LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
-
-                // get pointer to first element of array
-                LLVMValueRef indices[]  = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false)};
-                LLVMTypeRef  array_type = codegen_get_llvm_type(ctx, arg_type);
-                LLVMValueRef data_ptr   = LLVMBuildGEP2(ctx->builder, array_type, args[i], indices, 2, "array_to_ptr");
-
-                // set data pointer in fat pointer
-                fat_ptr = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_ptr, 0, "fat_ptr_data");
-
-                // set length in fat pointer
-                LLVMValueRef length = LLVMConstInt(LLVMInt64TypeInContext(ctx->context), arg_type->array.length, false);
-                fat_ptr             = LLVMBuildInsertValue(ctx->builder, fat_ptr, length, 1, "fat_ptr_len");
-
-                args[i] = fat_ptr;
+                // pass fat pointer as-is for arrays
+                args[i] = codegen_load_if_needed(ctx, args[i], arg_type);
             }
             else
             {
@@ -1221,19 +1204,9 @@ LLVMValueRef codegen_expr_cast(CodegenContext *ctx, AstNode *expr)
     // array to pointer decay
     if (from_type->kind == TYPE_ARRAY && (to_type->kind == TYPE_POINTER || to_type->kind == TYPE_PTR))
     {
-        if (from_type->array.is_unbound)
-        {
-            // unbounded array (fat pointer) to pointer - extract data pointer
-            value = codegen_load_if_needed(ctx, value, from_type);
-            return LLVMBuildExtractValue(ctx->builder, value, 0, "array_decay");
-        }
-        else
-        {
-            // bounded array to pointer - get pointer to first element
-            LLVMValueRef indices[]       = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false)};
-            LLVMTypeRef  array_llvm_type = codegen_get_llvm_type(ctx, from_type);
-            return LLVMBuildGEP2(ctx->builder, array_llvm_type, value, indices, 2, "array_decay");
-        }
+        // fat pointer to pointer - extract data pointer
+        value = codegen_load_if_needed(ctx, value, from_type);
+        return LLVMBuildExtractValue(ctx->builder, value, 0, "array_decay");
     }
 
     // pointer casts
@@ -1248,6 +1221,16 @@ LLVMValueRef codegen_expr_cast(CodegenContext *ctx, AstNode *expr)
 
 LLVMValueRef codegen_create_alloca(CodegenContext *ctx, LLVMTypeRef type, const char *name)
 {
+    // if we're not in a function, this is a global variable - handle differently
+    if (!ctx->current_function)
+    {
+        // create a global variable instead of an alloca
+        LLVMValueRef global = LLVMAddGlobal(ctx->module, type, name);
+        LLVMSetInitializer(global, LLVMConstNull(type));
+        LLVMSetLinkage(global, LLVMInternalLinkage);
+        return global;
+    }
+
     // create allocas in entry block for better optimization
     LLVMBasicBlockRef entry       = LLVMGetEntryBasicBlock(ctx->current_function);
     LLVMBuilderRef    tmp_builder = LLVMCreateBuilderInContext(ctx->context);
@@ -1373,22 +1356,47 @@ LLVMValueRef codegen_expr_index(CodegenContext *ctx, AstNode *expr)
 
     if (array_type->kind == TYPE_ARRAY)
     {
-        if (array_type->array.is_unbound)
+        // runtime bounds checking for all arrays (fat pointer)
+        LLVMBasicBlockRef bounds_fail_block = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "bounds_fail");
+        LLVMBasicBlockRef bounds_ok_block   = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "bounds_ok");
+
+        // extract fat pointer fields
+        LLVMValueRef fat_ptr  = codegen_load_if_needed(ctx, array, array_type);
+        LLVMValueRef length   = LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
+        LLVMValueRef data_ptr = LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
+
+        LLVMValueRef bounds_violated;
+        if (type_is_signed(expr->index_expr.index->type))
         {
-            // unbounded array (fat pointer) indexing
-            // extract data pointer from fat pointer struct
-            LLVMValueRef fat_ptr   = codegen_load_if_needed(ctx, array, array_type);
-            LLVMValueRef data_ptr  = LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
-            LLVMTypeRef  elem_type = codegen_get_llvm_type(ctx, array_type->array.elem_type);
-            return LLVMBuildGEP2(ctx->builder, elem_type, data_ptr, &index, 1, "index");
+            LLVMValueRef zero         = LLVMConstInt(LLVMTypeOf(index), 0, false);
+            LLVMValueRef is_negative  = LLVMBuildICmp(ctx->builder, LLVMIntSLT, index, zero, "is_negative");
+            LLVMValueRef index_ext    = LLVMBuildSExt(ctx->builder, index, LLVMTypeOf(length), "index_ext");
+            LLVMValueRef is_too_large = LLVMBuildICmp(ctx->builder, LLVMIntSGE, index_ext, length, "is_too_large");
+            bounds_violated           = LLVMBuildOr(ctx->builder, is_negative, is_too_large, "bounds_violated");
         }
         else
         {
-            // static array indexing
-            LLVMValueRef indices[]       = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), index};
-            LLVMTypeRef  llvm_array_type = codegen_get_llvm_type(ctx, array_type);
-            return LLVMBuildGEP2(ctx->builder, llvm_array_type, array, indices, 2, "index");
+            LLVMValueRef index_ext = LLVMBuildZExt(ctx->builder, index, LLVMTypeOf(length), "index_ext");
+            bounds_violated        = LLVMBuildICmp(ctx->builder, LLVMIntUGE, index_ext, length, "bounds_violated");
         }
+
+        LLVMBuildCondBr(ctx->builder, bounds_violated, bounds_fail_block, bounds_ok_block);
+
+        // bounds fail: call abort
+        LLVMPositionBuilderAtEnd(ctx->builder, bounds_fail_block);
+        LLVMTypeRef  abort_type = LLVMFunctionType(LLVMVoidTypeInContext(ctx->context), NULL, 0, false);
+        LLVMValueRef abort_func = LLVMGetNamedFunction(ctx->module, "abort");
+        if (!abort_func)
+        {
+            abort_func = LLVMAddFunction(ctx->module, "abort", abort_type);
+        }
+        LLVMBuildCall2(ctx->builder, abort_type, abort_func, NULL, 0, "");
+        LLVMBuildUnreachable(ctx->builder);
+
+        // continue with bounds ok - do the actual indexing
+        LLVMPositionBuilderAtEnd(ctx->builder, bounds_ok_block);
+        LLVMTypeRef elem_type = codegen_get_llvm_type(ctx, array_type->array.elem_type);
+        return LLVMBuildGEP2(ctx->builder, elem_type, data_ptr, &index, 1, "index");
     }
     else if (array_type->kind == TYPE_POINTER || array_type->kind == TYPE_PTR)
     {
@@ -1439,42 +1447,31 @@ LLVMValueRef codegen_expr_array(CodegenContext *ctx, AstNode *expr)
     // create array constant
     LLVMValueRef array_const = LLVMConstArray(llvm_elem_type, elem_values, elem_count);
 
-    // for bounded arrays, allocate and store the array
-    if (!array_type->array.is_unbound)
-    {
-        LLVMValueRef alloca = LLVMBuildAlloca(ctx->builder, llvm_array_type, "array_lit");
-        LLVMBuildStore(ctx->builder, array_const, alloca);
-        free(elem_values);
-        return alloca;
-    }
-    else
-    {
-        // for unbounded arrays, create a global constant and return a fat pointer
-        static int global_counter = 0;
-        char       global_name[64];
-        snprintf(global_name, sizeof(global_name), "array_literal_%d", global_counter++);
+    // always create a global constant and return a fat pointer
+    static int global_counter = 0;
+    char       global_name[64];
+    snprintf(global_name, sizeof(global_name), "array_literal_%d", global_counter++);
 
-        LLVMValueRef global = LLVMAddGlobal(ctx->module, llvm_array_type, global_name);
-        LLVMSetInitializer(global, array_const);
-        LLVMSetGlobalConstant(global, 1);
-        LLVMSetLinkage(global, LLVMPrivateLinkage);
+    LLVMValueRef global = LLVMAddGlobal(ctx->module, llvm_array_type, global_name);
+    LLVMSetInitializer(global, array_const);
+    LLVMSetGlobalConstant(global, 1);
+    LLVMSetLinkage(global, LLVMPrivateLinkage);
 
-        // create fat pointer struct {data, length}
-        LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, array_type);
-        LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
+    // create fat pointer struct {data, length}
+    LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, array_type);
+    LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
 
-        // set data pointer (cast global array to element pointer)
-        LLVMValueRef indices[2] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, 0), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, 0)};
-        LLVMValueRef data_ptr   = LLVMBuildGEP2(ctx->builder, llvm_array_type, global, indices, 2, "array_data");
-        fat_ptr                 = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_ptr, 0, "fat_ptr_data");
+    // set data pointer (cast global array to element pointer)
+    LLVMValueRef indices[2] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, 0), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, 0)};
+    LLVMValueRef data_ptr   = LLVMBuildGEP2(ctx->builder, llvm_array_type, global, indices, 2, "array_data");
+    fat_ptr                 = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_ptr, 0, "fat_ptr_data");
 
-        // set length
-        LLVMValueRef length = LLVMConstInt(LLVMInt64TypeInContext(ctx->context), elem_count, false);
-        fat_ptr             = LLVMBuildInsertValue(ctx->builder, fat_ptr, length, 1, "fat_ptr_len");
+    // set length
+    LLVMValueRef length = LLVMConstInt(LLVMInt64TypeInContext(ctx->context), elem_count, false);
+    fat_ptr             = LLVMBuildInsertValue(ctx->builder, fat_ptr, length, 1, "fat_ptr_len");
 
-        free(elem_values);
-        return fat_ptr;
-    }
+    free(elem_values);
+    return fat_ptr;
 }
 
 LLVMValueRef codegen_expr_struct(CodegenContext *ctx, AstNode *expr)

@@ -120,16 +120,14 @@ Type *type_pointer_create(Type *base)
     return type;
 }
 
-Type *type_array_create(Type *elem_type, size_t length, bool is_unbound)
+Type *type_array_create(Type *elem_type)
 {
-    Type *type             = malloc(sizeof(Type));
-    type->kind             = TYPE_ARRAY;
-    type->size             = is_unbound ? 8 : (elem_type->size * length); // unbound arrays are pointers
-    type->alignment        = is_unbound ? 8 : elem_type->alignment;
-    type->name             = NULL;
-    type->array.elem_type  = elem_type;
-    type->array.length     = length;
-    type->array.is_unbound = is_unbound;
+    Type *type            = malloc(sizeof(Type));
+    type->kind            = TYPE_ARRAY;
+    type->size            = 16; // fat pointer: {void *data, u64 len}
+    type->alignment       = 8;
+    type->name            = NULL;
+    type->array.elem_type = elem_type;
     return type;
 }
 
@@ -213,7 +211,7 @@ bool type_equals(Type *a, Type *b)
         return type_equals(a->pointer.base, b->pointer.base);
 
     case TYPE_ARRAY:
-        return a->array.length == b->array.length && a->array.is_unbound == b->array.is_unbound && type_equals(a->array.elem_type, b->array.elem_type);
+        return type_equals(a->array.elem_type, b->array.elem_type);
 
     case TYPE_FUNCTION:
         if (a->function.param_count != b->function.param_count)
@@ -282,7 +280,7 @@ bool type_is_pointer_like(Type *type)
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
-    return type->kind == TYPE_PTR || type->kind == TYPE_POINTER || type->kind == TYPE_FUNCTION || (type->kind == TYPE_ARRAY && type->array.is_unbound);
+    return type->kind == TYPE_PTR || type->kind == TYPE_POINTER || type->kind == TYPE_FUNCTION || type->kind == TYPE_ARRAY;
 }
 
 bool type_is_truthy(Type *type)
@@ -363,16 +361,6 @@ bool type_can_assign_to(Type *from, Type *to)
         return type_equals(from->array.elem_type, to->pointer.base);
     }
 
-    // fixed-size array to unbounded array conversion
-    if (from->kind == TYPE_ARRAY && to->kind == TYPE_ARRAY)
-    {
-        // allow fixed-size array to be passed to unbounded array parameter
-        if (!from->array.is_unbound && to->array.is_unbound)
-        {
-            return type_equals(from->array.elem_type, to->array.elem_type);
-        }
-    }
-
     // NO implicit pointer ↔ integer conversions for assignments
     return false;
 }
@@ -385,67 +373,6 @@ size_t type_sizeof(Type *type)
 size_t type_alignof(Type *type)
 {
     return type->alignment;
-}
-
-// simple constant expression evaluation for array sizes
-static long long evaluate_const_expr(AstNode *expr)
-{
-    if (!expr)
-        return -1;
-
-    switch (expr->kind)
-    {
-    case AST_EXPR_LIT:
-        if (expr->lit_expr.kind == TOKEN_LIT_INT)
-        {
-            return (long long)expr->lit_expr.int_val;
-        }
-        break;
-
-    case AST_EXPR_BINARY:
-    {
-        long long left  = evaluate_const_expr(expr->binary_expr.left);
-        long long right = evaluate_const_expr(expr->binary_expr.right);
-        if (left < 0 || right < 0)
-            return -1;
-
-        switch (expr->binary_expr.op)
-        {
-        case TOKEN_PLUS:
-            return left + right;
-        case TOKEN_MINUS:
-            return left - right;
-        case TOKEN_STAR:
-            return left * right;
-        case TOKEN_SLASH:
-            return right != 0 ? left / right : -1;
-        default:
-            return -1;
-        }
-    }
-
-    case AST_EXPR_UNARY:
-    {
-        long long operand = evaluate_const_expr(expr->unary_expr.expr);
-        if (operand < 0)
-            return -1;
-
-        switch (expr->unary_expr.op)
-        {
-        case TOKEN_PLUS:
-            return operand;
-        case TOKEN_MINUS:
-            return -operand;
-        default:
-            return -1;
-        }
-    }
-
-    default:
-        return -1; // unsupported expression for constant evaluation
-    }
-
-    return -1;
 }
 
 Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
@@ -494,22 +421,8 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
         Type *elem_type = type_resolve(type_node->type_array.elem_type, symbol_table);
         if (!elem_type)
             return NULL;
-
-        if (!type_node->type_array.size)
-        {
-            // unbound array
-            return type_array_create(elem_type, 0, true);
-        }
-        else
-        {
-            // evaluate array size expression
-            long long size = evaluate_const_expr(type_node->type_array.size);
-            if (size <= 0)
-            {
-                return NULL; // invalid array size
-            }
-            return type_array_create(elem_type, (size_t)size, false);
-        }
+        // all arrays are fat pointers
+        return type_array_create(elem_type);
     }
 
     case AST_TYPE_FUN:
@@ -563,12 +476,20 @@ Type *type_resolve_alias(Type *type)
 
 void type_print(Type *type)
 {
-    if (!type)
+    char *str = type_to_string(type);
+    if (str)
     {
-        printf("(null)");
-        return;
+        printf("%s", str);
+        free(str);
     }
+}
 
+char *type_to_string(Type *type)
+{
+    if (!type)
+        return strdup("(null)");
+
+    char *result = malloc(256);
     switch (type->kind)
     {
     case TYPE_U8:
@@ -583,51 +504,48 @@ void type_print(Type *type)
     case TYPE_F32:
     case TYPE_F64:
     case TYPE_PTR:
-        printf("%s", type->name);
+        snprintf(result, 256, "%s", type->name);
         break;
 
     case TYPE_POINTER:
-        printf("*");
-        type_print(type->pointer.base);
+        snprintf(result, 256, "*%s", type_to_string(type->pointer.base));
         break;
 
     case TYPE_ARRAY:
-        if (type->array.is_unbound)
-        {
-            printf("[]");
-        }
-        else
-        {
-            printf("[%zu]", type->array.length);
-        }
-        type_print(type->array.elem_type);
+        snprintf(result, 256, "[]%s", type_to_string(type->array.elem_type));
         break;
 
     case TYPE_STRUCT:
-        printf("str %s", type->name ? type->name : "(anonymous)");
+        snprintf(result, 256, "str %s", type->name ? type->name : "(anonymous)");
         break;
 
     case TYPE_UNION:
-        printf("uni %s", type->name ? type->name : "(anonymous)");
+        snprintf(result, 256, "uni %s", type->name ? type->name : "(anonymous)");
         break;
 
     case TYPE_FUNCTION:
-        printf("fun(");
+        snprintf(result, 256, "fun(");
         for (size_t i = 0; i < type->function.param_count; i++)
         {
             if (i > 0)
-                printf(", ");
-            type_print(type->function.param_types[i]);
+                strcat(result, ", ");
+            char *param_str = type_to_string(type->function.param_types[i]);
+            strcat(result, param_str);
+            free(param_str);
         }
-        printf(") ");
+        strcat(result, ") ");
         if (type->function.return_type)
         {
-            type_print(type->function.return_type);
+            char *return_str = type_to_string(type->function.return_type);
+            strcat(result, return_str);
+            free(return_str);
         }
         break;
 
     case TYPE_ALIAS:
-        printf("%s", type->name);
+        snprintf(result, 256, "%s", type->name);
         break;
     }
+
+    return result;
 }

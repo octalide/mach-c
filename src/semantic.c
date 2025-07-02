@@ -449,6 +449,7 @@ bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     {
         if (!semantic_check_assignment(analyzer, explicit_type, init_type, stmt))
         {
+            semantic_error(analyzer, stmt, "cannot assign %s to %s", type_to_string(init_type), type_to_string(explicit_type));
             return false;
         }
         final_type = explicit_type;
@@ -1208,6 +1209,7 @@ Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     // check array type
     if (array_type->kind == TYPE_ARRAY)
     {
+        // all arrays are fat pointers, so no compile-time bounds check
         expr->type = array_type->array.elem_type;
         return expr->type;
     }
@@ -1323,7 +1325,7 @@ Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     if (symbol->kind == SYMBOL_MODULE)
     {
         expr->type = NULL; // modules don't have a type per se
-        return NULL;       // but this is OK for field expressions
+        return type_ptr(); // return a dummy type to indicate success
     }
 
     expr->type = symbol->type;
@@ -1434,7 +1436,7 @@ Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *e
         return type_u8();
 
     case TOKEN_LIT_STRING:
-        expr->type = type_array_create(type_u8(), strlen(expr->lit_expr.string_val), true);
+        expr->type = type_array_create(type_u8());
         return expr->type;
 
     default:
@@ -1473,13 +1475,13 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             }
         }
 
-        // return the specified array type as-is (preserving unbound/bound nature)
+        // return the specified array type as-is
         expr->type = specified_type;
         return expr->type;
     }
     else
     {
-        // for T{...} syntax, create a new bound array of type T
+        // for T{...} syntax, create a new array of type T
         Type *elem_type = specified_type;
 
         if (expr->array_expr.elems)
@@ -1497,8 +1499,7 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             }
         }
 
-        size_t length = expr->array_expr.elems ? expr->array_expr.elems->count : 0;
-        expr->type    = type_array_create(elem_type, length, false);
+        expr->type = type_array_create(elem_type);
         return expr->type;
     }
 }

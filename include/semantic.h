@@ -14,6 +14,7 @@ typedef struct SemanticError
 {
     Token *token;
     char  *message;
+    char  *file_path; // file path for this error
 } SemanticError;
 
 typedef struct SemanticErrorList
@@ -83,7 +84,7 @@ bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, A
 // error handling
 void semantic_error_list_init(SemanticErrorList *list);
 void semantic_error_list_dnit(SemanticErrorList *list);
-void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *message);
+void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *message, const char *file_path);
 void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char *file_path);
 void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...);
 void semantic_warning(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...);

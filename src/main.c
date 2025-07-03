@@ -17,9 +17,13 @@ typedef struct BuildOptions
     bool        emit_asm;
     bool        emit_object;
     bool        link_executable;
-    bool        no_pie; // disable PIE
+    bool        build_library; // build as library instead of executable
+    bool        no_pie;        // disable PIE
     const char *output_file;
     int         opt_level;
+    char      **link_objects;  // additional object files to link
+    int         link_count;    // number of link objects
+    int         link_capacity; // capacity of link_objects array
 } BuildOptions;
 
 static void print_usage(const char *program_name)
@@ -31,12 +35,14 @@ static void print_usage(const char *program_name)
     fprintf(stderr, "\nbuild options:\n");
     fprintf(stderr, "  -o <file>     set output file name\n");
     fprintf(stderr, "  -O<level>     optimization level (0-3, default: 2)\n");
+    fprintf(stderr, "  --lib         build as library (shared object)\n");
     fprintf(stderr, "  --emit-ast    emit abstract syntax tree (.ast file)\n");
     fprintf(stderr, "  --emit-ir     emit llvm ir (.ll file)\n");
     fprintf(stderr, "  --emit-asm    emit assembly (.s file)\n");
     fprintf(stderr, "  --emit-obj    emit object file (.o file)\n");
     fprintf(stderr, "  --no-link     don't create executable (just compile)\n");
     fprintf(stderr, "  --no-pie      disable position independent executable\n");
+    fprintf(stderr, "  --link <obj>  link with additional object file\n");
 }
 
 static char *read_file(const char *path)
@@ -126,7 +132,11 @@ static int build_command(int argc, char **argv)
     const char  *filename   = argv[2];
     BuildOptions options    = {0};
     options.link_executable = true;
+    options.build_library   = false;
     options.opt_level       = 2;
+    options.link_objects    = NULL;
+    options.link_count      = 0;
+    options.link_capacity   = 0;
 
     // parse command line options
     for (int i = 3; i < argc; i++)
@@ -166,7 +176,13 @@ static int build_command(int argc, char **argv)
         }
         else if (strcmp(argv[i], "--emit-obj") == 0)
         {
-            options.emit_object = true;
+            options.emit_object     = true;
+            options.link_executable = false; // don't link when just emitting object
+        }
+        else if (strcmp(argv[i], "--lib") == 0)
+        {
+            options.build_library   = true;
+            options.link_executable = false;
         }
         else if (strcmp(argv[i], "--no-link") == 0)
         {
@@ -175,6 +191,24 @@ static int build_command(int argc, char **argv)
         else if (strcmp(argv[i], "--no-pie") == 0)
         {
             options.no_pie = true;
+        }
+        else if (strcmp(argv[i], "--link") == 0)
+        {
+            if (i + 1 < argc)
+            {
+                // add object file to link list
+                if (options.link_count >= options.link_capacity)
+                {
+                    options.link_capacity = options.link_capacity ? options.link_capacity * 2 : 4;
+                    options.link_objects  = realloc(options.link_objects, options.link_capacity * sizeof(char *));
+                }
+                options.link_objects[options.link_count++] = argv[++i];
+            }
+            else
+            {
+                fprintf(stderr, "error: --link requires an object file\n");
+                return 1;
+            }
         }
         else
         {
@@ -187,7 +221,12 @@ static int build_command(int argc, char **argv)
     char *default_output = NULL;
     if (!options.output_file)
     {
-        if (options.link_executable)
+        if (options.build_library)
+        {
+            default_output      = create_output_filename(filename, ".so");
+            options.output_file = default_output;
+        }
+        else if (options.link_executable)
         {
             default_output      = get_base_filename(filename);
             options.output_file = default_output;
@@ -307,6 +346,32 @@ static int build_command(int argc, char **argv)
         return 1;
     }
 
+    // ensure output directory exists for dependency compilation
+    if (system("mkdir -p bin/obj") != 0)
+    {
+        fprintf(stderr, "warning: failed to create bin/obj directory\n");
+    }
+
+    // compile module dependencies
+    if (!module_manager_compile_dependencies(&analyzer.module_manager, "bin/obj", options.opt_level, options.no_pie))
+    {
+        fprintf(stderr, "dependency compilation failed\n");
+        if (analyzer.module_manager.had_error)
+        {
+            module_error_list_print(&analyzer.module_manager.errors);
+        }
+
+        free(base_dir);
+        semantic_analyzer_dnit(&analyzer);
+        ast_node_dnit(program);
+        free(program);
+        parser_dnit(&parser);
+        lexer_dnit(&lexer);
+        free(source);
+        free(default_output);
+        return 1;
+    }
+
     // initialize codegen context
     printf("generating code...\n");
     fflush(stdout);
@@ -314,6 +379,14 @@ static int build_command(int argc, char **argv)
     CodegenContext codegen;
     codegen_context_init(&codegen, get_filename(filename), options.no_pie);
     codegen.opt_level = options.opt_level;
+
+    // check if we're compiling the runtime module
+    char *base_filename = get_filename(filename);
+    if (base_filename && strcmp(base_filename, "runtime.mach") == 0)
+    {
+        codegen.is_runtime = true;
+    }
+    free(base_filename);
 
     // generate code
     bool codegen_success = codegen_generate(&codegen, program, &analyzer);
@@ -370,9 +443,9 @@ static int build_command(int argc, char **argv)
         free(asm_file);
     }
 
-    if (options.emit_object || options.link_executable)
+    if (options.emit_object || options.link_executable || options.build_library)
     {
-        char *obj_file = options.output_file && options.emit_object && !options.link_executable ? strdup(options.output_file) : create_output_filename(filename, ".o");
+        char *obj_file = (options.output_file && options.emit_object && !options.link_executable && !options.build_library) ? strdup(options.output_file) : create_output_filename(filename, ".o");
 
         if (options.emit_object)
         {
@@ -396,29 +469,178 @@ static int build_command(int argc, char **argv)
             printf("linking executable '%s'...\n", output_exe);
             fflush(stdout);
 
-            // simple linking using system cc
-            char link_cmd[1024];
-            if (options.no_pie)
+            // compile runtime if not already compiled
+            char *runtime_obj = NULL;
+            if (base_dir)
             {
-                snprintf(link_cmd, sizeof(link_cmd), "cc -no-pie -o %s %s", output_exe, obj_file);
-            }
-            else
-            {
-                snprintf(link_cmd, sizeof(link_cmd), "cc -pie -o %s %s", output_exe, obj_file);
+                size_t runtime_path_len = strlen(base_dir) + strlen("/runtime/runtime.mach") + 1;
+                char  *runtime_path     = malloc(runtime_path_len);
+                snprintf(runtime_path, runtime_path_len, "%s/runtime/runtime.mach", base_dir);
+
+                if (access(runtime_path, F_OK) == 0)
+                {
+                    printf("compiling runtime...\n");
+                    fflush(stdout);
+
+                    // compile runtime to object file
+                    runtime_obj = create_output_filename(runtime_path, ".o");
+
+                    // recursive call to compile runtime
+                    size_t runtime_cmd_len = strlen(runtime_path) + strlen(runtime_obj) + 64;
+                    char  *runtime_cmd     = malloc(runtime_cmd_len);
+                    snprintf(runtime_cmd, runtime_cmd_len, "%s build %s -o %s --emit-obj --no-link", argv[0], runtime_path, runtime_obj);
+
+                    if (system(runtime_cmd) != 0)
+                    {
+                        fprintf(stderr, "error: failed to compile runtime\n");
+                        emit_success = false;
+                    }
+
+                    free(runtime_cmd);
+                }
+
+                free(runtime_path);
             }
 
-            if (system(link_cmd) == 0)
+            // get dependency object files
+            char **dep_objects = NULL;
+            int    dep_count   = 0;
+            if (!module_manager_get_link_objects(&analyzer.module_manager, &dep_objects, &dep_count))
             {
-                // remove temporary object file
-                if (!options.emit_object)
-                {
-                    unlink(obj_file);
-                }
+                printf("failed to collect dependency object files\n");
+                emit_success = false;
             }
             else
             {
-                printf("failed to link executable\n");
+                // construct linking command with all object files
+                size_t cmd_size = 1024 + (dep_count * 256) + (options.link_count * 256) + 256; // extra space for runtime
+                char  *link_cmd = malloc(cmd_size);
+
+                if (options.no_pie)
+                {
+                    snprintf(link_cmd, cmd_size, "cc -no-pie -o %s %s", output_exe, obj_file);
+                }
+                else
+                {
+                    snprintf(link_cmd, cmd_size, "cc -pie -o %s %s", output_exe, obj_file);
+                }
+
+                // append dependency object files
+                for (int i = 0; i < dep_count; i++)
+                {
+                    strcat(link_cmd, " ");
+                    strcat(link_cmd, dep_objects[i]);
+                }
+
+                // append runtime object file if available
+                if (runtime_obj)
+                {
+                    strcat(link_cmd, " ");
+                    strcat(link_cmd, runtime_obj);
+                }
+
+                // append user-specified link objects
+                for (int i = 0; i < options.link_count; i++)
+                {
+                    strcat(link_cmd, " ");
+                    strcat(link_cmd, options.link_objects[i]);
+                }
+
+                if (system(link_cmd) == 0)
+                {
+                    // remove temporary object file
+                    if (!options.emit_object)
+                    {
+                        unlink(obj_file);
+                    }
+
+                    // remove runtime object file (it's always temporary)
+                    if (runtime_obj)
+                    {
+                        unlink(runtime_obj);
+                    }
+                }
+                else
+                {
+                    printf("failed to link executable\n");
+                    emit_success = false;
+                }
+
+                free(link_cmd);
+
+                // cleanup dependency object file list
+                for (int i = 0; i < dep_count; i++)
+                {
+                    free(dep_objects[i]);
+                }
+                free(dep_objects);
+            }
+
+            // cleanup runtime object file name
+            if (runtime_obj)
+            {
+                free(runtime_obj);
+            }
+        }
+        else if (options.build_library && emit_success)
+        {
+            const char *output_lib = options.output_file ? options.output_file : default_output;
+
+            printf("linking library '%s'...\n", output_lib);
+            fflush(stdout);
+
+            // get dependency object files
+            char **dep_objects = NULL;
+            int    dep_count   = 0;
+            if (!module_manager_get_link_objects(&analyzer.module_manager, &dep_objects, &dep_count))
+            {
+                printf("failed to collect dependency object files\n");
                 emit_success = false;
+            }
+            else
+            {
+                // construct linking command for shared library
+                size_t cmd_size = 1024 + (dep_count * 256) + (options.link_count * 256);
+                char  *link_cmd = malloc(cmd_size);
+
+                snprintf(link_cmd, cmd_size, "cc -shared -fPIC -o %s %s", output_lib, obj_file);
+
+                // append dependency object files
+                for (int i = 0; i < dep_count; i++)
+                {
+                    strcat(link_cmd, " ");
+                    strcat(link_cmd, dep_objects[i]);
+                }
+
+                // append user-specified link objects
+                for (int i = 0; i < options.link_count; i++)
+                {
+                    strcat(link_cmd, " ");
+                    strcat(link_cmd, options.link_objects[i]);
+                }
+
+                if (system(link_cmd) == 0)
+                {
+                    // remove temporary object file
+                    if (!options.emit_object)
+                    {
+                        unlink(obj_file);
+                    }
+                }
+                else
+                {
+                    printf("failed to link library\n");
+                    emit_success = false;
+                }
+
+                free(link_cmd);
+
+                // cleanup dependency object file list
+                for (int i = 0; i < dep_count; i++)
+                {
+                    free(dep_objects[i]);
+                }
+                free(dep_objects);
             }
         }
 
@@ -436,6 +658,7 @@ static int build_command(int argc, char **argv)
     lexer_dnit(&lexer);
     free(source);
     free(default_output);
+    free(options.link_objects); // cleanup link objects array
 
     return emit_success ? 0 : 1;
 }

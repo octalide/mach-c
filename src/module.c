@@ -307,6 +307,9 @@ bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *progra
                 return false;
             }
 
+            // mark module as needing linking since it's imported
+            module->needs_linking = true;
+
             // store module reference in AST node for semantic analysis
             stmt->use_stmt.module_sym = (Symbol *)module; // cast for now
 
@@ -323,19 +326,23 @@ bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *progra
 
 void module_init(Module *module, const char *name, const char *file_path)
 {
-    module->name        = strdup(name);
-    module->file_path   = strdup(file_path);
-    module->ast         = NULL;
-    module->symbols     = NULL;
-    module->is_parsed   = false;
-    module->is_analyzed = false;
-    module->next        = NULL;
+    module->name          = strdup(name);
+    module->file_path     = strdup(file_path);
+    module->object_path   = NULL;
+    module->ast           = NULL;
+    module->symbols       = NULL;
+    module->is_parsed     = false;
+    module->is_analyzed   = false;
+    module->is_compiled   = false;
+    module->needs_linking = false;
+    module->next          = NULL;
 }
 
 void module_dnit(Module *module)
 {
     free(module->name);
     free(module->file_path);
+    free(module->object_path);
     if (module->ast)
     {
         ast_node_dnit(module->ast);
@@ -380,4 +387,111 @@ bool module_has_circular_dependency(ModuleManager *manager, Module *module, cons
     }
 
     return false;
+}
+
+// forward declaration for compilation helper
+static bool compile_module_to_object(Module *module, int opt_level, bool no_pie);
+
+// dependency compilation and linking functions
+bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie)
+{
+    // iterate through all loaded modules
+    for (int i = 0; i < manager->capacity; i++)
+    {
+        Module *module = manager->modules[i];
+        while (module)
+        {
+            // skip if module doesn't need compilation or is already compiled
+            if (!module->needs_linking || module->is_compiled)
+            {
+                module = module->next;
+                continue;
+            }
+
+            // generate object file path
+            char *base_name   = strdup(module->name);
+            char *object_file = malloc(strlen(output_dir) + strlen(base_name) + 10);
+            sprintf(object_file, "%s/%s.o", output_dir, base_name);
+
+            module->object_path = object_file;
+            free(base_name);
+
+            // compile the module
+            printf("compiling dependency '%s'...\n", module->name);
+            fflush(stdout);
+
+            if (!compile_module_to_object(module, opt_level, no_pie))
+            {
+                module_error_list_add(&manager->errors, module->name, module->file_path, "failed to compile module dependency");
+                manager->had_error = true;
+                return false;
+            }
+
+            module->is_compiled = true;
+            module              = module->next;
+        }
+    }
+    return true;
+}
+
+bool module_manager_get_link_objects(ModuleManager *manager, char ***object_files, int *count)
+{
+    // count modules that need linking
+    int link_count = 0;
+    for (int i = 0; i < manager->capacity; i++)
+    {
+        Module *module = manager->modules[i];
+        while (module)
+        {
+            if (module->needs_linking && module->object_path)
+            {
+                link_count++;
+            }
+            module = module->next;
+        }
+    }
+
+    if (link_count == 0)
+    {
+        *object_files = NULL;
+        *count        = 0;
+        return true;
+    }
+
+    // allocate array for object file paths
+    char **objects = malloc(link_count * sizeof(char *));
+    int    idx     = 0;
+
+    // collect object file paths
+    for (int i = 0; i < manager->capacity; i++)
+    {
+        Module *module = manager->modules[i];
+        while (module)
+        {
+            if (module->needs_linking && module->object_path)
+            {
+                objects[idx++] = strdup(module->object_path);
+            }
+            module = module->next;
+        }
+    }
+
+    *object_files = objects;
+    *count        = link_count;
+    return true;
+}
+
+static bool compile_module_to_object(Module *module, int opt_level, bool no_pie)
+{
+    // construct compilation command
+    char        cmd[2048];
+    const char *compiler = getenv("MACH_COMPILER");
+    if (!compiler)
+        compiler = "./bin/cmach"; // default to current compiler
+
+    snprintf(cmd, sizeof(cmd), "%s build %s --emit-obj --no-link -O%d %s -o %s", compiler, module->file_path, opt_level, no_pie ? "--no-pie" : "", module->object_path);
+
+    // execute compilation
+    int result = system(cmd);
+    return result == 0;
 }

@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+// forward declarations
+static Type *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNode *expr, Type *specified_type, Type *resolved_type);
+
 void semantic_analyzer_init(SemanticAnalyzer *analyzer)
 {
     symbol_table_init(&analyzer->symbol_table);
@@ -233,23 +236,31 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         return false;
     }
 
-    // create module symbol
-    Symbol *module_symbol = symbol_create_module(alias ? alias : module_path, module_path);
-
-    // check for redefinition
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, alias ? alias : module_path);
-    if (existing)
+    if (alias)
     {
-        semantic_error(analyzer, stmt, "module name '%s' already in use", alias ? alias : module_path);
-        symbol_destroy(module_symbol);
-        return false;
+        // aliased import: create module symbol for qualified access
+        Symbol *module_symbol = symbol_create_module(alias, module_path);
+
+        // check for redefinition
+        Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, alias);
+        if (existing)
+        {
+            semantic_error(analyzer, stmt, "module name '%s' already in use", alias);
+            symbol_destroy(module_symbol);
+            return false;
+        }
+
+        // the module scope will be linked after the module is analyzed
+        stmt->use_stmt.module_sym = module_symbol;
+
+        // add to symbol table
+        symbol_add_module(&analyzer->symbol_table, module_symbol);
     }
-
-    // the module scope will be linked after the module is analyzed
-    stmt->use_stmt.module_sym = module_symbol;
-
-    // add to symbol table
-    symbol_add_module(&analyzer->symbol_table, module_symbol);
+    else
+    {
+        // unaliased import: symbols will be imported directly into current scope
+        stmt->use_stmt.module_sym = NULL;
+    }
 
     return true;
 }
@@ -257,6 +268,7 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_stmt)
 {
     const char *module_path = use_stmt->use_stmt.module_path;
+    const char *alias       = use_stmt->use_stmt.alias;
 
     // find the loaded module
     Module *module = module_manager_find_module(&analyzer->module_manager, module_path);
@@ -266,19 +278,72 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         return false;
     }
 
-    // if already analyzed, skip
+    // if already analyzed, handle symbol importing
     if (module->is_analyzed)
     {
-        // link the module scope to the symbol
-        Symbol *module_symbol = use_stmt->use_stmt.module_sym;
-        if (module_symbol && module->symbols)
+        if (alias)
         {
-            module_symbol->module.scope = module->symbols->global_scope;
+            // aliased import: link the module scope to the symbol
+            Symbol *module_symbol = use_stmt->use_stmt.module_sym;
+            if (module_symbol && module->symbols)
+            {
+                module_symbol->module.scope = module->symbols->global_scope;
+            }
+        }
+        else
+        {
+            // unaliased import: import all symbols directly
+            if (module->symbols && module->symbols->global_scope)
+            {
+                // import all symbols from the module into current scope
+                Symbol *sym = module->symbols->global_scope->symbols;
+                while (sym)
+                {
+                    // check for name conflicts
+                    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, sym->name);
+                    if (existing)
+                    {
+                        semantic_error(analyzer, use_stmt, "symbol '%s' from module '%s' conflicts with existing symbol", sym->name, module_path);
+                        return false;
+                    }
+
+                    // create a copy of the symbol for the current scope
+                    Symbol *imported_sym = symbol_create(sym->kind, sym->name, sym->type, sym->decl);
+
+                    // copy kind-specific data
+                    switch (sym->kind)
+                    {
+                    case SYMBOL_VAR:
+                    case SYMBOL_VAL:
+                        imported_sym->var = sym->var;
+                        break;
+                    case SYMBOL_FUNC:
+                        imported_sym->func = sym->func;
+                        break;
+                    case SYMBOL_TYPE:
+                        imported_sym->type_def = sym->type_def;
+                        break;
+                    case SYMBOL_FIELD:
+                        imported_sym->field = sym->field;
+                        break;
+                    case SYMBOL_PARAM:
+                        imported_sym->param = sym->param;
+                        break;
+                    case SYMBOL_MODULE:
+                        imported_sym->module = sym->module;
+                        break;
+                    }
+
+                    symbol_add(analyzer->symbol_table.current_scope, imported_sym);
+
+                    sym = sym->next;
+                }
+            }
         }
         return true;
     }
 
-    printf("analyzing module '%s'... ", module_path);
+    printf("analyzing module '%s'...\n", module_path);
 
     // create a new symbol table for the module
     if (!module->symbols)
@@ -295,17 +360,51 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
     bool success = true;
     if (module->ast && module->ast->kind == AST_PROGRAM)
     {
-        for (int i = 0; i < module->ast->program.stmts->count; i++)
+        // first resolve module dependencies
+        if (!module_manager_resolve_dependencies(&module_analyzer.module_manager, module->ast, "."))
         {
-            AstNode *stmt = module->ast->program.stmts->items[i];
-
-            // skip use statements in imported modules
-            if (stmt->kind == AST_STMT_USE)
-                continue;
-
-            if (!semantic_analyze_stmt(&module_analyzer, stmt))
+            success = false;
+        }
+        else
+        {
+            // process use statements first
+            for (int i = 0; i < module->ast->program.stmts->count; i++)
             {
-                success = false;
+                AstNode *stmt = module->ast->program.stmts->items[i];
+                if (stmt->kind == AST_STMT_USE)
+                {
+                    if (!semantic_analyze_use_stmt(&module_analyzer, stmt))
+                    {
+                        success = false;
+                    }
+                }
+            }
+
+            // analyze imported modules
+            for (int i = 0; success && i < module->ast->program.stmts->count; i++)
+            {
+                AstNode *stmt = module->ast->program.stmts->items[i];
+                if (stmt->kind == AST_STMT_USE)
+                {
+                    if (!semantic_analyze_imported_module(&module_analyzer, stmt))
+                    {
+                        success = false;
+                    }
+                }
+            }
+
+            // then analyze other statements
+            for (int i = 0; success && i < module->ast->program.stmts->count; i++)
+            {
+                AstNode *stmt = module->ast->program.stmts->items[i];
+
+                if (stmt->kind == AST_STMT_USE)
+                    continue; // already processed
+
+                if (!semantic_analyze_stmt(&module_analyzer, stmt))
+                {
+                    success = false;
+                }
             }
         }
     }
@@ -325,11 +424,64 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         module_analyzer.symbol_table.global_scope  = NULL;
         module_analyzer.symbol_table.current_scope = NULL;
 
-        // link the module scope to the symbol
-        Symbol *module_symbol = use_stmt->use_stmt.module_sym;
-        if (module_symbol)
+        if (alias)
         {
-            module_symbol->module.scope = module->symbols->global_scope;
+            // aliased import: link the module scope to the symbol
+            Symbol *module_symbol = use_stmt->use_stmt.module_sym;
+            if (module_symbol)
+            {
+                module_symbol->module.scope = module->symbols->global_scope;
+            }
+        }
+        else
+        {
+            // unaliased import: import all symbols directly
+            if (module->symbols && module->symbols->global_scope)
+            {
+                // import all symbols from the module into current scope
+                Symbol *sym = module->symbols->global_scope->symbols;
+                while (sym)
+                {
+                    // check for name conflicts
+                    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, sym->name);
+                    if (existing)
+                    {
+                        semantic_error(analyzer, use_stmt, "symbol '%s' from module '%s' conflicts with existing symbol", sym->name, module_path);
+                        return false;
+                    }
+
+                    // create a copy of the symbol for the current scope
+                    Symbol *imported_sym = symbol_create(sym->kind, sym->name, sym->type, sym->decl);
+
+                    // copy kind-specific data
+                    switch (sym->kind)
+                    {
+                    case SYMBOL_VAR:
+                    case SYMBOL_VAL:
+                        imported_sym->var = sym->var;
+                        break;
+                    case SYMBOL_FUNC:
+                        imported_sym->func = sym->func;
+                        break;
+                    case SYMBOL_TYPE:
+                        imported_sym->type_def = sym->type_def;
+                        break;
+                    case SYMBOL_FIELD:
+                        imported_sym->field = sym->field;
+                        break;
+                    case SYMBOL_PARAM:
+                        imported_sym->param = sym->param;
+                        break;
+                    case SYMBOL_MODULE:
+                        imported_sym->module = sym->module;
+                        break;
+                    }
+
+                    symbol_add(analyzer->symbol_table.current_scope, imported_sym);
+
+                    sym = sym->next;
+                }
+            }
         }
 
         module->is_analyzed = true;
@@ -339,10 +491,10 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         semantic_error(analyzer, use_stmt, "failed to analyze module '%s'", module_path);
     }
 
-    // copy errors if any
+    // copy errors if any, but don't copy tokens since they're from different files
     for (int i = 0; i < module_analyzer.errors.count; i++)
     {
-        semantic_error_list_add(&analyzer->errors, module_analyzer.errors.errors[i].token, module_analyzer.errors.errors[i].message);
+        semantic_error_list_add(&analyzer->errors, module_analyzer.errors.errors[i].token, module_analyzer.errors.errors[i].message, module->file_path);
     }
 
     // clean up analyzer (symbol table already transferred)
@@ -628,7 +780,9 @@ bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         // check for missing return
         if (return_type && !stmt_has_return(stmt->fun_stmt.body))
         {
-            semantic_warning(analyzer, stmt, "function '%s' may not return a value", name);
+            semantic_error(analyzer, stmt, "function '%s' with return type must have a return statement", name);
+            analyzer->has_errors = true;
+            return false;
         }
 
         // restore previous function
@@ -1162,6 +1316,61 @@ Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             expr->type = type_u64(); // align_of() returns u64
             return expr->type;
         }
+
+        // handle offset_of() intrinsic - get offset of struct field
+        if (strcmp(func_name, "offset_of") == 0)
+        {
+            if (!expr->call_expr.args || expr->call_expr.args->count != 2)
+            {
+                semantic_error(analyzer, expr, "offset_of() expects exactly two arguments (type, field)");
+                return NULL;
+            }
+
+            // first argument should be a type (handled as expression for now)
+            AstNode *type_arg  = expr->call_expr.args->items[0];
+            AstNode *field_arg = expr->call_expr.args->items[1];
+
+            // field argument should be an identifier
+            if (field_arg->kind != AST_EXPR_IDENT)
+            {
+                semantic_error(analyzer, expr, "offset_of() second argument must be a field name");
+                return NULL;
+            }
+
+            Type *struct_type = semantic_analyze_expr(analyzer, type_arg);
+            if (!struct_type)
+                return NULL;
+
+            struct_type = type_resolve_alias(struct_type);
+            if (struct_type->kind != TYPE_STRUCT)
+            {
+                semantic_error(analyzer, expr, "offset_of() first argument must be a struct type");
+                return NULL;
+            }
+
+            expr->type = type_u64(); // offset_of() returns u64
+            return expr->type;
+        }
+
+        // handle type_of() intrinsic - get type info as runtime value
+        if (strcmp(func_name, "type_of") == 0)
+        {
+            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            {
+                semantic_error(analyzer, expr, "type_of() expects exactly one argument");
+                return NULL;
+            }
+
+            AstNode *arg      = expr->call_expr.args->items[0];
+            Type    *arg_type = semantic_analyze_expr(analyzer, arg);
+            if (!arg_type)
+                return NULL;
+
+            // type_of() returns a compile-time constant representing the type
+            // for now, we'll represent this as a u64 hash/id
+            expr->type = type_u64(); // type_of() returns u64
+            return expr->type;
+        }
     }
 
     Type *func_type = semantic_analyze_expr(analyzer, expr->call_expr.func);
@@ -1187,8 +1396,9 @@ Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         return NULL;
     }
 
+    // functions with no return type are valid but have no expression type
     expr->type = resolved_type->function.return_type;
-    return expr->type;
+    return resolved_type->function.return_type ? resolved_type->function.return_type : type_ptr(); // return dummy type for void functions
 }
 
 Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr)
@@ -1206,16 +1416,21 @@ Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         return NULL;
     }
 
+    // resolve type aliases before checking array type
+    Type *resolved_type = type_resolve_alias(array_type);
+    if (!resolved_type)
+        resolved_type = array_type;
+
     // check array type
-    if (array_type->kind == TYPE_ARRAY)
+    if (resolved_type->kind == TYPE_ARRAY)
     {
         // all arrays are fat pointers, so no compile-time bounds check
-        expr->type = array_type->array.elem_type;
+        expr->type = resolved_type->array.elem_type;
         return expr->type;
     }
-    else if (array_type->kind == TYPE_POINTER)
+    else if (resolved_type->kind == TYPE_POINTER)
     {
-        expr->type = array_type->pointer.base;
+        expr->type = resolved_type->pointer.base;
         return expr->type;
     }
     else
@@ -1453,12 +1668,17 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         return NULL;
     }
 
-    // check if the specified type is already an array type
-    if (specified_type->kind == TYPE_ARRAY)
+    // resolve type aliases before checking the type
+    Type *resolved_type = type_resolve_alias(specified_type);
+    if (!resolved_type)
+        resolved_type = specified_type;
+
+    // check if the resolved type is already an array type
+    if (resolved_type->kind == TYPE_ARRAY)
     {
-        // for []T{...} syntax, the type is already an array, use it directly
+        // for []T{...} or alias{...} syntax where alias resolves to array, use it directly
         // but validate that all elements match the element type
-        Type *elem_type = specified_type->array.elem_type;
+        Type *elem_type = resolved_type->array.elem_type;
 
         if (expr->array_expr.elems)
         {
@@ -1475,14 +1695,19 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             }
         }
 
-        // return the specified array type as-is
+        // return the original specified type (preserving alias)
         expr->type = specified_type;
         return expr->type;
+    }
+    else if (resolved_type->kind == TYPE_STRUCT || resolved_type->kind == TYPE_UNION)
+    {
+        // this is actually a struct/union literal using type{...} syntax
+        return semantic_analyze_array_as_struct(analyzer, expr, specified_type, resolved_type);
     }
     else
     {
         // for T{...} syntax, create a new array of type T
-        Type *elem_type = specified_type;
+        Type *elem_type = resolved_type;
 
         if (expr->array_expr.elems)
         {
@@ -1504,6 +1729,52 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     }
 }
 
+// helper function to convert array expression to struct initialization
+static Type *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNode *expr, Type *specified_type, Type *resolved_type)
+{
+    // for struct{value1, value2, ...} syntax, we need to match values to fields in order
+    if (!expr->array_expr.elems)
+    {
+        // empty initializer is valid
+        expr->type = specified_type;
+        return specified_type;
+    }
+
+    // collect struct fields in order
+    Symbol *field       = resolved_type->composite.fields;
+    int     field_count = 0;
+    while (field)
+    {
+        field_count++;
+        field = field->next;
+    }
+
+    // check that we don't have more initializers than fields
+    if (expr->array_expr.elems->count > field_count)
+    {
+        semantic_error(analyzer, expr, "too many initializers for struct (expected %d, got %d)", field_count, expr->array_expr.elems->count);
+        return NULL;
+    }
+
+    // validate each element against corresponding field type
+    field = resolved_type->composite.fields;
+    for (int i = 0; i < expr->array_expr.elems->count && field; i++, field = field->next)
+    {
+        Type *elem_result = semantic_analyze_expr_with_hint(analyzer, expr->array_expr.elems->items[i], field->type);
+        if (!elem_result)
+            return NULL;
+
+        if (!semantic_check_assignment(analyzer, field->type, elem_result, expr->array_expr.elems->items[i]))
+        {
+            return NULL;
+        }
+    }
+
+    // return the original specified type (preserving alias)
+    expr->type = specified_type;
+    return specified_type;
+}
+
 Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
     Type *struct_type = resolve_type(analyzer, expr->struct_expr.type);
@@ -1513,7 +1784,12 @@ Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         return NULL;
     }
 
-    if (struct_type->kind != TYPE_STRUCT && struct_type->kind != TYPE_UNION)
+    // resolve type aliases before checking the type
+    Type *resolved_type = type_resolve_alias(struct_type);
+    if (!resolved_type)
+        resolved_type = struct_type;
+
+    if (resolved_type->kind != TYPE_STRUCT && resolved_type->kind != TYPE_UNION)
     {
         semantic_error(analyzer, expr, "not a struct or union type");
         return NULL;
@@ -1531,7 +1807,7 @@ Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             {
                 // find the field in the struct type
                 Symbol *field_sym = NULL;
-                for (Symbol *field = struct_type->composite.fields; field; field = field->next)
+                for (Symbol *field = resolved_type->composite.fields; field; field = field->next)
                 {
                     if (field->name && strcmp(field->name, field_init->field_expr.field) == 0)
                     {
@@ -1570,6 +1846,7 @@ Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         }
     }
 
+    // return the original type (preserving alias)
     expr->type = struct_type;
     return struct_type;
 }
@@ -1760,11 +2037,12 @@ void semantic_error_list_dnit(SemanticErrorList *list)
             free(list->errors[i].token);
         }
         free(list->errors[i].message);
+        free(list->errors[i].file_path);
     }
     free(list->errors);
 }
 
-void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *message)
+void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *message, const char *file_path)
 {
     if (list->count >= list->capacity)
     {
@@ -1782,8 +2060,9 @@ void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *
         }
     }
 
-    list->errors[list->count].token   = error_token;
-    list->errors[list->count].message = strdup(message);
+    list->errors[list->count].token     = error_token;
+    list->errors[list->count].message   = strdup(message);
+    list->errors[list->count].file_path = file_path ? strdup(file_path) : NULL;
     list->count++;
 }
 
@@ -1791,26 +2070,42 @@ void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char
 {
     for (int i = 0; i < list->count; i++)
     {
-        Token *token = list->errors[i].token;
+        Token      *token           = list->errors[i].token;
+        const char *error_file_path = list->errors[i].file_path ? list->errors[i].file_path : file_path;
 
         printf("error: %s\n", list->errors[i].message);
 
-        if (token && lexer && file_path)
+        if (token && error_file_path)
         {
-            int   line      = lexer_get_pos_line(lexer, token->pos);
-            int   col       = lexer_get_pos_line_offset(lexer, token->pos);
-            char *line_text = lexer_get_line_text(lexer, line);
-
-            if (!line_text)
+            // if the error is from the same file as the main lexer, use it for detailed info
+            if (lexer && file_path && error_file_path && strcmp(error_file_path, file_path) == 0)
             {
-                line_text = strdup("unable to retrieve line text");
+                int   line      = lexer_get_pos_line(lexer, token->pos);
+                int   col       = lexer_get_pos_line_offset(lexer, token->pos);
+                char *line_text = lexer_get_line_text(lexer, line);
+
+                if (!line_text)
+                {
+                    line_text = strdup("unable to retrieve line text");
+                }
+
+                printf("%s:%d:%d\n", error_file_path, line + 1, col);
+                printf("%5d | %-*s\n", line + 1, col > 1 ? col - 1 : 0, line_text);
+                printf("      | %*s^\n", col - 1, "");
+
+                free(line_text);
             }
-
-            printf("%s:%d:%d\n", file_path, line + 1, col);
-            printf("%5d | %-*s\n", line + 1, col > 1 ? col - 1 : 0, line_text);
-            printf("      | %*s^\n", col - 1, "");
-
-            free(line_text);
+            else
+            {
+                // for errors from other files, just show basic location info
+                printf("%s:pos:%d\n", error_file_path, token->pos);
+                printf("      | (from imported module)\n");
+            }
+        }
+        else if (error_file_path)
+        {
+            printf("%s\n", error_file_path);
+            printf("      | (location unavailable)\n");
         }
     }
 }
@@ -1833,7 +2128,7 @@ void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, 
 
     // add to error list
     Token *token = (node && node->token) ? node->token : NULL;
-    semantic_error_list_add(&analyzer->errors, token, message);
+    semantic_error_list_add(&analyzer->errors, token, message, NULL);
 
     free(message);
 }

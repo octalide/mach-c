@@ -50,6 +50,9 @@ struct CodegenContext
     LLVMBasicBlockRef break_block;
     LLVMBasicBlockRef continue_block;
 
+    // initialization context
+    bool generating_mutable_init; // true when generating initializer for var (not val)
+
     // error tracking
     CodegenError *errors;
     bool          has_errors;
@@ -57,7 +60,8 @@ struct CodegenContext
     // options
     int  opt_level;
     bool debug_info;
-    bool no_pie; // disable position independent executable
+    bool no_pie;     // disable position independent executable
+    bool is_runtime; // true when compiling the runtime module
 };
 
 // context lifecycle
@@ -85,6 +89,8 @@ void         codegen_set_symbol_value(CodegenContext *ctx, Symbol *symbol, LLVMV
 
 // statement generation
 LLVMValueRef codegen_stmt(CodegenContext *ctx, AstNode *stmt);
+LLVMValueRef codegen_stmt_use(CodegenContext *ctx, AstNode *stmt);
+LLVMValueRef codegen_stmt_ext(CodegenContext *ctx, AstNode *stmt);
 LLVMValueRef codegen_stmt_block(CodegenContext *ctx, AstNode *stmt);
 LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt);
 LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt);

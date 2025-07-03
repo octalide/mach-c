@@ -99,6 +99,7 @@ AstNode *parser_parse_expr_postfix(Parser *parser);
 AstNode *parser_parse_expr_atom(Parser *parser);
 AstNode *parser_parse_array_literal(Parser *parser);
 AstNode *parser_parse_struct_literal(Parser *parser, AstNode *type);
+AstNode *parser_parse_typed_literal(Parser *parser, AstNode *type);
 
 // type parsing
 AstNode *parser_parse_type(Parser *parser);

@@ -1,0 +1,6 @@
+ext "__mach_main" __mach_main: fun() i32;
+
+fun main() i32 {
+    # call user main function
+    ret __mach_main();
+}

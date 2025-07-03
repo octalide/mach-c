@@ -510,6 +510,38 @@ AstNode *parser_parse_stmt_ext(Parser *parser)
         return NULL;
     }
 
+    // initialize fields
+    node->ext_stmt.name       = NULL;
+    node->ext_stmt.convention = NULL;
+    node->ext_stmt.symbol     = NULL;
+    node->ext_stmt.type       = NULL;
+
+    // check for optional calling convention/symbol specification
+    if (parser_match(parser, TOKEN_LIT_STRING))
+    {
+        char  *raw       = lexer_raw_value(parser->lexer, parser->previous);
+        size_t len       = strlen(raw) - 2; // remove quotes
+        char  *conv_spec = malloc(len + 1);
+        memcpy(conv_spec, raw + 1, len);
+        conv_spec[len] = '\0';
+        free(raw);
+
+        // parse "convention:symbol" or just "convention"
+        char *colon = strchr(conv_spec, ':');
+        if (colon)
+        {
+            *colon                    = '\0';
+            node->ext_stmt.convention = strdup(conv_spec);
+            node->ext_stmt.symbol     = strdup(colon + 1);
+        }
+        else
+        {
+            node->ext_stmt.convention = strdup(conv_spec);
+        }
+
+        free(conv_spec);
+    }
+
     node->ext_stmt.name = parser_parse_identifier(parser);
     if (!node->ext_stmt.name)
     {
@@ -517,6 +549,18 @@ AstNode *parser_parse_stmt_ext(Parser *parser)
         ast_node_dnit(node);
         free(node);
         return NULL;
+    }
+
+    // if no symbol specified, use the function name
+    if (!node->ext_stmt.symbol)
+    {
+        node->ext_stmt.symbol = strdup(node->ext_stmt.name);
+    }
+
+    // if no convention specified, default to "C"
+    if (!node->ext_stmt.convention)
+    {
+        node->ext_stmt.convention = strdup("C");
     }
 
     if (!parser_consume(parser, TOKEN_COLON, "expected ':' after external name"))
@@ -1501,7 +1545,7 @@ AstNode *parser_parse_expr_atom(Parser *parser)
         ident->ident_expr.name = lexer_raw_value(parser->lexer, parser->current);
         parser_advance(parser);
 
-        // check for struct literal
+        // check for literal (could be array or struct)
         if (parser_check(parser, TOKEN_L_BRACE))
         {
             AstNode *type = parser_alloc_node(parser, AST_TYPE_NAME, ident->token);
@@ -1515,7 +1559,7 @@ AstNode *parser_parse_expr_atom(Parser *parser)
             ident->ident_expr.name = NULL;
             ast_node_dnit(ident);
             free(ident);
-            return parser_parse_struct_literal(parser, type);
+            return parser_parse_typed_literal(parser, type);
         }
 
         return ident;
@@ -2067,4 +2111,55 @@ AstList *parser_parse_parameter_list(Parser *parser)
     } while (parser_match(parser, TOKEN_COMMA));
 
     return list;
+}
+
+AstNode *parser_parse_typed_literal(Parser *parser, AstNode *type)
+{
+    if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' to start literal"))
+    {
+        ast_node_dnit(type);
+        free(type);
+        return NULL;
+    }
+
+    AstNode *literal = parser_alloc_node(parser, AST_EXPR_ARRAY, parser->previous);
+    if (!literal)
+    {
+        ast_node_dnit(type);
+        free(type);
+        return NULL;
+    }
+
+    literal->array_expr.type  = type;
+    literal->array_expr.elems = parser_alloc_list(parser);
+    if (!literal->array_expr.elems)
+    {
+        ast_node_dnit(literal);
+        free(literal);
+        return NULL;
+    }
+
+    if (!parser_check(parser, TOKEN_R_BRACE))
+    {
+        do
+        {
+            AstNode *elem = parser_parse_expr(parser);
+            if (!elem)
+            {
+                ast_node_dnit(literal);
+                free(literal);
+                return NULL;
+            }
+            ast_list_append(literal->array_expr.elems, elem);
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after literal elements"))
+    {
+        ast_node_dnit(literal);
+        free(literal);
+        return NULL;
+    }
+
+    return literal;
 }

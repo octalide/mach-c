@@ -299,6 +299,12 @@ bool type_can_cast_to(Type *from, Type *to)
     while (to->kind == TYPE_ALIAS)
         to = to->alias.target;
 
+    // array to pointer decay is not supported via cast - use ?array[0] instead
+    if (from->kind == TYPE_ARRAY && (to->kind == TYPE_PTR || to->kind == TYPE_POINTER))
+    {
+        return false;
+    }
+
     // same type
     if (type_equals(from, to))
         return true;
@@ -323,12 +329,6 @@ bool type_can_cast_to(Type *from, Type *to)
     if (type_is_pointer_like(from) && type_is_integer(to))
         return true;
 
-    // array to pointer decay
-    if (from->kind == TYPE_ARRAY && to->kind == TYPE_POINTER)
-    {
-        return type_equals(from->array.elem_type, to->pointer.base);
-    }
-
     return false;
 }
 
@@ -346,8 +346,16 @@ bool type_can_assign_to(Type *from, Type *to)
     // numeric conversions (more restrictive than casting)
     if (type_is_numeric(from) && type_is_numeric(to))
     {
-        // only allow safe conversions: same type or smaller-to-larger
-        // disallow potentially lossy conversions like u64 -> i32
+        // only allow conversions within the same category (int↔int or float↔float)
+        // and only safe conversions: same type or smaller-to-larger
+        bool from_is_float = type_is_float(from);
+        bool to_is_float   = type_is_float(to);
+
+        // no implicit conversions between int and float
+        if (from_is_float != to_is_float)
+            return false;
+
+        // within same category, only allow safe size conversions
         return from->size <= to->size;
     }
 
@@ -427,7 +435,15 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
 
     case AST_TYPE_FUN:
     {
-        Type *return_type = type_node->type_fun.return_type ? type_resolve(type_node->type_fun.return_type, symbol_table) : NULL;
+        Type *return_type = NULL;
+        if (type_node->type_fun.return_type)
+        {
+            return_type = type_resolve(type_node->type_fun.return_type, symbol_table);
+            if (!return_type)
+            {
+                return NULL; // failed to resolve return type
+            }
+        }
 
         size_t param_count = type_node->type_fun.params ? type_node->type_fun.params->count : 0;
         Type **param_types = NULL;

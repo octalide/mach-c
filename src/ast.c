@@ -47,6 +47,8 @@ void ast_node_dnit(AstNode *node)
 
     case AST_STMT_EXT:
         free(node->ext_stmt.name);
+        free(node->ext_stmt.convention);
+        free(node->ext_stmt.symbol);
         if (node->ext_stmt.type)
         {
             ast_node_dnit(node->ext_stmt.type);

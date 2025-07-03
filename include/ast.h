@@ -99,7 +99,9 @@ struct AstNode
         // external statement
         struct
         {
-            char    *name;
+            char    *name;       // function name in Mach code
+            char    *convention; // calling convention (e.g., "C")
+            char    *symbol;     // target symbol name (default: same as name)
             AstNode *type;
         } ext_stmt;
 
@@ -126,6 +128,7 @@ struct AstNode
             AstList *params;
             AstNode *return_type; // null for no return
             AstNode *body;        // null for external functions
+            bool     no_mangle;   // true if #! mangle=false attribute present
         } fun_stmt;
 
         // struct statement

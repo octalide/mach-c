@@ -14,13 +14,16 @@ typedef struct SymbolTable SymbolTable;
 // represents a loaded module
 struct Module
 {
-    char        *name;        // module name
-    char        *file_path;   // absolute file path
-    AstNode     *ast;         // parsed AST
-    SymbolTable *symbols;     // module's symbol table
-    bool         is_parsed;   // parsing complete
-    bool         is_analyzed; // semantic analysis complete
-    Module      *next;        // linked list for dependencies
+    char        *name;          // module name
+    char        *file_path;     // absolute file path
+    char        *object_path;   // compiled object file path
+    AstNode     *ast;           // parsed AST
+    SymbolTable *symbols;       // module's symbol table
+    bool         is_parsed;     // parsing complete
+    bool         is_analyzed;   // semantic analysis complete
+    bool         is_compiled;   // object file compilation complete
+    bool         needs_linking; // true if this module should be linked
+    Module      *next;          // linked list for dependencies
 };
 
 // error tracking for modules
@@ -63,6 +66,10 @@ Module *module_manager_find_module(ModuleManager *manager, const char *name);
 
 // dependency resolution
 bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *program, const char *base_dir);
+
+// dependency compilation and linking
+bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie);
+bool module_manager_get_link_objects(ModuleManager *manager, char ***object_files, int *count);
 
 // error handling
 void module_error_list_init(ModuleErrorList *list);

@@ -1455,40 +1455,8 @@ AstNode *parser_parse_expr_atom(Parser *parser)
         {
             return NULL;
         }
-        lit->lit_expr.kind = TOKEN_LIT_CHAR;
-        char *raw          = lexer_raw_value(parser->lexer, parser->current);
-        // handle escape sequences
-        if (raw[1] == '\\')
-        {
-            switch (raw[2])
-            {
-            case 'n':
-                lit->lit_expr.char_val = '\n';
-                break;
-            case 't':
-                lit->lit_expr.char_val = '\t';
-                break;
-            case 'r':
-                lit->lit_expr.char_val = '\r';
-                break;
-            case '\\':
-                lit->lit_expr.char_val = '\\';
-                break;
-            case '\'':
-                lit->lit_expr.char_val = '\'';
-                break;
-            case '0':
-                lit->lit_expr.char_val = '\0';
-                break;
-            default:
-                lit->lit_expr.char_val = raw[2];
-            }
-        }
-        else
-        {
-            lit->lit_expr.char_val = raw[1];
-        }
-        free(raw);
+        lit->lit_expr.kind     = TOKEN_LIT_CHAR;
+        lit->lit_expr.char_val = lexer_eval_lit_char(parser->lexer, parser->current);
         parser_advance(parser);
         return lit;
     }
@@ -1500,14 +1468,8 @@ AstNode *parser_parse_expr_atom(Parser *parser)
         {
             return NULL;
         }
-        lit->lit_expr.kind = TOKEN_LIT_STRING;
-        char  *raw         = lexer_raw_value(parser->lexer, parser->current);
-        size_t len         = strlen(raw) - 2; // remove quotes
-        char  *str         = malloc(len + 1);
-        memcpy(str, raw + 1, len);
-        str[len]                 = '\0';
-        lit->lit_expr.string_val = str;
-        free(raw);
+        lit->lit_expr.kind       = TOKEN_LIT_STRING;
+        lit->lit_expr.string_val = lexer_eval_lit_string(parser->lexer, parser->current);
         parser_advance(parser);
         return lit;
     }

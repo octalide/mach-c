@@ -1,5 +1,6 @@
 #include "ast.h"
 #include "codegen.h"
+#include "config.h"
 #include "lexer.h"
 #include "module.h"
 #include "parser.h"
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 typedef struct BuildOptions
@@ -30,7 +32,10 @@ static void print_usage(const char *program_name)
 {
     fprintf(stderr, "usage: %s <command> [options]\n", program_name);
     fprintf(stderr, "commands:\n");
-    fprintf(stderr, "  build <file> [options]    build a mach source file\n");
+    fprintf(stderr, "  init <name>               initialize a new project\n");
+    fprintf(stderr, "  build [file] [options]    build project or single file\n");
+    fprintf(stderr, "  run [options]             build and run project\n");
+    fprintf(stderr, "  clean                     clean build artifacts\n");
     fprintf(stderr, "  help                      show this help message\n");
     fprintf(stderr, "\nbuild options:\n");
     fprintf(stderr, "  -o <file>     set output file name\n");
@@ -96,6 +101,23 @@ static char *get_base_filename(const char *path)
     return base;
 }
 
+static char *get_executable_path(ProjectConfig *config, const char *project_dir)
+{
+    if (!config || !config->target_name)
+        return NULL;
+
+    char *bin_dir = config_resolve_bin_dir(config, project_dir);
+    if (!bin_dir)
+        return NULL;
+
+    size_t len  = strlen(bin_dir) + strlen(config->target_name) + 2;
+    char  *path = malloc(len);
+    snprintf(path, len, "%s/%s", bin_dir, config->target_name);
+
+    free(bin_dir);
+    return path;
+}
+
 static char *get_directory(const char *path)
 {
     const char *last_slash = strrchr(path, '/');
@@ -120,26 +142,215 @@ static char *create_output_filename(const char *input_file, const char *extensio
     return output;
 }
 
-static int build_command(int argc, char **argv)
+static int init_command(int argc, char **argv)
 {
     if (argc < 3)
     {
-        fprintf(stderr, "error: 'build' command requires a filename\n");
+        fprintf(stderr, "error: 'init' command requires a project name\n");
         print_usage(argv[0]);
         return 1;
     }
 
-    const char  *filename   = argv[2];
-    BuildOptions options    = {0};
-    options.link_executable = true;
-    options.build_library   = false;
-    options.opt_level       = 2;
-    options.link_objects    = NULL;
-    options.link_count      = 0;
-    options.link_capacity   = 0;
+    const char *project_name = argv[2];
 
-    // parse command line options
-    for (int i = 3; i < argc; i++)
+    // create project directory
+    if (mkdir(project_name, 0755) != 0)
+    {
+        fprintf(stderr, "error: failed to create project directory '%s'\n", project_name);
+        return 1;
+    }
+
+    // create standard mach project directory structure
+    char path[1024];
+
+    // dep/ - dependency source files
+    snprintf(path, sizeof(path), "%s/dep", project_name);
+    mkdir(path, 0755);
+
+    // lib/ - library/object dependencies
+    snprintf(path, sizeof(path), "%s/lib", project_name);
+    mkdir(path, 0755);
+
+    // out/ - output directory
+    snprintf(path, sizeof(path), "%s/out", project_name);
+    mkdir(path, 0755);
+
+    // out/native/ - native target directory (default architecture)
+    snprintf(path, sizeof(path), "%s/out/native", project_name);
+    mkdir(path, 0755);
+
+    // out/native/bin/ - binary output
+    snprintf(path, sizeof(path), "%s/out/native/bin", project_name);
+    mkdir(path, 0755);
+
+    // out/native/obj/ - object files
+    snprintf(path, sizeof(path), "%s/out/native/obj", project_name);
+    mkdir(path, 0755);
+
+    // src/ - source files
+    snprintf(path, sizeof(path), "%s/src", project_name);
+    mkdir(path, 0755);
+
+    // create mach.toml with proper directory configuration
+    snprintf(path, sizeof(path), "%s/mach.toml", project_name);
+    ProjectConfig *config = config_create_default(project_name);
+
+    // set up the directory structure
+    config->src_dir       = strdup("src");
+    config->dep_dir       = strdup("dep");
+    config->lib_dir       = strdup("lib");
+    config->out_dir       = strdup("out");
+    config->bin_dir       = strdup("native/bin");
+    config->obj_dir       = strdup("native/obj");
+    config->target_triple = strdup("native");
+
+    if (!config_save(config, path))
+    {
+        fprintf(stderr, "error: failed to create mach.toml\n");
+        config_dnit(config);
+        free(config);
+        return 1;
+    }
+
+    // create main.mach in src directory
+    snprintf(path, sizeof(path), "%s/src/main.mach", project_name);
+    FILE *main_file = fopen(path, "w");
+    if (!main_file)
+    {
+        fprintf(stderr, "error: failed to create src/main.mach\n");
+        config_dnit(config);
+        free(config);
+        return 1;
+    }
+
+    fprintf(main_file, "import \"std.io.console\"\n\n");
+    fprintf(main_file, "func main() {\n");
+    fprintf(main_file, "    console.println(\"hello, world!\")\n");
+    fprintf(main_file, "}\n");
+    fclose(main_file);
+
+    printf("created project '%s' with the following structure:\n", project_name);
+    printf("  %s/\n", project_name);
+    printf("  ├── dep/          # dependency source files\n");
+    printf("  ├── lib/          # library/object dependencies\n");
+    printf("  ├── out/          # output directory\n");
+    printf("  │   └── native/   # native target\n");
+    printf("  │       ├── bin/  # binary output\n");
+    printf("  │       └── obj/  # object files\n");
+    printf("  ├── src/          # source files\n");
+    printf("  │   └── main.mach # main source file\n");
+    printf("  └── mach.toml     # project configuration\n");
+    printf("\nto build: cd %s && cmach build\n", project_name);
+    printf("to run:   cd %s && cmach run\n", project_name);
+
+    config_dnit(config);
+    free(config);
+    return 0;
+}
+
+static int clean_command(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    // load project config
+    ProjectConfig *config = config_load_from_dir(".");
+    if (!config)
+    {
+        fprintf(stderr, "error: no mach.toml found in current directory\n");
+        return 1;
+    }
+
+    char       *out_dir    = config_resolve_out_dir(config, ".");
+    const char *output_dir = out_dir ? out_dir : ".";
+
+    printf("cleaning build artifacts...\n");
+
+    // remove output directory
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", output_dir);
+    system(cmd);
+
+    // remove temporary files
+    system("find . -name '*.ast' -delete");
+    system("find . -name '*.ll' -delete");
+    system("find . -name '*.s' -delete");
+    system("find . -name '*.o' -delete");
+
+    printf("clean complete\n");
+
+    free(out_dir);
+
+    config_dnit(config);
+    free(config);
+    return 0;
+}
+
+static BuildOptions config_to_build_options(ProjectConfig *config)
+{
+    BuildOptions options = {0};
+
+    if (config)
+    {
+        options.emit_ast        = config->emit_ast;
+        options.emit_ir         = config->emit_ir;
+        options.emit_asm        = config->emit_asm;
+        options.emit_object     = config->emit_object;
+        options.build_library   = config->build_library;
+        options.no_pie          = config->no_pie;
+        options.opt_level       = config->opt_level;
+        options.link_executable = config_should_link_executable(config);
+    }
+    else
+    {
+        options.link_executable = true;
+        options.opt_level       = 2;
+    }
+
+    return options;
+}
+
+static int build_command(int argc, char **argv)
+{
+    const char    *filename           = NULL;
+    ProjectConfig *config             = NULL;
+    char          *resolved_main_file = NULL;
+    bool           is_project_build   = false;
+
+    // try to load project config first
+    config = config_load_from_dir(".");
+    if (config && config_has_main_file(config))
+    {
+        is_project_build   = true;
+        resolved_main_file = config_resolve_main_file(config, ".");
+        filename           = resolved_main_file;
+    }
+
+    // check if a file was specified on command line
+    if (argc >= 3 && argv[2][0] != '-')
+    {
+        filename         = argv[2];
+        is_project_build = false; // override project build when file is specified
+    }
+
+    if (!filename)
+    {
+        fprintf(stderr, "error: no input file specified and no project configuration found\n");
+        print_usage(argv[0]);
+        if (config)
+        {
+            config_dnit(config);
+            free(config);
+        }
+        return 1;
+    }
+
+    // initialize build options from config or defaults
+    BuildOptions options = config_to_build_options(config);
+
+    // parse command line options (these override config)
+    int start_idx = is_project_build ? 2 : 3;
+    for (int i = start_idx; i < argc; i++)
     {
         if (strcmp(argv[i], "-o") == 0)
         {
@@ -221,30 +432,51 @@ static int build_command(int argc, char **argv)
     char *default_output = NULL;
     if (!options.output_file)
     {
-        if (options.build_library)
+        if (is_project_build && config)
         {
-            default_output      = create_output_filename(filename, ".so");
-            options.output_file = default_output;
+            // use project config output
+            default_output = get_executable_path(config, ".");
+            if (default_output)
+            {
+                options.output_file = default_output;
+
+                // ensure output directory exists
+                char *output_dir = get_directory(default_output);
+                char  cmd[1024];
+                snprintf(cmd, sizeof(cmd), "mkdir -p %s", output_dir);
+                system(cmd);
+                free(output_dir);
+            }
         }
-        else if (options.link_executable)
+
+        // fallback to traditional behavior
+        if (!options.output_file)
         {
-            default_output      = get_base_filename(filename);
-            options.output_file = default_output;
-        }
-        else if (options.emit_object && !options.emit_ir && !options.emit_asm)
-        {
-            default_output      = create_output_filename(filename, ".o");
-            options.output_file = default_output;
-        }
-        else if (options.emit_ir && !options.emit_asm && !options.emit_object)
-        {
-            default_output      = create_output_filename(filename, ".ll");
-            options.output_file = default_output;
-        }
-        else if (options.emit_asm && !options.emit_ir && !options.emit_object)
-        {
-            default_output      = create_output_filename(filename, ".s");
-            options.output_file = default_output;
+            if (options.build_library)
+            {
+                default_output      = create_output_filename(filename, ".so");
+                options.output_file = default_output;
+            }
+            else if (options.link_executable)
+            {
+                default_output      = get_base_filename(filename);
+                options.output_file = default_output;
+            }
+            else if (options.emit_object && !options.emit_ir && !options.emit_asm)
+            {
+                default_output      = create_output_filename(filename, ".o");
+                options.output_file = default_output;
+            }
+            else if (options.emit_ir && !options.emit_asm && !options.emit_object)
+            {
+                default_output      = create_output_filename(filename, ".ll");
+                options.output_file = default_output;
+            }
+            else if (options.emit_asm && !options.emit_ir && !options.emit_object)
+            {
+                default_output      = create_output_filename(filename, ".s");
+                options.output_file = default_output;
+            }
         }
     }
 
@@ -308,8 +540,17 @@ static int build_command(int argc, char **argv)
     module_manager_add_search_path(&analyzer.module_manager, base_dir);
     module_manager_add_search_path(&analyzer.module_manager, ".");
 
-    // add standard library path if available
-    const char *stdlib_path = getenv("MACH_STDLIB");
+    // add standard library path from config or environment
+    const char *stdlib_path = NULL;
+    if (config && config->stdlib_path)
+    {
+        stdlib_path = config->stdlib_path;
+    }
+    else
+    {
+        stdlib_path = getenv("MACH_STDLIB");
+    }
+
     if (stdlib_path)
     {
         module_manager_add_search_path(&analyzer.module_manager, stdlib_path);
@@ -486,9 +727,12 @@ static int build_command(int argc, char **argv)
                     runtime_obj = create_output_filename(runtime_path, ".o");
 
                     // recursive call to compile runtime
-                    size_t runtime_cmd_len = strlen(runtime_path) + strlen(runtime_obj) + 64;
+                    size_t runtime_cmd_len = strlen(argv[0]) + strlen(runtime_path) + strlen(runtime_obj) + 64;
                     char  *runtime_cmd     = malloc(runtime_cmd_len);
                     snprintf(runtime_cmd, runtime_cmd_len, "%s build %s -o %s --emit-obj --no-link", argv[0], runtime_path, runtime_obj);
+
+                    printf("runtime command: %s\n", runtime_cmd);
+                    fflush(stdout);
 
                     if (system(runtime_cmd) != 0)
                     {
@@ -659,8 +903,64 @@ static int build_command(int argc, char **argv)
     free(source);
     free(default_output);
     free(options.link_objects); // cleanup link objects array
+    free(resolved_main_file);
+
+    if (config)
+    {
+        config_dnit(config);
+        free(config);
+    }
 
     return emit_success ? 0 : 1;
+}
+
+static int run_command(int argc, char **argv)
+{
+    // first build the project
+    int build_result = build_command(argc, argv);
+    if (build_result != 0)
+    {
+        return build_result;
+    }
+
+    // load project config to get output path
+    ProjectConfig *config = config_load_from_dir(".");
+    if (!config)
+    {
+        fprintf(stderr, "error: no mach.toml found in current directory\n");
+        return 1;
+    }
+
+    // determine executable path
+    char *executable_path = get_executable_path(config, ".");
+    if (!executable_path)
+    {
+        fprintf(stderr, "error: could not determine executable path\n");
+        config_dnit(config);
+        free(config);
+        return 1;
+    }
+
+    // check if executable exists
+    if (access(executable_path, X_OK) != 0)
+    {
+        fprintf(stderr, "error: executable '%s' not found or not executable\n", executable_path);
+        free(executable_path);
+        config_dnit(config);
+        free(config);
+        return 1;
+    }
+
+    printf("running '%s'...\n", executable_path);
+
+    // run the executable
+    int result = system(executable_path);
+
+    free(executable_path);
+    config_dnit(config);
+    free(config);
+
+    return result;
 }
 
 int main(int argc, char **argv)
@@ -678,9 +978,21 @@ int main(int argc, char **argv)
         print_usage(argv[0]);
         return 0;
     }
+    else if (strcmp(command, "init") == 0)
+    {
+        return init_command(argc, argv);
+    }
     else if (strcmp(command, "build") == 0)
     {
         return build_command(argc, argv);
+    }
+    else if (strcmp(command, "run") == 0)
+    {
+        return run_command(argc, argv);
+    }
+    else if (strcmp(command, "clean") == 0)
+    {
+        return clean_command(argc, argv);
     }
     else
     {

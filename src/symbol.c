@@ -132,6 +132,7 @@ void symbol_destroy(Symbol *symbol)
     if (symbol->kind == SYMBOL_MODULE)
     {
         free(symbol->module.path);
+        symbol->module.path = NULL;
         // don't destroy module scope here - it's managed separately
     }
 

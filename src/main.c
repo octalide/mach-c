@@ -320,8 +320,9 @@ static int init_command(int argc, char **argv)
     }
 
     fprintf(main_file, "use console: dep.std.console;\n\n");
-    fprintf(main_file, "fun main() {\n");
+    fprintf(main_file, "fun main() u32 {\n");
     fprintf(main_file, "    console.print(\"Hello, world!\\n\");\n");
+    fprintf(main_file, "    ret 0;\n");
     fprintf(main_file, "}\n");
     fclose(main_file);
 

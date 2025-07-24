@@ -6,6 +6,7 @@
 #include "parser.h"
 #include "semantic.h"
 
+#include <llvm-c/Target.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,15 +29,21 @@ typedef struct BuildOptions
     int         link_capacity; // capacity of link_objects array
 } BuildOptions;
 
+// forward declarations
+static int  dep_add_command(int argc, char **argv);
+static int  dep_remove_command(int argc, char **argv);
+static int  dep_list_command(int argc, char **argv);
+static bool copy_directory(const char *src, const char *dest);
+
 static void print_usage(const char *program_name)
 {
     fprintf(stderr, "usage: %s <command> [options]\n", program_name);
     fprintf(stderr, "commands:\n");
-    fprintf(stderr, "  init <name>               initialize a new project\n");
+    fprintf(stderr, "  init                      initialize a new project\n");
     fprintf(stderr, "  build [file] [options]    build project or single file\n");
-    fprintf(stderr, "  run [options]             build and run project\n");
     fprintf(stderr, "  clean                     clean build artifacts\n");
-    fprintf(stderr, "  help                      show this help message\n");
+    fprintf(stderr, "  dep <subcommand>          dependency management\n");
+    fprintf(stderr, "  help [command]            show help message\n");
     fprintf(stderr, "\nbuild options:\n");
     fprintf(stderr, "  -o <file>     set output file name\n");
     fprintf(stderr, "  -O<level>     optimization level (0-3, default: 2)\n");
@@ -48,6 +55,38 @@ static void print_usage(const char *program_name)
     fprintf(stderr, "  --no-link     don't create executable (just compile)\n");
     fprintf(stderr, "  --no-pie      disable position independent executable\n");
     fprintf(stderr, "  --link <obj>  link with additional object file\n");
+}
+
+static void print_dep_usage(void)
+{
+    fprintf(stderr, "usage: cmach dep <subcommand> [options]\n");
+    fprintf(stderr, "dependency management subcommands:\n");
+    fprintf(stderr, "  add <name> <path>         add a dependency with explicit path\n");
+    fprintf(stderr, "  remove <name>             remove a dependency\n");
+    fprintf(stderr, "  list                      list all dependencies\n");
+    fprintf(stderr, "\nexamples:\n");
+    fprintf(stderr, "  cmach dep add std $MACH_STD    # add standard library\n");
+    fprintf(stderr, "  cmach dep add mylib ./libs/mylib  # add local dependency\n");
+}
+
+static char *get_default_target_triple(void)
+{
+    // initialize LLVM targets to get target info
+    LLVMInitializeAllTargetInfos();
+
+    // get the default target triple from LLVM
+    char *triple = LLVMGetDefaultTargetTriple();
+    if (!triple)
+    {
+        // fallback to a reasonable default
+        return strdup("x86_64-unknown-linux-gnu");
+    }
+
+    // copy the string since LLVM owns the original
+    char *result = strdup(triple);
+    LLVMDisposeMessage(triple);
+
+    return result;
 }
 
 static char *read_file(const char *path)
@@ -101,12 +140,12 @@ static char *get_base_filename(const char *path)
     return base;
 }
 
-static char *get_executable_path(ProjectConfig *config, const char *project_dir)
+static char *get_executable_path(ProjectConfig *config, const char *project_dir, const char *target_name)
 {
-    if (!config || !config->target_name)
+    if (!config || !config->target_name || !target_name)
         return NULL;
 
-    char *bin_dir = config_resolve_bin_dir(config, project_dir);
+    char *bin_dir = config_resolve_bin_dir(config, project_dir, target_name);
     if (!bin_dir)
         return NULL;
 
@@ -144,65 +183,122 @@ static char *create_output_filename(const char *input_file, const char *extensio
 
 static int init_command(int argc, char **argv)
 {
-    if (argc < 3)
+    const char *project_name = "mach-project";
+    const char *project_dir  = ".";
+
+    // if project name is provided, create a new directory
+    if (argc >= 3)
     {
-        fprintf(stderr, "error: 'init' command requires a project name\n");
-        print_usage(argv[0]);
-        return 1;
+        project_name = argv[2];
+        project_dir  = project_name;
+
+        // create project directory
+        if (mkdir(project_name, 0755) != 0)
+        {
+            fprintf(stderr, "error: failed to create project directory '%s'\n", project_name);
+            return 1;
+        }
     }
-
-    const char *project_name = argv[2];
-
-    // create project directory
-    if (mkdir(project_name, 0755) != 0)
+    else
     {
-        fprintf(stderr, "error: failed to create project directory '%s'\n", project_name);
-        return 1;
+        // initialize in current directory - get directory name for project name
+        char *cwd = getcwd(NULL, 0);
+        if (cwd)
+        {
+            const char *last_slash = strrchr(cwd, '/');
+            if (last_slash && strlen(last_slash + 1) > 0)
+                project_name = strdup(last_slash + 1);
+            else
+                project_name = strdup("mach-project");
+            free(cwd);
+        }
     }
 
     // create standard mach project directory structure
     char path[1024];
 
+    // get the default target triple before creating directories
+    char *target_triple = get_default_target_triple();
+
     // dep/ - dependency source files
-    snprintf(path, sizeof(path), "%s/dep", project_name);
+    snprintf(path, sizeof(path), "%s/dep", project_dir);
     mkdir(path, 0755);
 
     // lib/ - library/object dependencies
-    snprintf(path, sizeof(path), "%s/lib", project_name);
+    snprintf(path, sizeof(path), "%s/lib", project_dir);
     mkdir(path, 0755);
 
     // out/ - output directory
-    snprintf(path, sizeof(path), "%s/out", project_name);
+    snprintf(path, sizeof(path), "%s/out", project_dir);
     mkdir(path, 0755);
 
-    // out/native/ - native target directory (default architecture)
-    snprintf(path, sizeof(path), "%s/out/native", project_name);
+    // out/<target>/ - target directory
+    snprintf(path, sizeof(path), "%s/out/%s", project_dir, target_triple);
     mkdir(path, 0755);
 
-    // out/native/bin/ - binary output
-    snprintf(path, sizeof(path), "%s/out/native/bin", project_name);
+    // out/<target>/bin/ - binary output
+    snprintf(path, sizeof(path), "%s/out/%s/bin", project_dir, target_triple);
     mkdir(path, 0755);
 
-    // out/native/obj/ - object files
-    snprintf(path, sizeof(path), "%s/out/native/obj", project_name);
+    // out/<target>/obj/ - object files
+    snprintf(path, sizeof(path), "%s/out/%s/obj", project_dir, target_triple);
     mkdir(path, 0755);
 
     // src/ - source files
-    snprintf(path, sizeof(path), "%s/src", project_name);
+    snprintf(path, sizeof(path), "%s/src", project_dir);
     mkdir(path, 0755);
 
     // create mach.toml with proper directory configuration
-    snprintf(path, sizeof(path), "%s/mach.toml", project_name);
+    snprintf(path, sizeof(path), "%s/mach.toml", project_dir);
     ProjectConfig *config = config_create_default(project_name);
 
     // set up the directory structure
-    config->src_dir       = strdup("src");
-    config->dep_dir       = strdup("dep");
-    config->lib_dir       = strdup("lib");
-    config->out_dir       = strdup("out");
-    config->bin_dir       = strdup("native/bin");
-    config->obj_dir       = strdup("native/obj");
-    config->target_triple = strdup("native");
+    config->src_dir = strdup("src");
+    config->dep_dir = strdup("dep");
+    config->lib_dir = strdup("lib");
+    config->out_dir = strdup("out");
+
+    // add default target
+    config->default_target = strdup("all"); // build all targets by default
+
+    // add a default native target
+    char *native_triple = LLVMGetDefaultTargetTriple();
+    config_add_target(config, "native", native_triple);
+    free(native_triple);
+
+    // add default standard library dependency and copy it if available
+    const char *mach_std = getenv("MACH_STD");
+    if (mach_std)
+    {
+        // automatically add and copy std dependency
+        printf("adding default standard library dependency from MACH_STD...\n");
+
+        char *dep_dir = config_resolve_dep_dir(config, project_dir);
+        if (dep_dir)
+        {
+            char dest_path[1024];
+            snprintf(dest_path, sizeof(dest_path), "%s/std", dep_dir);
+
+            if (copy_directory(mach_std, dest_path))
+            {
+                config_add_dependency(config, "std", mach_std);
+                printf("standard library added successfully\n");
+            }
+            else
+            {
+                fprintf(stderr, "warning: failed to copy standard library from MACH_STD\n");
+                config_add_dependency(config, "std", "local"); // add reference anyway
+            }
+
+            free(dep_dir);
+        }
+    }
+    else
+    {
+        // add reference to std dependency (user will need to add it manually)
+        config_add_dependency(config, "std", "local");
+        printf("note: MACH_STD not set, add standard library with: cmach dep add std $MACH_STD\n");
+    }
 
     if (!config_save(config, path))
     {
@@ -213,7 +309,7 @@ static int init_command(int argc, char **argv)
     }
 
     // create main.mach in src directory
-    snprintf(path, sizeof(path), "%s/src/main.mach", project_name);
+    snprintf(path, sizeof(path), "%s/src/main.mach", project_dir);
     FILE *main_file = fopen(path, "w");
     if (!main_file)
     {
@@ -223,25 +319,38 @@ static int init_command(int argc, char **argv)
         return 1;
     }
 
-    fprintf(main_file, "import \"std.io.console\"\n\n");
-    fprintf(main_file, "func main() {\n");
-    fprintf(main_file, "    console.println(\"hello, world!\")\n");
+    fprintf(main_file, "use console: dep.std.console;\n\n");
+    fprintf(main_file, "fun main() {\n");
+    fprintf(main_file, "    console.print(\"Hello, world!\\n\");\n");
     fprintf(main_file, "}\n");
     fclose(main_file);
 
-    printf("created project '%s' with the following structure:\n", project_name);
-    printf("  %s/\n", project_name);
+    if (argc >= 3)
+    {
+        printf("created project '%s' with the following structure:\n", project_name);
+        printf("  %s/\n", project_name);
+    }
+    else
+    {
+        printf("initialized project '%s' with the following structure:\n", project_name);
+    }
     printf("  ├── dep/          # dependency source files\n");
     printf("  ├── lib/          # library/object dependencies\n");
     printf("  ├── out/          # output directory\n");
-    printf("  │   └── native/   # native target\n");
+    printf("  │   └── %s/   # target triple\n", target_triple);
     printf("  │       ├── bin/  # binary output\n");
     printf("  │       └── obj/  # object files\n");
     printf("  ├── src/          # source files\n");
     printf("  │   └── main.mach # main source file\n");
     printf("  └── mach.toml     # project configuration\n");
-    printf("\nto build: cd %s && cmach build\n", project_name);
-    printf("to run:   cd %s && cmach run\n", project_name);
+    if (argc >= 3)
+    {
+        printf("\nto build: cd %s && cmach build\n", project_name);
+    }
+    else
+    {
+        printf("\nto build: cmach build\n");
+    }
 
     config_dnit(config);
     free(config);
@@ -286,25 +395,37 @@ static int clean_command(int argc, char **argv)
     return 0;
 }
 
-static BuildOptions config_to_build_options(ProjectConfig *config)
+static BuildOptions config_to_build_options(ProjectConfig *config, const char *target_name)
 {
     BuildOptions options = {0};
 
-    if (config)
+    if (config && target_name)
     {
-        options.emit_ast        = config->emit_ast;
-        options.emit_ir         = config->emit_ir;
-        options.emit_asm        = config->emit_asm;
-        options.emit_object     = config->emit_object;
-        options.build_library   = config->build_library;
-        options.no_pie          = config->no_pie;
-        options.opt_level       = config->opt_level;
-        options.link_executable = config_should_link_executable(config);
+        TargetConfig *target = config_get_target(config, target_name);
+        if (target)
+        {
+            options.emit_ast        = target->emit_ast;
+            options.emit_ir         = target->emit_ir;
+            options.emit_asm        = target->emit_asm;
+            options.emit_object     = target->emit_object;
+            options.build_library   = target->build_library;
+            options.no_pie          = target->no_pie;
+            options.opt_level       = target->opt_level;
+            options.link_executable = !target->build_library;
+        }
+        else
+        {
+            // fallback to default values
+            options.link_executable = true;
+            options.opt_level       = 2;
+            options.emit_object     = true;
+        }
     }
     else
     {
         options.link_executable = true;
         options.opt_level       = 2;
+        options.emit_object     = true;
     }
 
     return options;
@@ -346,7 +467,13 @@ static int build_command(int argc, char **argv)
     }
 
     // initialize build options from config or defaults
-    BuildOptions options = config_to_build_options(config);
+    // TODO: implement proper target selection, for now use default target
+    const char *target_name = "native"; // default target name
+    if (config && config->target_count > 0)
+    {
+        target_name = config->targets[0]->name; // use first target for now
+    }
+    BuildOptions options = config_to_build_options(config, target_name);
 
     // parse command line options (these override config)
     int start_idx = is_project_build ? 2 : 3;
@@ -435,7 +562,7 @@ static int build_command(int argc, char **argv)
         if (is_project_build && config)
         {
             // use project config output
-            default_output = get_executable_path(config, ".");
+            default_output = get_executable_path(config, ".", target_name);
             if (default_output)
             {
                 options.output_file = default_output;
@@ -539,6 +666,17 @@ static int build_command(int argc, char **argv)
     char *base_dir = get_directory(filename);
     module_manager_add_search_path(&analyzer.module_manager, base_dir);
     module_manager_add_search_path(&analyzer.module_manager, ".");
+
+    // add dependency directory from config
+    if (config)
+    {
+        char *dep_dir = config_resolve_dep_dir(config, ".");
+        if (dep_dir)
+        {
+            module_manager_add_search_path(&analyzer.module_manager, dep_dir);
+            free(dep_dir);
+        }
+    }
 
     // add standard library path from config or environment
     const char *stdlib_path = NULL;
@@ -932,7 +1070,8 @@ static int run_command(int argc, char **argv)
     }
 
     // determine executable path
-    char *executable_path = get_executable_path(config, ".");
+    const char *target_name     = config->target_count > 0 ? config->targets[0]->name : "native";
+    char       *executable_path = get_executable_path(config, ".", target_name);
     if (!executable_path)
     {
         fprintf(stderr, "error: could not determine executable path\n");
@@ -961,6 +1100,259 @@ static int run_command(int argc, char **argv)
     free(config);
 
     return result;
+}
+
+// utility function to copy directory recursively
+static bool copy_directory(const char *src, const char *dest)
+{
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "cp -r \"%s\" \"%s\"", src, dest);
+    return system(cmd) == 0;
+}
+
+static int dep_command(int argc, char **argv)
+{
+    if (argc < 3)
+    {
+        print_dep_usage();
+        return 1;
+    }
+
+    const char *subcommand = argv[2];
+
+    if (strcmp(subcommand, "add") == 0)
+    {
+        return dep_add_command(argc - 1, argv + 1); // shift args
+    }
+    else if (strcmp(subcommand, "remove") == 0)
+    {
+        return dep_remove_command(argc - 1, argv + 1); // shift args
+    }
+    else if (strcmp(subcommand, "list") == 0)
+    {
+        return dep_list_command(argc - 1, argv + 1); // shift args
+    }
+    else
+    {
+        fprintf(stderr, "error: unknown dep subcommand '%s'\n", subcommand);
+        print_dep_usage();
+        return 1;
+    }
+}
+
+static int dep_add_command(int argc, char **argv)
+{
+    if (argc < 4)
+    {
+        fprintf(stderr, "error: 'dep add' requires dependency name and path\n");
+        fprintf(stderr, "usage: cmach dep add <name> <path>\n");
+        print_dep_usage();
+        return 1;
+    }
+
+    const char *dep_name   = argv[2];
+    const char *dep_source = argv[3];
+
+    // load project config
+    ProjectConfig *config = config_load_from_dir(".");
+    if (!config)
+    {
+        fprintf(stderr, "error: no mach.toml found in current directory\n");
+        fprintf(stderr, "run 'cmach init' to create a new project\n");
+        return 1;
+    }
+
+    // check if dependency already exists
+    if (config_has_dependency(config, dep_name))
+    {
+        printf("dependency '%s' already exists\n", dep_name);
+        config_dnit(config);
+        free(config);
+        return 0;
+    }
+
+    // resolve dependency directory
+    char *dep_dir = config_resolve_dep_dir(config, ".");
+    if (!dep_dir)
+    {
+        fprintf(stderr, "error: could not resolve dependency directory\n");
+        config_dnit(config);
+        free(config);
+        return 1;
+    }
+
+    // create dependency directory if it doesn't exist
+    if (!config_ensure_directories(config, "."))
+    {
+        fprintf(stderr, "error: could not create dependency directory\n");
+        free(dep_dir);
+        config_dnit(config);
+        free(config);
+        return 1;
+    }
+
+    // copy dependency source to dep directory
+    char dest_path[1024];
+    snprintf(dest_path, sizeof(dest_path), "%s/%s", dep_dir, dep_name);
+
+    printf("adding dependency '%s' from '%s'...\n", dep_name, dep_source);
+
+    bool success = copy_directory(dep_source, dest_path);
+    if (!success)
+    {
+        fprintf(stderr, "error: failed to copy directory '%s'\n", dep_source);
+    }
+
+    if (success)
+    {
+        // add dependency to configuration
+        if (config_add_dependency(config, dep_name, dep_source))
+        {
+            // save updated configuration
+            if (config_save(config, "mach.toml"))
+            {
+                printf("dependency '%s' added successfully\n", dep_name);
+            }
+            else
+            {
+                fprintf(stderr, "error: failed to save configuration\n");
+                success = false;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "error: failed to add dependency to configuration\n");
+            success = false;
+        }
+    }
+
+    free(dep_dir);
+    config_dnit(config);
+    free(config);
+    return success ? 0 : 1;
+}
+
+static int dep_remove_command(int argc, char **argv)
+{
+    if (argc < 3)
+    {
+        fprintf(stderr, "error: 'dep remove' requires a dependency name\n");
+        print_dep_usage();
+        return 1;
+    }
+
+    const char *dep_name = argv[2];
+
+    // load project config
+    ProjectConfig *config = config_load_from_dir(".");
+    if (!config)
+    {
+        fprintf(stderr, "error: no mach.toml found in current directory\n");
+        return 1;
+    }
+
+    // check if dependency exists
+    if (!config_has_dependency(config, dep_name))
+    {
+        printf("dependency '%s' not found\n", dep_name);
+        config_dnit(config);
+        free(config);
+        return 0;
+    }
+
+    // resolve dependency directory
+    char *dep_dir = config_resolve_dep_dir(config, ".");
+    if (!dep_dir)
+    {
+        fprintf(stderr, "error: could not resolve dependency directory\n");
+        config_dnit(config);
+        free(config);
+        return 1;
+    }
+
+    // remove dependency directory
+    char dep_path[1024];
+    snprintf(dep_path, sizeof(dep_path), "%s/%s", dep_dir, dep_name);
+
+    printf("removing dependency '%s'...\n", dep_name);
+
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", dep_path);
+    bool success = (system(cmd) == 0);
+
+    if (success)
+    {
+        // remove dependency from configuration
+        if (config_remove_dependency(config, dep_name))
+        {
+            // save updated configuration
+            if (config_save(config, "mach.toml"))
+            {
+                printf("dependency '%s' removed successfully\n", dep_name);
+            }
+            else
+            {
+                fprintf(stderr, "error: failed to save configuration\n");
+                success = false;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "error: failed to remove dependency from configuration\n");
+            success = false;
+        }
+    }
+    else
+    {
+        fprintf(stderr, "error: failed to remove dependency directory\n");
+    }
+
+    free(dep_dir);
+    config_dnit(config);
+    free(config);
+    return success ? 0 : 1;
+}
+
+static int dep_list_command(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    // load project config
+    ProjectConfig *config = config_load_from_dir(".");
+    if (!config)
+    {
+        fprintf(stderr, "error: no mach.toml found in current directory\n");
+        return 1;
+    }
+
+    printf("project dependencies:\n");
+
+    if (config->dep_count == 0)
+    {
+        printf("  (no dependencies)\n");
+    }
+    else
+    {
+        for (int i = 0; i < config->dep_count; i++)
+        {
+            DependencyConfig *dep = config->dependencies[i];
+            printf("  %s (type: %s, path: %s)\n", dep->name, dep->type, dep->path);
+        }
+    }
+
+    if (config->lib_dep_count > 0)
+    {
+        printf("\nlibrary dependencies:\n");
+        for (int i = 0; i < config->lib_dep_count; i++)
+        {
+            printf("  %s\n", config->lib_dependencies[i]);
+        }
+    }
+
+    config_dnit(config);
+    free(config);
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -993,6 +1385,10 @@ int main(int argc, char **argv)
     else if (strcmp(command, "clean") == 0)
     {
         return clean_command(argc, argv);
+    }
+    else if (strcmp(command, "dep") == 0)
+    {
+        return dep_command(argc, argv);
     }
     else
     {

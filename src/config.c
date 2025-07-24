@@ -84,6 +84,12 @@ static char *toml_parse_identifier(TomlParser *parser)
     if (parser->pos >= parser->len)
         return NULL;
 
+    // handle quoted keys
+    if (parser->input[parser->pos] == '"')
+    {
+        return toml_parse_string(parser);
+    }
+
     size_t start = parser->pos;
     while (parser->pos < parser->len)
     {
@@ -107,6 +113,74 @@ static char *toml_parse_identifier(TomlParser *parser)
     result[len] = '\0';
 
     return result;
+}
+
+static char *toml_parse_section_name(TomlParser *parser)
+{
+    toml_skip_whitespace(parser);
+
+    if (parser->pos >= parser->len || parser->input[parser->pos] != '[')
+        return NULL;
+
+    parser->pos++; // skip '['
+
+    size_t start = parser->pos;
+    while (parser->pos < parser->len)
+    {
+        char c = parser->input[parser->pos];
+        if (c == ']')
+        {
+            break;
+        }
+        else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')
+        {
+            parser->pos++;
+        }
+        else
+        {
+            return NULL; // invalid character in section name
+        }
+    }
+
+    if (parser->pos >= parser->len || parser->input[parser->pos] != ']')
+        return NULL;
+
+    size_t len = parser->pos - start;
+    parser->pos++; // skip ']'
+
+    if (len == 0)
+        return NULL;
+
+    char *result = malloc(len + 1);
+    strncpy(result, parser->input + start, len);
+    result[len] = '\0';
+
+    return result;
+}
+
+static void toml_skip_table_value(TomlParser *parser)
+{
+    toml_skip_whitespace(parser);
+
+    if (parser->pos >= parser->len || parser->input[parser->pos] != '{')
+    {
+        // not a table, skip to end of line
+        while (parser->pos < parser->len && parser->input[parser->pos] != '\n')
+            parser->pos++;
+        return;
+    }
+
+    parser->pos++; // skip '{'
+
+    int brace_count = 1;
+    while (parser->pos < parser->len && brace_count > 0)
+    {
+        if (parser->input[parser->pos] == '{')
+            brace_count++;
+        else if (parser->input[parser->pos] == '}')
+            brace_count--;
+        parser->pos++;
+    }
 }
 
 static int toml_parse_number(TomlParser *parser)
@@ -196,10 +270,65 @@ static char *read_file_to_string(const char *path)
     return buffer;
 }
 
+void target_config_init(TargetConfig *target)
+{
+    memset(target, 0, sizeof(TargetConfig));
+    target->opt_level   = 2;    // default optimization level
+    target->emit_object = true; // default to emitting object files
+}
+
+void target_config_dnit(TargetConfig *target)
+{
+    free(target->name);
+    free(target->target_triple);
+    memset(target, 0, sizeof(TargetConfig));
+}
+
+TargetConfig *target_config_create(const char *name, const char *target_triple)
+{
+    TargetConfig *target = malloc(sizeof(TargetConfig));
+    target_config_init(target);
+    target->name          = strdup(name);
+    target->target_triple = strdup(target_triple);
+    return target;
+}
+
+DependencyConfig *dependency_config_create(const char *name, const char *type, const char *path)
+{
+    DependencyConfig *dep = malloc(sizeof(DependencyConfig));
+    dependency_config_init(dep);
+    dep->name = strdup(name);
+    dep->type = strdup(type ? type : "local");
+
+    // only store path for non-local dependencies
+    if (type && strcmp(type, "local") != 0 && path)
+    {
+        dep->path = strdup(path);
+    }
+    else
+    {
+        dep->path = strdup(""); // empty for local dependencies
+    }
+
+    return dep;
+}
+
+void dependency_config_init(DependencyConfig *dep)
+{
+    memset(dep, 0, sizeof(DependencyConfig));
+}
+
+void dependency_config_dnit(DependencyConfig *dep)
+{
+    free(dep->name);
+    free(dep->type);
+    free(dep->path);
+    memset(dep, 0, sizeof(DependencyConfig));
+}
+
 void config_init(ProjectConfig *config)
 {
     memset(config, 0, sizeof(ProjectConfig));
-    config->opt_level = 2; // default optimization level
 }
 
 void config_dnit(ProjectConfig *config)
@@ -208,23 +337,100 @@ void config_dnit(ProjectConfig *config)
     free(config->version);
     free(config->main_file);
     free(config->target_name);
+    free(config->default_target);
     free(config->src_dir);
     free(config->dep_dir);
     free(config->lib_dir);
     free(config->out_dir);
-    free(config->bin_dir);
-    free(config->obj_dir);
-    free(config->target_triple);
     free(config->runtime_path);
     free(config->stdlib_path);
 
+    // cleanup targets
+    for (int i = 0; i < config->target_count; i++)
+    {
+        target_config_dnit(config->targets[i]);
+        free(config->targets[i]);
+    }
+    free(config->targets);
+
+    // cleanup dependencies
     for (int i = 0; i < config->dep_count; i++)
     {
+        dependency_config_dnit(config->dependencies[i]);
         free(config->dependencies[i]);
     }
     free(config->dependencies);
 
+    for (int i = 0; i < config->lib_dep_count; i++)
+    {
+        free(config->lib_dependencies[i]);
+    }
+    free(config->lib_dependencies);
+
     memset(config, 0, sizeof(ProjectConfig));
+}
+
+bool config_add_target(ProjectConfig *config, const char *name, const char *target_triple)
+{
+    // check if target already exists
+    for (int i = 0; i < config->target_count; i++)
+    {
+        if (strcmp(config->targets[i]->name, name) == 0)
+            return false; // already exists
+    }
+
+    // grow targets array if needed
+    if (config->target_count == 0)
+    {
+        config->targets = malloc(sizeof(TargetConfig *));
+    }
+    else
+    {
+        config->targets = realloc(config->targets, (config->target_count + 1) * sizeof(TargetConfig *));
+    }
+
+    config->targets[config->target_count] = target_config_create(name, target_triple);
+    config->target_count++;
+
+    return true;
+}
+
+TargetConfig *config_get_target(ProjectConfig *config, const char *name)
+{
+    for (int i = 0; i < config->target_count; i++)
+    {
+        if (strcmp(config->targets[i]->name, name) == 0)
+            return config->targets[i];
+    }
+    return NULL;
+}
+
+TargetConfig *config_get_target_by_triple(ProjectConfig *config, const char *target_triple)
+{
+    for (int i = 0; i < config->target_count; i++)
+    {
+        if (strcmp(config->targets[i]->target_triple, target_triple) == 0)
+            return config->targets[i];
+    }
+    return NULL;
+}
+
+TargetConfig *config_get_default_target(ProjectConfig *config)
+{
+    if (config->default_target && strcmp(config->default_target, "all") != 0)
+    {
+        return config_get_target(config, config->default_target);
+    }
+    else if (config->target_count > 0)
+    {
+        return config->targets[0]; // first target as fallback
+    }
+    return NULL;
+}
+
+bool config_is_build_all_targets(ProjectConfig *config)
+{
+    return !config->default_target || strcmp(config->default_target, "all") == 0;
 }
 
 ProjectConfig *config_load(const char *config_path)
@@ -239,9 +445,25 @@ ProjectConfig *config_load(const char *config_path)
     TomlParser parser;
     toml_parser_init(&parser, content);
 
-    // simple key-value parsing
+    char *current_section = NULL;
+
+    // enhanced section-aware parsing
     while (parser.pos < parser.len)
     {
+        toml_skip_whitespace(&parser);
+
+        if (parser.pos >= parser.len)
+            break;
+
+        // check for section header
+        if (parser.input[parser.pos] == '[')
+        {
+            free(current_section);
+            current_section = toml_parse_section_name(&parser);
+            continue;
+        }
+
+        // parse key-value pair
         char *key = toml_parse_identifier(&parser);
         if (!key)
         {
@@ -257,91 +479,137 @@ ProjectConfig *config_load(const char *config_path)
             continue;
         }
 
-        // parse value based on key
-        if (strcmp(key, "name") == 0)
+        // parse value based on section and key
+        if (!current_section || strcmp(current_section, "project") == 0)
         {
-            config->name = toml_parse_string(&parser);
+            // handle project section keys
+            if (strcmp(key, "name") == 0)
+            {
+                config->name = toml_parse_string(&parser);
+            }
+            else if (strcmp(key, "version") == 0)
+            {
+                config->version = toml_parse_string(&parser);
+            }
+            else if (strcmp(key, "main") == 0)
+            {
+                config->main_file = toml_parse_string(&parser);
+            }
+            else if (strcmp(key, "default-target") == 0)
+            {
+                config->default_target = toml_parse_string(&parser);
+            }
         }
-        else if (strcmp(key, "version") == 0)
+        else if (strcmp(current_section, "directories") == 0)
         {
-            config->version = toml_parse_string(&parser);
+            // handle directories section keys
+            if (strcmp(key, "src-dir") == 0)
+            {
+                config->src_dir = toml_parse_string(&parser);
+            }
+            else if (strcmp(key, "dep-dir") == 0)
+            {
+                config->dep_dir = toml_parse_string(&parser);
+            }
+            else if (strcmp(key, "lib-dir") == 0)
+            {
+                config->lib_dir = toml_parse_string(&parser);
+            }
+            else if (strcmp(key, "out-dir") == 0)
+            {
+                config->out_dir = toml_parse_string(&parser);
+            }
+            // bin-dir and obj-dir are now computed dynamically per target
         }
-        else if (strcmp(key, "main") == 0)
+        else if (strncmp(current_section, "targets.", 8) == 0)
         {
-            config->main_file = toml_parse_string(&parser);
+            // handle target-specific section - extract target name
+            const char   *target_name = current_section + 8;
+            TargetConfig *target      = config_get_target(config, target_name);
+
+            // create target if it doesn't exist
+            if (!target && strcmp(key, "target") == 0)
+            {
+                char *target_triple = toml_parse_string(&parser);
+                if (target_triple)
+                {
+                    config_add_target(config, target_name, target_triple);
+                    target = config_get_target(config, target_name);
+                    free(target_triple);
+                }
+            }
+
+            if (target)
+            {
+                // parse target-specific options
+                if (strcmp(key, "target") == 0)
+                {
+                    // target triple already handled above
+                    toml_skip_table_value(&parser);
+                }
+                else if (strcmp(key, "opt-level") == 0)
+                {
+                    target->opt_level = toml_parse_number(&parser);
+                }
+                else if (strcmp(key, "emit-ast") == 0)
+                {
+                    target->emit_ast = toml_parse_bool(&parser);
+                }
+                else if (strcmp(key, "emit-ir") == 0)
+                {
+                    target->emit_ir = toml_parse_bool(&parser);
+                }
+                else if (strcmp(key, "emit-asm") == 0)
+                {
+                    target->emit_asm = toml_parse_bool(&parser);
+                }
+                else if (strcmp(key, "emit-object") == 0)
+                {
+                    target->emit_object = toml_parse_bool(&parser);
+                }
+                else if (strcmp(key, "build-library") == 0)
+                {
+                    target->build_library = toml_parse_bool(&parser);
+                }
+                else if (strcmp(key, "no-pie") == 0)
+                {
+                    target->no_pie = toml_parse_bool(&parser);
+                }
+            }
+            else
+            {
+                // skip unknown target options
+                toml_skip_table_value(&parser);
+            }
         }
-        else if (strcmp(key, "target-name") == 0)
+        else if (strcmp(current_section, "build") == 0)
         {
-            config->target_name = toml_parse_string(&parser);
+            // legacy build section - skip for now
+            toml_skip_table_value(&parser);
         }
-        else if (strcmp(key, "src-dir") == 0)
+        else if (strcmp(current_section, "runtime") == 0)
         {
-            config->src_dir = toml_parse_string(&parser);
+            // handle runtime section keys
+            if (strcmp(key, "runtime-path") == 0)
+            {
+                config->runtime_path = toml_parse_string(&parser);
+            }
+            else if (strcmp(key, "stdlib-path") == 0)
+            {
+                config->stdlib_path = toml_parse_string(&parser);
+            }
         }
-        else if (strcmp(key, "dep-dir") == 0)
+        else if (strcmp(current_section, "dependencies") == 0)
         {
-            config->dep_dir = toml_parse_string(&parser);
-        }
-        else if (strcmp(key, "lib-dir") == 0)
-        {
-            config->lib_dir = toml_parse_string(&parser);
-        }
-        else if (strcmp(key, "out-dir") == 0)
-        {
-            config->out_dir = toml_parse_string(&parser);
-        }
-        else if (strcmp(key, "bin-dir") == 0)
-        {
-            config->bin_dir = toml_parse_string(&parser);
-        }
-        else if (strcmp(key, "obj-dir") == 0)
-        {
-            config->obj_dir = toml_parse_string(&parser);
-        }
-        else if (strcmp(key, "target-triple") == 0)
-        {
-            config->target_triple = toml_parse_string(&parser);
-        }
-        else if (strcmp(key, "runtime-path") == 0)
-        {
-            config->runtime_path = toml_parse_string(&parser);
-        }
-        else if (strcmp(key, "stdlib-path") == 0)
-        {
-            config->stdlib_path = toml_parse_string(&parser);
-        }
-        else if (strcmp(key, "opt-level") == 0)
-        {
-            config->opt_level = toml_parse_number(&parser);
-        }
-        else if (strcmp(key, "emit-ast") == 0)
-        {
-            config->emit_ast = toml_parse_bool(&parser);
-        }
-        else if (strcmp(key, "emit-ir") == 0)
-        {
-            config->emit_ir = toml_parse_bool(&parser);
-        }
-        else if (strcmp(key, "emit-asm") == 0)
-        {
-            config->emit_asm = toml_parse_bool(&parser);
-        }
-        else if (strcmp(key, "emit-object") == 0)
-        {
-            config->emit_object = toml_parse_bool(&parser);
-        }
-        else if (strcmp(key, "build-library") == 0)
-        {
-            config->build_library = toml_parse_bool(&parser);
-        }
-        else if (strcmp(key, "no-pie") == 0)
-        {
-            config->no_pie = toml_parse_bool(&parser);
+            // handle dependencies section - the key is the dependency name
+            config_add_dependency(config, key, "local");
+            toml_skip_table_value(&parser); // skip the value part
         }
 
         free(key);
     }
 
+    free(current_section);
     free(content);
     return config;
 }
@@ -372,8 +640,8 @@ bool config_save(ProjectConfig *config, const char *config_path)
         fprintf(file, "main = \"%s\"\n", config->main_file);
     if (config->target_name)
         fprintf(file, "target-name = \"%s\"\n", config->target_name);
-    if (config->target_triple)
-        fprintf(file, "target-triple = \"%s\"\n", config->target_triple);
+    if (config->default_target)
+        fprintf(file, "default-target = \"%s\"\n", config->default_target);
 
     fprintf(file, "\n[directories]\n");
     if (config->src_dir)
@@ -384,26 +652,28 @@ bool config_save(ProjectConfig *config, const char *config_path)
         fprintf(file, "lib-dir = \"%s\"\n", config->lib_dir);
     if (config->out_dir)
         fprintf(file, "out-dir = \"%s\"\n", config->out_dir);
-    if (config->bin_dir)
-        fprintf(file, "bin-dir = \"%s\"\n", config->bin_dir);
-    if (config->obj_dir)
-        fprintf(file, "obj-dir = \"%s\"\n", config->obj_dir);
 
-    fprintf(file, "\n[build]\n");
-    fprintf(file, "opt-level = %d\n", config->opt_level);
-
-    if (config->emit_ast)
-        fprintf(file, "emit-ast = true\n");
-    if (config->emit_ir)
-        fprintf(file, "emit-ir = true\n");
-    if (config->emit_asm)
-        fprintf(file, "emit-asm = true\n");
-    if (config->emit_object)
-        fprintf(file, "emit-object = true\n");
-    if (config->build_library)
-        fprintf(file, "build-library = true\n");
-    if (config->no_pie)
-        fprintf(file, "no-pie = true\n");
+    // save targets
+    for (int i = 0; i < config->target_count; i++)
+    {
+        TargetConfig *target = config->targets[i];
+        fprintf(file, "\n[targets.%s]\n", target->name);
+        if (target->target_triple)
+            fprintf(file, "target = \"%s\"\n", target->target_triple);
+        fprintf(file, "opt-level = %d\n", target->opt_level);
+        if (target->emit_ast)
+            fprintf(file, "emit-ast = true\n");
+        if (target->emit_ir)
+            fprintf(file, "emit-ir = true\n");
+        if (target->emit_asm)
+            fprintf(file, "emit-asm = true\n");
+        if (!target->emit_object)
+            fprintf(file, "emit-object = false\n");
+        if (target->build_library)
+            fprintf(file, "build-library = true\n");
+        if (target->no_pie)
+            fprintf(file, "no-pie = true\n");
+    }
 
     if (config->runtime_path || config->stdlib_path)
     {
@@ -412,6 +682,36 @@ bool config_save(ProjectConfig *config, const char *config_path)
             fprintf(file, "runtime-path = \"%s\"\n", config->runtime_path);
         if (config->stdlib_path)
             fprintf(file, "stdlib-path = \"%s\"\n", config->stdlib_path);
+    }
+
+    // save dependencies
+    if (config->dep_count > 0)
+    {
+        fprintf(file, "\n[dependencies]\n");
+        for (int i = 0; i < config->dep_count; i++)
+        {
+            DependencyConfig *dep = config->dependencies[i];
+            if (strcmp(dep->type, "local") == 0)
+            {
+                // local dependencies don't need path specification
+                fprintf(file, "\"%s\" = { type = \"local\" }\n", dep->name);
+            }
+            else
+            {
+                // remote dependencies include path for updates
+                fprintf(file, "\"%s\" = { type = \"%s\", path = \"%s\" }\n", dep->name, dep->type, dep->path);
+            }
+        }
+    }
+
+    // save library dependencies
+    if (config->lib_dep_count > 0)
+    {
+        fprintf(file, "\n[lib-dependencies]\n");
+        for (int i = 0; i < config->lib_dep_count; i++)
+        {
+            fprintf(file, "\"%s\" = { path = \"lib\" }\n", config->lib_dependencies[i]);
+        }
     }
 
     fclose(file);
@@ -439,34 +739,52 @@ bool config_has_main_file(ProjectConfig *config)
     return config && config->main_file && strlen(config->main_file) > 0;
 }
 
-bool config_should_emit_ast(ProjectConfig *config)
+bool config_should_emit_ast(ProjectConfig *config, const char *target_name)
 {
-    return config && config->emit_ast;
+    if (!config || !target_name)
+        return false;
+    TargetConfig *target = config_get_target(config, target_name);
+    return target && target->emit_ast;
 }
 
-bool config_should_emit_ir(ProjectConfig *config)
+bool config_should_emit_ir(ProjectConfig *config, const char *target_name)
 {
-    return config && config->emit_ir;
+    if (!config || !target_name)
+        return false;
+    TargetConfig *target = config_get_target(config, target_name);
+    return target && target->emit_ir;
 }
 
-bool config_should_emit_asm(ProjectConfig *config)
+bool config_should_emit_asm(ProjectConfig *config, const char *target_name)
 {
-    return config && config->emit_asm;
+    if (!config || !target_name)
+        return false;
+    TargetConfig *target = config_get_target(config, target_name);
+    return target && target->emit_asm;
 }
 
-bool config_should_emit_object(ProjectConfig *config)
+bool config_should_emit_object(ProjectConfig *config, const char *target_name)
 {
-    return config && config->emit_object;
+    if (!config || !target_name)
+        return false;
+    TargetConfig *target = config_get_target(config, target_name);
+    return target && target->emit_object;
 }
 
-bool config_should_build_library(ProjectConfig *config)
+bool config_should_build_library(ProjectConfig *config, const char *target_name)
 {
-    return config && config->build_library;
+    if (!config || !target_name)
+        return false;
+    TargetConfig *target = config_get_target(config, target_name);
+    return target && target->build_library;
 }
 
-bool config_should_link_executable(ProjectConfig *config)
+bool config_should_link_executable(ProjectConfig *config, const char *target_name)
 {
-    return config && !config->build_library && !config->emit_object;
+    if (!config || !target_name)
+        return true;
+    TargetConfig *target = config_get_target(config, target_name);
+    return target && !target->build_library;
 }
 
 char *config_resolve_main_file(ProjectConfig *config, const char *project_dir)
@@ -559,51 +877,43 @@ char *config_resolve_out_dir(ProjectConfig *config, const char *project_dir)
     return path;
 }
 
-char *config_resolve_bin_dir(ProjectConfig *config, const char *project_dir)
+char *config_resolve_bin_dir(ProjectConfig *config, const char *project_dir, const char *target_name)
 {
     char *out_dir = config_resolve_out_dir(config, project_dir);
     if (!out_dir)
         return NULL;
 
-    if (!config->bin_dir)
+    if (!target_name)
     {
         free(out_dir);
         return NULL;
     }
 
-    // if bin dir is absolute path, return as is
-    if (config->bin_dir[0] == '/')
-        return strdup(config->bin_dir);
-
-    // resolve relative to out directory
-    size_t len  = strlen(out_dir) + strlen(config->bin_dir) + 2;
+    // compute bin directory: out_dir/target_name/bin
+    size_t len  = strlen(out_dir) + strlen(target_name) + strlen("/bin") + 3;
     char  *path = malloc(len);
-    snprintf(path, len, "%s/%s", out_dir, config->bin_dir);
+    snprintf(path, len, "%s/%s/bin", out_dir, target_name);
 
     free(out_dir);
     return path;
 }
 
-char *config_resolve_obj_dir(ProjectConfig *config, const char *project_dir)
+char *config_resolve_obj_dir(ProjectConfig *config, const char *project_dir, const char *target_name)
 {
     char *out_dir = config_resolve_out_dir(config, project_dir);
     if (!out_dir)
         return NULL;
 
-    if (!config->obj_dir)
+    if (!target_name)
     {
         free(out_dir);
         return NULL;
     }
 
-    // if obj dir is absolute path, return as is
-    if (config->obj_dir[0] == '/')
-        return strdup(config->obj_dir);
-
-    // resolve relative to out directory
-    size_t len  = strlen(out_dir) + strlen(config->obj_dir) + 2;
+    // compute obj directory: out_dir/target_name/obj
+    size_t len  = strlen(out_dir) + strlen(target_name) + strlen("/obj") + 3;
     char  *path = malloc(len);
-    snprintf(path, len, "%s/%s", out_dir, config->obj_dir);
+    snprintf(path, len, "%s/%s/obj", out_dir, target_name);
 
     free(out_dir);
     return path;
@@ -707,26 +1017,32 @@ bool config_ensure_directories(ProjectConfig *config, const char *project_dir)
         free(out_dir);
     }
 
-    char *bin_dir = config_resolve_bin_dir(config, project_dir);
-    if (bin_dir)
+    // create target-specific directories for each target
+    for (int i = 0; i < config->target_count; i++)
     {
-        if (!ensure_directory_exists(bin_dir))
-        {
-            free(bin_dir);
-            return false;
-        }
-        free(bin_dir);
-    }
+        const char *target_name = config->targets[i]->name;
 
-    char *obj_dir = config_resolve_obj_dir(config, project_dir);
-    if (obj_dir)
-    {
-        if (!ensure_directory_exists(obj_dir))
+        char *bin_dir = config_resolve_bin_dir(config, project_dir, target_name);
+        if (bin_dir)
         {
-            free(obj_dir);
-            return false;
+            if (!ensure_directory_exists(bin_dir))
+            {
+                free(bin_dir);
+                return false;
+            }
+            free(bin_dir);
         }
-        free(obj_dir);
+
+        char *obj_dir = config_resolve_obj_dir(config, project_dir, target_name);
+        if (obj_dir)
+        {
+            if (!ensure_directory_exists(obj_dir))
+            {
+                free(obj_dir);
+                return false;
+            }
+            free(obj_dir);
+        }
     }
 
     return true;
@@ -743,9 +1059,6 @@ bool config_validate(ProjectConfig *config)
     if (!config->main_file || strlen(config->main_file) == 0)
         return false;
 
-    if (config->opt_level < 0 || config->opt_level > 3)
-        return false;
-
     // validate that required directories are configured
     if (!config->src_dir)
         return false;
@@ -753,11 +1066,161 @@ bool config_validate(ProjectConfig *config)
     if (!config->out_dir)
         return false;
 
-    if (!config->bin_dir)
+    // validate targets
+    if (config->target_count == 0)
         return false;
 
-    if (!config->obj_dir)
-        return false;
+    for (int i = 0; i < config->target_count; i++)
+    {
+        TargetConfig *target = config->targets[i];
+        if (!target->name || strlen(target->name) == 0)
+            return false;
+        if (!target->target_triple || strlen(target->target_triple) == 0)
+            return false;
+        if (target->opt_level < 0 || target->opt_level > 3)
+            return false;
+    }
 
     return true;
+}
+
+// dependency management functions
+bool config_add_dependency_full(ProjectConfig *config, const char *name, const char *type, const char *path)
+{
+    if (!config || !name)
+        return false;
+
+    // check if dependency already exists
+    for (int i = 0; i < config->dep_count; i++)
+    {
+        if (strcmp(config->dependencies[i]->name, name) == 0)
+            return false; // already exists
+    }
+
+    // grow dependencies array if needed
+    if (config->dep_count == 0)
+    {
+        config->dependencies = malloc(sizeof(DependencyConfig *));
+    }
+    else
+    {
+        DependencyConfig **new_deps = realloc(config->dependencies, (config->dep_count + 1) * sizeof(DependencyConfig *));
+        if (!new_deps)
+            return false;
+        config->dependencies = new_deps;
+    }
+
+    config->dependencies[config->dep_count] = dependency_config_create(name, type, path);
+    config->dep_count++;
+
+    return true;
+}
+
+bool config_add_dependency(ProjectConfig *config, const char *dep_name, const char *dep_source)
+{
+    // for backward compatibility, assume local type and ignore source path for local deps
+    (void)dep_source; // suppress unused parameter warning
+    return config_add_dependency_full(config, dep_name, "local", NULL);
+}
+
+DependencyConfig *config_get_dependency(ProjectConfig *config, const char *dep_name)
+{
+    if (!config || !dep_name)
+        return NULL;
+
+    for (int i = 0; i < config->dep_count; i++)
+    {
+        if (strcmp(config->dependencies[i]->name, dep_name) == 0)
+            return config->dependencies[i];
+    }
+    return NULL;
+}
+
+bool config_has_dependency(ProjectConfig *config, const char *dep_name)
+{
+    return config_get_dependency(config, dep_name) != NULL;
+}
+
+bool config_remove_dependency(ProjectConfig *config, const char *dep_name)
+{
+    if (!config || !dep_name)
+        return false;
+
+    for (int i = 0; i < config->dep_count; i++)
+    {
+        if (strcmp(config->dependencies[i]->name, dep_name) == 0)
+        {
+            // free the dependency
+            dependency_config_dnit(config->dependencies[i]);
+            free(config->dependencies[i]);
+
+            // shift remaining dependencies
+            for (int j = i; j < config->dep_count - 1; j++)
+            {
+                config->dependencies[j] = config->dependencies[j + 1];
+            }
+            config->dep_count--;
+
+            return true;
+        }
+    }
+    return false;
+}
+
+bool config_add_lib_dependency(ProjectConfig *config, const char *lib_name, const char *lib_path)
+{
+    if (!config || !lib_name || !lib_path)
+        return false;
+
+    // check if lib dependency already exists
+    for (int i = 0; i < config->lib_dep_count; i++)
+    {
+        if (strcmp(config->lib_dependencies[i], lib_name) == 0)
+            return false; // already exists
+    }
+
+    // resize array if needed
+    if (config->lib_dep_count % 8 == 0)
+    {
+        int    new_capacity = config->lib_dep_count + 8;
+        char **new_deps     = realloc(config->lib_dependencies, new_capacity * sizeof(char *));
+        if (!new_deps)
+            return false;
+        config->lib_dependencies = new_deps;
+    }
+
+    // add lib dependency
+    config->lib_dependencies[config->lib_dep_count] = strdup(lib_name);
+    config->lib_dep_count++;
+
+    return true;
+}
+
+char **config_get_dependency_paths(ProjectConfig *config, const char *project_dir)
+{
+    if (!config || !project_dir)
+        return NULL;
+
+    char **paths = malloc((config->dep_count + 1) * sizeof(char *));
+    if (!paths)
+        return NULL;
+
+    char *dep_dir = config_resolve_dep_dir(config, project_dir);
+    if (!dep_dir)
+    {
+        free(paths);
+        return NULL;
+    }
+
+    for (int i = 0; i < config->dep_count; i++)
+    {
+        DependencyConfig *dep = config->dependencies[i];
+        size_t            len = strlen(dep_dir) + strlen(dep->name) + 2;
+        paths[i]              = malloc(len);
+        snprintf(paths[i], len, "%s/%s", dep_dir, dep->name);
+    }
+    paths[config->dep_count] = NULL; // null terminate
+
+    free(dep_dir);
+    return paths;
 }

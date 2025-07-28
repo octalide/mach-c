@@ -22,9 +22,11 @@ typedef struct TargetConfig
 // dependency configuration
 typedef struct DependencyConfig
 {
-    char *name; // dependency name
-    char *type; // dependency type ("local", "git", etc.)
-    char *path; // source path or URL
+    char *name;         // code-accessible import name (e.g., "std")
+    char *project_name; // original project name (for directory lookup)
+    char *title;        // human-readable project title (optional)
+    char *type;         // dependency type ("local", "git", etc.)
+    char *path;         // source path or URL
 } DependencyConfig;
 
 // project configuration
@@ -108,6 +110,7 @@ bool              config_has_dependency(ProjectConfig *config, const char *dep_n
 bool              config_remove_dependency(ProjectConfig *config, const char *dep_name);
 DependencyConfig *config_get_dependency(ProjectConfig *config, const char *dep_name);
 char            **config_get_dependency_paths(ProjectConfig *config, const char *project_dir);
+char             *config_resolve_dependency_module_path(ProjectConfig *config, const char *project_dir, const char *module_path);
 
 // directory management
 bool config_ensure_directories(ProjectConfig *config, const char *project_dir);

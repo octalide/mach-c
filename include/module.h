@@ -51,6 +51,10 @@ struct ModuleManager
     int             search_count; // number of search paths
     ModuleErrorList errors;       // accumulated errors during loading
     bool            had_error;    // true if any module failed to load/parse
+
+    // configuration for dependency resolution
+    void       *config;      // ProjectConfig* (void* to avoid circular includes)
+    const char *project_dir; // project directory for resolving paths
 };
 
 // module manager lifecycle
@@ -59,6 +63,7 @@ void module_manager_dnit(ModuleManager *manager);
 
 // search path management
 void module_manager_add_search_path(ModuleManager *manager, const char *path);
+void module_manager_set_config(ModuleManager *manager, void *config, const char *project_dir);
 
 // module loading
 Module *module_manager_load_module(ModuleManager *manager, const char *module_path);

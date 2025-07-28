@@ -65,17 +65,15 @@ static unsigned int hash_module_name(const char *name, int capacity)
 
 void module_manager_init(ModuleManager *manager)
 {
-    manager->capacity     = 16; // initial hash table size
+    manager->capacity     = 32;
     manager->count        = 0;
     manager->modules      = calloc(manager->capacity, sizeof(Module *));
     manager->search_paths = NULL;
     manager->search_count = 0;
-    manager->had_error    = false;
-
+    manager->config       = NULL;
+    manager->project_dir  = NULL;
     module_error_list_init(&manager->errors);
-
-    // add current directory as default search path
-    module_manager_add_search_path(manager, ".");
+    manager->had_error = false;
 }
 
 void module_manager_dnit(ModuleManager *manager)
@@ -112,8 +110,63 @@ void module_manager_add_search_path(ModuleManager *manager, const char *path)
     manager->search_count++;
 }
 
+void module_manager_set_config(ModuleManager *manager, void *config, const char *project_dir)
+{
+    manager->config      = config;
+    manager->project_dir = project_dir;
+}
+
 char *module_path_to_file_path(ModuleManager *manager, const char *module_path)
 {
+    // first try dependency resolution if config is available
+    if (manager->config && manager->project_dir)
+    {
+        // need to include config.h here, but to avoid circular includes,
+        // we'll declare the function we need
+        extern char *config_resolve_dependency_module_path(void *config, const char *project_dir, const char *module_path);
+
+        char *dep_path = config_resolve_dependency_module_path(manager->config, manager->project_dir, module_path);
+        if (dep_path)
+        {
+            // convert dependency path to file path
+            char *file_path = malloc(strlen(dep_path) + 6); // ".mach" + null
+            strcpy(file_path, dep_path);
+
+            // replace dots with slashes (only in the module part after dependency name)
+            char *dot_pos = strchr(file_path, '.');
+            if (dot_pos)
+            {
+                // find the second dot (after dependency name)
+                dot_pos = strchr(dot_pos + 1, '.');
+                if (dot_pos)
+                {
+                    // replace remaining dots with slashes
+                    for (char *p = dot_pos; *p; p++)
+                    {
+                        if (*p == '.')
+                        {
+                            *p = '/';
+                        }
+                    }
+                }
+            }
+            strcat(file_path, ".mach");
+
+            // check if file exists
+            FILE *test = fopen(file_path, "r");
+            if (test)
+            {
+                fclose(test);
+                free(dep_path);
+                return file_path;
+            }
+
+            free(file_path);
+            free(dep_path);
+        }
+    }
+
+    // fallback to original resolution method
     // convert module.path to module/path.mach
     char *file_path = malloc(strlen(module_path) + 6); // ".mach" + null
     strcpy(file_path, module_path);

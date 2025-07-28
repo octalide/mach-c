@@ -40,7 +40,7 @@ static void print_usage(const char *program_name)
     fprintf(stderr, "usage: %s <command> [options]\n", program_name);
     fprintf(stderr, "commands:\n");
     fprintf(stderr, "  init                      initialize a new project\n");
-    fprintf(stderr, "  build [file] [options]    build project or single file\n");
+    fprintf(stderr, "  build [file/dir] [options] build project or single file\n");
     fprintf(stderr, "  clean                     clean build artifacts\n");
     fprintf(stderr, "  dep <subcommand>          dependency management\n");
     fprintf(stderr, "  help [command]            show help message\n");
@@ -319,7 +319,7 @@ static int init_command(int argc, char **argv)
         return 1;
     }
 
-    fprintf(main_file, "use console: dep.std.console;\n\n");
+    fprintf(main_file, "use console: std.io;\n\n");
     fprintf(main_file, "fun main() u32 {\n");
     fprintf(main_file, "    console.print(\"Hello, world!\\n\");\n");
     fprintf(main_file, "    ret 0;\n");
@@ -438,21 +438,43 @@ static int build_command(int argc, char **argv)
     ProjectConfig *config             = NULL;
     char          *resolved_main_file = NULL;
     bool           is_project_build   = false;
+    const char    *project_dir        = ".";
 
-    // try to load project config first
-    config = config_load_from_dir(".");
-    if (config && config_has_main_file(config))
-    {
-        is_project_build   = true;
-        resolved_main_file = config_resolve_main_file(config, ".");
-        filename           = resolved_main_file;
-    }
-
-    // check if a file was specified on command line
+    // check if a directory path is provided
     if (argc >= 3 && argv[2][0] != '-')
     {
-        filename         = argv[2];
-        is_project_build = false; // override project build when file is specified
+        // check if it's a directory
+        struct stat st;
+        if (stat(argv[2], &st) == 0 && S_ISDIR(st.st_mode))
+        {
+            project_dir = argv[2];
+            // try to load config from the specified directory
+            config = config_load_from_dir(project_dir);
+            if (config && config_has_main_file(config))
+            {
+                is_project_build   = true;
+                resolved_main_file = config_resolve_main_file(config, project_dir);
+                filename           = resolved_main_file;
+            }
+        }
+        else
+        {
+            // treat as a file path
+            filename         = argv[2];
+            is_project_build = false;
+        }
+    }
+
+    // if no directory/file specified, try current directory
+    if (!filename && !config)
+    {
+        config = config_load_from_dir(".");
+        if (config && config_has_main_file(config))
+        {
+            is_project_build   = true;
+            resolved_main_file = config_resolve_main_file(config, ".");
+            filename           = resolved_main_file;
+        }
     }
 
     if (!filename)
@@ -563,7 +585,7 @@ static int build_command(int argc, char **argv)
         if (is_project_build && config)
         {
             // use project config output
-            default_output = get_executable_path(config, ".", target_name);
+            default_output = get_executable_path(config, project_dir, target_name);
             if (default_output)
             {
                 options.output_file = default_output;
@@ -663,6 +685,12 @@ static int build_command(int argc, char **argv)
     SemanticAnalyzer analyzer;
     semantic_analyzer_init(&analyzer);
 
+    // set configuration for dependency resolution
+    if (config)
+    {
+        module_manager_set_config(&analyzer.module_manager, config, project_dir);
+    }
+
     // add search paths for modules
     char *base_dir = get_directory(filename);
     module_manager_add_search_path(&analyzer.module_manager, base_dir);
@@ -671,7 +699,7 @@ static int build_command(int argc, char **argv)
     // add dependency directory from config
     if (config)
     {
-        char *dep_dir = config_resolve_dep_dir(config, ".");
+        char *dep_dir = config_resolve_dep_dir(config, project_dir);
         if (dep_dir)
         {
             module_manager_add_search_path(&analyzer.module_manager, dep_dir);
@@ -1338,7 +1366,21 @@ static int dep_list_command(int argc, char **argv)
         for (int i = 0; i < config->dep_count; i++)
         {
             DependencyConfig *dep = config->dependencies[i];
-            printf("  %s (type: %s, path: %s)\n", dep->name, dep->type, dep->path);
+            printf("  %s", dep->name);
+            if (strcmp(dep->name, dep->project_name) != 0)
+            {
+                printf(" (project: %s)", dep->project_name);
+            }
+            printf(" [%s]", dep->type);
+            if (dep->title && strlen(dep->title) > 0)
+            {
+                printf(" - %s", dep->title);
+            }
+            if (dep->path && strlen(dep->path) > 0)
+            {
+                printf(" (%s)", dep->path);
+            }
+            printf("\n");
         }
     }
 

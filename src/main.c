@@ -34,6 +34,7 @@ static int  dep_add_command(int argc, char **argv);
 static int  dep_remove_command(int argc, char **argv);
 static int  dep_list_command(int argc, char **argv);
 static bool copy_directory(const char *src, const char *dest);
+static bool is_valid_mach_project(const char *path);
 
 static void print_usage(const char *program_name)
 {
@@ -270,6 +271,30 @@ static int init_command(int argc, char **argv)
     const char *mach_std = getenv("MACH_STD");
     if (mach_std)
     {
+        // validate that MACH_STD points to a valid mach project
+        if (!is_valid_mach_project(mach_std))
+        {
+            fprintf(stderr, "error: MACH_STD='%s' does not contain a valid mach project\n", mach_std);
+            fprintf(stderr, "make sure MACH_STD points to a directory with a valid mach.toml file\n");
+            config_dnit(config);
+            free(config);
+            return 1;
+        }
+
+        // expand tilde if necessary
+        char *expanded_mach_std = NULL;
+        if (mach_std[0] == '~' && (mach_std[1] == '/' || mach_std[1] == '\0'))
+        {
+            const char *home = getenv("HOME");
+            if (home)
+            {
+                size_t len        = strlen(home) + strlen(mach_std) + 1;
+                expanded_mach_std = malloc(len);
+                snprintf(expanded_mach_std, len, "%s%s", home, mach_std + 1);
+                mach_std = expanded_mach_std;
+            }
+        }
+
         // automatically add and copy std dependency
         printf("adding default standard library dependency from MACH_STD...\n");
 
@@ -281,23 +306,31 @@ static int init_command(int argc, char **argv)
 
             if (copy_directory(mach_std, dest_path))
             {
-                config_add_dependency(config, "std", mach_std);
+                config_add_dependency_full(config, "std", "local");
                 printf("standard library added successfully\n");
             }
             else
             {
-                fprintf(stderr, "warning: failed to copy standard library from MACH_STD\n");
-                config_add_dependency(config, "std", "local"); // add reference anyway
+                fprintf(stderr, "error: failed to copy standard library from MACH_STD\n");
+                config_dnit(config);
+                free(config);
+                free(expanded_mach_std);
+                return 1;
             }
 
             free(dep_dir);
         }
+
+        free(expanded_mach_std);
     }
     else
     {
-        // add reference to std dependency (user will need to add it manually)
-        config_add_dependency(config, "std", "local");
-        printf("note: MACH_STD not set, add standard library with: cmach dep add std $MACH_STD\n");
+        fprintf(stderr, "error: MACH_STD environment variable not set\n");
+        fprintf(stderr, "set MACH_STD to the path of your mach standard library\n");
+        fprintf(stderr, "example: export MACH_STD=/path/to/mach-std\n");
+        config_dnit(config);
+        free(config);
+        return 1;
     }
 
     if (!config_save(config, path))
@@ -319,7 +352,7 @@ static int init_command(int argc, char **argv)
         return 1;
     }
 
-    fprintf(main_file, "use console: std.io;\n\n");
+    fprintf(main_file, "use console: dep.std.io.console;\n\n");
     fprintf(main_file, "fun main() u32 {\n");
     fprintf(main_file, "    console.print(\"Hello, world!\\n\");\n");
     fprintf(main_file, "    ret 0;\n");
@@ -1131,6 +1164,43 @@ static int run_command(int argc, char **argv)
     return result;
 }
 
+// utility function to check if a directory contains a valid mach project
+static bool is_valid_mach_project(const char *path)
+{
+    if (!path)
+        return false;
+
+    // expand tilde if necessary
+    char *expanded_path = NULL;
+    if (path[0] == '~' && (path[1] == '/' || path[1] == '\0'))
+    {
+        const char *home = getenv("HOME");
+        if (home)
+        {
+            size_t len    = strlen(home) + strlen(path) + 1;
+            expanded_path = malloc(len);
+            snprintf(expanded_path, len, "%s%s", home, path + 1);
+            path = expanded_path;
+        }
+    }
+
+    char config_path[1024];
+    snprintf(config_path, sizeof(config_path), "%s/mach.toml", path);
+
+    // check if mach.toml exists and can be loaded
+    ProjectConfig *config   = config_load(config_path);
+    bool           is_valid = false;
+    if (config)
+    {
+        config_dnit(config);
+        free(config);
+        is_valid = true;
+    }
+
+    free(expanded_path);
+    return is_valid;
+}
+
 // utility function to copy directory recursively
 static bool copy_directory(const char *src, const char *dest)
 {
@@ -1376,11 +1446,7 @@ static int dep_list_command(int argc, char **argv)
             {
                 printf(" - %s", dep->title);
             }
-            if (dep->path && strlen(dep->path) > 0)
-            {
-                printf(" (%s)", dep->path);
-            }
-            printf("\n");
+            printf(" (%s)\n", dep->type ? dep->type : "local");
         }
     }
 

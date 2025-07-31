@@ -128,28 +128,9 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_path)
         char *dep_path = config_resolve_dependency_module_path(manager->config, manager->project_dir, module_path);
         if (dep_path)
         {
-            // convert dependency path to file path
+            // add .mach extension to get final file path
             char *file_path = malloc(strlen(dep_path) + 6); // ".mach" + null
             strcpy(file_path, dep_path);
-
-            // replace dots with slashes (only in the module part after dependency name)
-            char *dot_pos = strchr(file_path, '.');
-            if (dot_pos)
-            {
-                // find the second dot (after dependency name)
-                dot_pos = strchr(dot_pos + 1, '.');
-                if (dot_pos)
-                {
-                    // replace remaining dots with slashes
-                    for (char *p = dot_pos; *p; p++)
-                    {
-                        if (*p == '.')
-                        {
-                            *p = '/';
-                        }
-                    }
-                }
-            }
             strcat(file_path, ".mach");
 
             // check if file exists

@@ -293,7 +293,7 @@ TargetConfig *target_config_create(const char *name, const char *target_triple)
     return target;
 }
 
-DependencyConfig *dependency_config_create(const char *name, const char *type, const char *path)
+DependencyConfig *dependency_config_create(const char *name, const char *type)
 {
     DependencyConfig *dep = malloc(sizeof(DependencyConfig));
     dependency_config_init(dep);
@@ -301,16 +301,6 @@ DependencyConfig *dependency_config_create(const char *name, const char *type, c
     dep->project_name = strdup(name); // default project_name same as name
     dep->title        = NULL;         // optional, set by config parser
     dep->type         = strdup(type ? type : "local");
-
-    // only store path for non-local dependencies
-    if (type && strcmp(type, "local") != 0 && path)
-    {
-        dep->path = strdup(path);
-    }
-    else
-    {
-        dep->path = strdup(""); // empty for local dependencies
-    }
 
     return dep;
 }
@@ -326,7 +316,6 @@ void dependency_config_dnit(DependencyConfig *dep)
     free(dep->project_name);
     free(dep->title);
     free(dep->type);
-    free(dep->path);
     memset(dep, 0, sizeof(DependencyConfig));
 }
 
@@ -347,6 +336,7 @@ void config_dnit(ProjectConfig *config)
     free(config->lib_dir);
     free(config->out_dir);
     free(config->runtime_path);
+    free(config->runtime_module);
     free(config->stdlib_path);
 
     // cleanup targets
@@ -598,6 +588,10 @@ ProjectConfig *config_load(const char *config_path)
             {
                 config->runtime_path = toml_parse_string(&parser);
             }
+            else if (strcmp(key, "runtime") == 0 || strcmp(key, "runtime-module") == 0)
+            {
+                config->runtime_module = toml_parse_string(&parser);
+            }
             else if (strcmp(key, "stdlib-path") == 0)
             {
                 config->stdlib_path = toml_parse_string(&parser);
@@ -605,91 +599,12 @@ ProjectConfig *config_load(const char *config_path)
         }
         else if (strcmp(current_section, "dependencies") == 0)
         {
-            // legacy format - handle dependencies section - the key is the dependency name
-            // check if value is a table with type, title, etc.
-            toml_skip_whitespace(&parser);
-
-            if (parser.pos < parser.len && parser.input[parser.pos] == '{')
+            // simple format: dependencies = { std = "local", mylib = "git" }
+            char *dep_type = toml_parse_string(&parser);
+            if (dep_type)
             {
-                // structured dependency: "name" = { type = "local", title = "...", ... }
-                parser.pos++; // skip '{'
-
-                char *dep_type  = NULL;
-                char *dep_title = NULL;
-                char *dep_path  = NULL;
-
-                // parse table contents
-                while (parser.pos < parser.len)
-                {
-                    toml_skip_whitespace(&parser);
-
-                    if (parser.pos >= parser.len || parser.input[parser.pos] == '}')
-                        break;
-
-                    char *table_key = toml_parse_identifier(&parser);
-                    if (!table_key)
-                        break;
-
-                    if (!toml_expect_char(&parser, '='))
-                    {
-                        free(table_key);
-                        break;
-                    }
-
-                    if (strcmp(table_key, "type") == 0)
-                    {
-                        dep_type = toml_parse_string(&parser);
-                    }
-                    else if (strcmp(table_key, "title") == 0)
-                    {
-                        dep_title = toml_parse_string(&parser);
-                    }
-                    else if (strcmp(table_key, "path") == 0)
-                    {
-                        dep_path = toml_parse_string(&parser);
-                    }
-                    else
-                    {
-                        // skip unknown keys
-                        toml_skip_table_value(&parser);
-                    }
-
-                    free(table_key);
-
-                    // skip comma if present
-                    toml_skip_whitespace(&parser);
-                    if (parser.pos < parser.len && parser.input[parser.pos] == ',')
-                        parser.pos++;
-                }
-
-                // skip closing brace
-                if (parser.pos < parser.len && parser.input[parser.pos] == '}')
-                    parser.pos++;
-
-                // create dependency with parsed values
-                if (config_add_dependency_full(config, key, dep_type ? dep_type : "local", dep_path))
-                {
-                    // set title if provided
-                    if (dep_title)
-                    {
-                        DependencyConfig *dep = config_get_dependency(config, key);
-                        if (dep)
-                        {
-                            free(dep->title);
-                            dep->title = strdup(dep_title);
-                        }
-                    }
-                }
-
+                config_add_dependency_full(config, key, dep_type);
                 free(dep_type);
-                free(dep_title);
-                free(dep_path);
-            }
-            else
-            {
-                // simple dependency: "name" = "local" or just "name"
-                config_add_dependency(config, key, "local");
-                toml_skip_table_value(&parser); // skip the value part
             }
         }
         else if (strncmp(current_section, "dependency.", 11) == 0)
@@ -712,7 +627,7 @@ ProjectConfig *config_load(const char *config_path)
             if (!dep)
             {
                 // create new dependency with defaults
-                config_add_dependency_full(config, project_name, "local", NULL);
+                config_add_dependency_full(config, project_name, "local");
                 // get the newly created dependency and set project_name
                 dep = config->dependencies[config->dep_count - 1];
                 free(dep->project_name);
@@ -722,6 +637,7 @@ ProjectConfig *config_load(const char *config_path)
             if (dep)
             {
                 // parse dependency properties
+                printf("debug: parsing dependency key '%s'\n", key);
                 if (strcmp(key, "type") == 0)
                 {
                     char *new_type = toml_parse_string(&parser);
@@ -729,6 +645,7 @@ ProjectConfig *config_load(const char *config_path)
                     {
                         free(dep->type);
                         dep->type = new_type;
+                        printf("debug: set dependency type to '%s'\n", new_type);
                     }
                 }
                 else if (strcmp(key, "title") == 0)
@@ -740,13 +657,14 @@ ProjectConfig *config_load(const char *config_path)
                         dep->title = new_title;
                     }
                 }
-                else if (strcmp(key, "path") == 0)
+                else if (strcmp(key, "type") == 0)
                 {
-                    char *new_path = toml_parse_string(&parser);
-                    if (new_path)
+                    char *new_type = toml_parse_string(&parser);
+                    if (new_type)
                     {
-                        free(dep->path);
-                        dep->path = new_path;
+                        free(dep->type);
+                        dep->type = new_type;
+                        printf("debug: set dependency type to '%s'\n", new_type);
                     }
                 }
                 else if (strcmp(key, "name") == 0)
@@ -840,39 +758,25 @@ bool config_save(ProjectConfig *config, const char *config_path)
             fprintf(file, "no-pie = true\n");
     }
 
-    if (config->runtime_path || config->stdlib_path)
+    if (config->runtime_path || config->runtime_module || config->stdlib_path)
     {
         fprintf(file, "\n[runtime]\n");
         if (config->runtime_path)
             fprintf(file, "runtime-path = \"%s\"\n", config->runtime_path);
+        if (config->runtime_module)
+            fprintf(file, "runtime = \"%s\"\n", config->runtime_module);
         if (config->stdlib_path)
             fprintf(file, "stdlib-path = \"%s\"\n", config->stdlib_path);
     }
 
-    // save dependencies using new section format
+    // save dependencies using simple format
     if (config->dep_count > 0)
     {
+        fprintf(file, "\n[dependencies]\n");
         for (int i = 0; i < config->dep_count; i++)
         {
             DependencyConfig *dep = config->dependencies[i];
-            fprintf(file, "\n[dependency.%s]\n", dep->project_name);
-            fprintf(file, "type = \"%s\"\n", dep->type);
-
-            // only save name if it differs from project_name (indicating override)
-            if (strcmp(dep->name, dep->project_name) != 0)
-            {
-                fprintf(file, "name = \"%s\"\n", dep->name);
-            }
-
-            if (dep->title && strlen(dep->title) > 0)
-            {
-                fprintf(file, "title = \"%s\"\n", dep->title);
-            }
-
-            if (dep->path && strlen(dep->path) > 0)
-            {
-                fprintf(file, "path = \"%s\"\n", dep->path);
-            }
+            fprintf(file, "%s = \"%s\"\n", dep->name, dep->type ? dep->type : "local");
         }
     }
 
@@ -895,10 +799,11 @@ ProjectConfig *config_create_default(const char *project_name)
     ProjectConfig *config = malloc(sizeof(ProjectConfig));
     config_init(config);
 
-    config->name        = strdup(project_name);
-    config->version     = strdup("0.1.0");
-    config->main_file   = strdup("main.mach");
-    config->target_name = strdup(project_name);
+    config->name           = strdup(project_name);
+    config->version        = strdup("0.1.0");
+    config->main_file      = strdup("main.mach");
+    config->target_name    = strdup(project_name);
+    config->runtime_module = strdup("dep.std.runtime"); // default runtime module
 
     // no default directories - user must configure them
     // this ensures all paths are explicitly configured
@@ -1108,6 +1013,29 @@ char *config_resolve_runtime_path(ProjectConfig *config, const char *project_dir
     return path;
 }
 
+// runtime module management
+bool config_set_runtime_module(ProjectConfig *config, const char *module_path)
+{
+    if (!config || !module_path)
+        return false;
+
+    free(config->runtime_module);
+    config->runtime_module = strdup(module_path);
+    return true;
+}
+
+char *config_get_runtime_module(ProjectConfig *config)
+{
+    if (!config || !config->runtime_module)
+        return NULL;
+    return strdup(config->runtime_module);
+}
+
+bool config_has_runtime_module(ProjectConfig *config)
+{
+    return config && config->runtime_module && strlen(config->runtime_module) > 0;
+}
+
 static bool ensure_directory_exists(const char *path)
 {
     struct stat st;
@@ -1257,7 +1185,7 @@ bool config_validate(ProjectConfig *config)
 }
 
 // dependency management functions
-bool config_add_dependency_full(ProjectConfig *config, const char *name, const char *type, const char *path)
+bool config_add_dependency_full(ProjectConfig *config, const char *name, const char *type)
 {
     if (!config || !name)
         return false;
@@ -1282,7 +1210,7 @@ bool config_add_dependency_full(ProjectConfig *config, const char *name, const c
         config->dependencies = new_deps;
     }
 
-    config->dependencies[config->dep_count] = dependency_config_create(name, type, path);
+    config->dependencies[config->dep_count] = dependency_config_create(name, type);
     config->dep_count++;
 
     return true;
@@ -1292,7 +1220,7 @@ bool config_add_dependency(ProjectConfig *config, const char *dep_name, const ch
 {
     // for backward compatibility, assume local type and ignore source path for local deps
     (void)dep_source; // suppress unused parameter warning
-    return config_add_dependency_full(config, dep_name, "local", NULL);
+    return config_add_dependency_full(config, dep_name, "local");
 }
 
 DependencyConfig *config_get_dependency(ProjectConfig *config, const char *dep_name)
@@ -1402,37 +1330,70 @@ char *config_resolve_dependency_module_path(ProjectConfig *config, const char *p
     if (!config || !project_dir || !module_path)
         return NULL;
 
+    printf("debug: trying to resolve module path '%s'\n", module_path);
+
     // check if module_path starts with a dependency name
     char *first_part = strdup(module_path);
     char *dot_pos    = strchr(first_part, '.');
     if (dot_pos)
         *dot_pos = '\0';
 
+    printf("debug: looking for dependency named '%s'\n", first_part);
+    printf("debug: config has %d dependencies\n", config ? config->dep_count : -1);
+
     // look for dependency with this name
     DependencyConfig *dep = config_get_dependency(config, first_part);
     if (dep)
     {
-        // resolve dependency directory
+        printf("debug: found dependency '%s' of type '%s'\n", dep->name, dep->type ? dep->type : "NULL");
+        // resolve dependency directory: <project_dep_dir>/<dep_name>
         char *dep_dir = config_resolve_dep_dir(config, project_dir);
         if (dep_dir)
         {
-            size_t len;
-            char  *resolved_path;
+            char dependency_path[1024];
+            snprintf(dependency_path, sizeof(dependency_path), "%s/%s", dep_dir, dep->project_name);
 
-            if (dot_pos)
+            // load the dependency's configuration to get its src_dir
+            char dep_config_path[1024];
+            snprintf(dep_config_path, sizeof(dep_config_path), "%s/mach.toml", dependency_path);
+
+            ProjectConfig *dep_config    = config_load(dep_config_path);
+            char          *resolved_path = NULL;
+
+            if (dep_config)
             {
-                // module_path has sub-path: "std.io.console" -> "dep/std/io/console"
-                const char *sub_path = module_path + strlen(first_part) + 1; // skip name and dot
-                len                  = strlen(dep_dir) + strlen(dep->project_name) + strlen(sub_path) + 3;
-                resolved_path        = malloc(len);
-                snprintf(resolved_path, len, "%s/%s.%s", dep_dir, dep->project_name, sub_path);
-            }
-            else
-            {
-                // module_path is just dependency name: "std" -> "dep/std"
-                len           = strlen(dep_dir) + strlen(dep->project_name) + 2;
-                resolved_path = malloc(len);
-                snprintf(resolved_path, len, "%s/%s", dep_dir, dep->project_name);
+                // get the dependency's src directory (default to "src" if not specified)
+                const char *dep_src_dir = dep_config->src_dir ? dep_config->src_dir : "src";
+
+                if (dot_pos)
+                {
+                    // module_path has sub-path: "std.io.console" -> "dep/std/src/io/console.mach"
+                    const char *sub_path = module_path + strlen(first_part) + 1; // skip dep name and dot
+
+                    // convert dots to slashes for the remaining path
+                    char *sub_path_copy = strdup(sub_path);
+                    for (char *p = sub_path_copy; *p; p++)
+                    {
+                        if (*p == '.')
+                            *p = '/';
+                    }
+
+                    size_t len    = strlen(dependency_path) + strlen(dep_src_dir) + strlen(sub_path_copy) + strlen(".mach") + 4;
+                    resolved_path = malloc(len);
+                    snprintf(resolved_path, len, "%s/%s/%s.mach", dependency_path, dep_src_dir, sub_path_copy);
+
+                    free(sub_path_copy);
+                }
+                else
+                {
+                    // module_path is just dependency name: "std" -> "dep/std/src/main.mach"
+                    size_t len    = strlen(dependency_path) + strlen(dep_src_dir) + strlen("/main.mach") + 3;
+                    resolved_path = malloc(len);
+                    snprintf(resolved_path, len, "%s/%s/main.mach", dependency_path, dep_src_dir);
+                }
+
+                config_dnit(dep_config);
+                free(dep_config);
             }
 
             free(dep_dir);

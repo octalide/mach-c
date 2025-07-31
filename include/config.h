@@ -26,7 +26,6 @@ typedef struct DependencyConfig
     char *project_name; // original project name (for directory lookup)
     char *title;        // human-readable project title (optional)
     char *type;         // dependency type ("local", "git", etc.)
-    char *path;         // source path or URL
 } DependencyConfig;
 
 // project configuration
@@ -55,8 +54,9 @@ typedef struct ProjectConfig
     int                lib_dep_count;    // number of library dependencies
 
     // runtime configuration
-    char *runtime_path; // custom runtime path
-    char *stdlib_path;  // standard library path
+    char *runtime_path;   // custom runtime path (deprecated, use runtime_module)
+    char *runtime_module; // runtime module path (e.g., "dep.std.runtime", "mylib.custom_runtime")
+    char *stdlib_path;    // standard library path
 } ProjectConfig;
 
 // configuration file management
@@ -99,11 +99,16 @@ char *config_resolve_bin_dir(ProjectConfig *config, const char *project_dir, con
 char *config_resolve_obj_dir(ProjectConfig *config, const char *project_dir, const char *target_name);
 char *config_resolve_runtime_path(ProjectConfig *config, const char *project_dir);
 
+// runtime module management
+bool  config_set_runtime_module(ProjectConfig *config, const char *module_path);
+char *config_get_runtime_module(ProjectConfig *config);
+bool  config_has_runtime_module(ProjectConfig *config);
+
 // dependency management
-DependencyConfig *dependency_config_create(const char *name, const char *type, const char *path);
+DependencyConfig *dependency_config_create(const char *name, const char *type);
 void              dependency_config_init(DependencyConfig *dep);
 void              dependency_config_dnit(DependencyConfig *dep);
-bool              config_add_dependency_full(ProjectConfig *config, const char *name, const char *type, const char *path);
+bool              config_add_dependency_full(ProjectConfig *config, const char *name, const char *type);
 bool              config_add_dependency(ProjectConfig *config, const char *dep_name, const char *dep_source);
 bool              config_add_lib_dependency(ProjectConfig *config, const char *lib_name, const char *lib_path);
 bool              config_has_dependency(ProjectConfig *config, const char *dep_name);

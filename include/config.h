@@ -19,14 +19,14 @@ typedef struct TargetConfig
     bool no_pie;        // disable PIE
 } TargetConfig;
 
-// dependency configuration
-typedef struct DependencyConfig
+// explicit dependency specification (parsed from [deps] table)
+typedef struct DepSpec
 {
-    char *name;         // code-accessible import name (e.g., "std")
-    char *project_name; // original project name (for directory lookup)
-    char *title;        // human-readable project title (optional)
-    char *type;         // dependency type ("local", "git", etc.)
-} DependencyConfig;
+    char *name;       // dependency/package name (key)
+    char *path;       // relative or absolute path (required for now)
+    char *src_dir;    // source directory inside dependency (default: src)
+    bool  is_runtime; // marked as runtime provider
+} DepSpec;
 
 // project configuration
 typedef struct ProjectConfig
@@ -47,11 +47,11 @@ typedef struct ProjectConfig
     TargetConfig **targets;      // array of target configurations
     int            target_count; // number of targets
 
-    // dependencies
-    DependencyConfig **dependencies;     // project dependencies with full info
-    int                dep_count;        // number of dependencies
-    char             **lib_dependencies; // library dependencies (binary/object files)
-    int                lib_dep_count;    // number of library dependencies
+    // explicit dependencies
+    DepSpec **deps;             // dependency specs (excluding root project)
+    int       dep_count;        // number of deps
+    char    **lib_dependencies; // library dependencies (binary/object files)
+    int       lib_dep_count;    // number of library dependencies
 
     // runtime configuration
     char *runtime_path;   // custom runtime path (deprecated, use runtime_module)
@@ -105,17 +105,21 @@ char *config_get_runtime_module(ProjectConfig *config);
 bool  config_has_runtime_module(ProjectConfig *config);
 
 // dependency management
-DependencyConfig *dependency_config_create(const char *name, const char *type);
-void              dependency_config_init(DependencyConfig *dep);
-void              dependency_config_dnit(DependencyConfig *dep);
-bool              config_add_dependency_full(ProjectConfig *config, const char *name, const char *type);
-bool              config_add_dependency(ProjectConfig *config, const char *dep_name, const char *dep_source);
-bool              config_add_lib_dependency(ProjectConfig *config, const char *lib_name, const char *lib_path);
-bool              config_has_dependency(ProjectConfig *config, const char *dep_name);
-bool              config_remove_dependency(ProjectConfig *config, const char *dep_name);
-DependencyConfig *config_get_dependency(ProjectConfig *config, const char *dep_name);
-char            **config_get_dependency_paths(ProjectConfig *config, const char *project_dir);
-char             *config_resolve_dependency_module_path(ProjectConfig *config, const char *project_dir, const char *module_path);
+DepSpec *config_get_dep(ProjectConfig *config, const char *name);
+bool     config_has_dep(ProjectConfig *config, const char *name);
+// resolve package root directory (root project or dependency). returns malloc'd string
+char *config_resolve_package_root(ProjectConfig *config, const char *project_dir, const char *package_name);
+// get package src dir (may load dependency mach.toml lazily)
+char *config_get_package_src_dir(ProjectConfig *config, const char *project_dir, const char *package_name);
+// load dependency config to fill missing src_dir if needed
+bool config_ensure_dep_loaded(ProjectConfig *config, const char *project_dir, DepSpec *dep);
+
+// canonical module resolution: given FQN pkg.segment1.segment2 -> absolute file path (.mach)
+char *config_resolve_module_fqn(ProjectConfig *config, const char *project_dir, const char *fqn);
+
+// lock file support (simple directory hash) - optional failure is non-fatal
+bool config_write_lock(ProjectConfig *config, const char *project_dir, const char *lock_path);
+bool config_load_lock(ProjectConfig *config, const char *lock_path); // stub for future
 
 // directory management
 bool config_ensure_directories(ProjectConfig *config, const char *project_dir);

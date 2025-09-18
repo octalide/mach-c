@@ -33,6 +33,7 @@ typedef struct BuildOptions
 static int  dep_add_command(int argc, char **argv);
 static int  dep_remove_command(int argc, char **argv);
 static int  dep_list_command(int argc, char **argv);
+static int  examine_command(int argc, char **argv);
 static bool copy_directory(const char *src, const char *dest);
 static bool is_valid_mach_project(const char *path);
 
@@ -253,11 +254,7 @@ static int init_command(int argc, char **argv)
     snprintf(path, sizeof(path), "%s/mach.toml", project_dir);
     ProjectConfig *config = config_create_default(project_name);
 
-    // set up the directory structure
-    config->src_dir = strdup("src");
-    config->dep_dir = strdup("dep");
-    config->lib_dir = strdup("lib");
-    config->out_dir = strdup("out");
+    // directories already set in default config
 
     // add default target
     config->default_target = strdup("all"); // build all targets by default
@@ -306,8 +303,26 @@ static int init_command(int argc, char **argv)
 
             if (copy_directory(mach_std, dest_path))
             {
-                config_add_dependency_full(config, "std", "local");
-                printf("standard library added successfully\n");
+                printf("standard library copied to dep/std\n");
+                printf("note: import as 'dep.std.*'\n");
+                // register std dependency spec
+                DepSpec *std_dep  = calloc(1, sizeof(DepSpec));
+                std_dep->name     = strdup("std");
+                std_dep->path     = strdup("dep/std");
+                std_dep->src_dir  = strdup("src");
+                DepSpec **new_arr = realloc(config->deps, (config->dep_count + 1) * sizeof(DepSpec *));
+                if (new_arr)
+                {
+                    config->deps                      = new_arr;
+                    config->deps[config->dep_count++] = std_dep;
+                }
+                else
+                {
+                    free(std_dep->name);
+                    free(std_dep->path);
+                    free(std_dep->src_dir);
+                    free(std_dep);
+                }
             }
             else
             {
@@ -404,6 +419,8 @@ static int clean_command(int argc, char **argv)
         return 1;
     }
 
+    // discover dependencies for clean command
+
     char       *out_dir    = config_resolve_out_dir(config, ".");
     const char *output_dir = out_dir ? out_dir : ".";
 
@@ -485,6 +502,8 @@ static int build_command(int argc, char **argv)
             config = config_load_from_dir(project_dir);
             if (config && config_has_main_file(config))
             {
+                // discover dependencies in the project
+
                 is_project_build   = true;
                 resolved_main_file = config_resolve_main_file(config, project_dir);
                 filename           = resolved_main_file;
@@ -504,6 +523,8 @@ static int build_command(int argc, char **argv)
         config = config_load_from_dir(".");
         if (config && config_has_main_file(config))
         {
+            // discover dependencies in the project
+
             is_project_build   = true;
             resolved_main_file = config_resolve_main_file(config, ".");
             filename           = resolved_main_file;
@@ -721,6 +742,7 @@ static int build_command(int argc, char **argv)
     // set configuration for dependency resolution
     if (config)
     {
+        // discover dependencies before setting up module manager
         module_manager_set_config(&analyzer.module_manager, config, project_dir);
     }
 
@@ -820,6 +842,10 @@ static int build_command(int argc, char **argv)
     CodegenContext codegen;
     codegen_context_init(&codegen, get_filename(filename), options.no_pie);
     codegen.opt_level = options.opt_level;
+    if (config && config->name)
+    {
+        codegen.package_name = strdup(config->name);
+    }
 
     // check if we're compiling the runtime module
     char *base_filename = get_filename(filename);
@@ -1241,175 +1267,46 @@ static int dep_command(int argc, char **argv)
 
 static int dep_add_command(int argc, char **argv)
 {
-    if (argc < 4)
-    {
-        fprintf(stderr, "error: 'dep add' requires dependency name and path\n");
-        fprintf(stderr, "usage: cmach dep add <name> <path>\n");
-        print_dep_usage();
-        return 1;
-    }
+    (void)argc; // suppress unused parameter warning
+    (void)argv; // suppress unused parameter warning
 
-    const char *dep_name   = argv[2];
-    const char *dep_source = argv[3];
+    printf("The 'dep add' command has been removed.\n");
+    printf("Dependencies are now managed using git submodules.\n");
+    printf("\n");
+    printf("To add a dependency:\n");
+    printf("  1. Add it as a git submodule in your 'dep' directory:\n");
+    printf("     git submodule add <repository-url> dep/<name>\n");
+    printf("  2. Ensure the dependency has a 'mach.toml' configuration file\n");
+    printf("  3. The compiler will automatically discover and make it available as 'dep.<name>.*'\n");
+    printf("\n");
+    printf("Example:\n");
+    printf("  git submodule add https://github.com/mach-std/std.git dep/std\n");
+    printf("  # Now you can use: use dep.std.io;\n");
 
-    // load project config
-    ProjectConfig *config = config_load_from_dir(".");
-    if (!config)
-    {
-        fprintf(stderr, "error: no mach.toml found in current directory\n");
-        fprintf(stderr, "run 'cmach init' to create a new project\n");
-        return 1;
-    }
-
-    // check if dependency already exists
-    if (config_has_dependency(config, dep_name))
-    {
-        printf("dependency '%s' already exists\n", dep_name);
-        config_dnit(config);
-        free(config);
-        return 0;
-    }
-
-    // resolve dependency directory
-    char *dep_dir = config_resolve_dep_dir(config, ".");
-    if (!dep_dir)
-    {
-        fprintf(stderr, "error: could not resolve dependency directory\n");
-        config_dnit(config);
-        free(config);
-        return 1;
-    }
-
-    // create dependency directory if it doesn't exist
-    if (!config_ensure_directories(config, "."))
-    {
-        fprintf(stderr, "error: could not create dependency directory\n");
-        free(dep_dir);
-        config_dnit(config);
-        free(config);
-        return 1;
-    }
-
-    // copy dependency source to dep directory
-    char dest_path[1024];
-    snprintf(dest_path, sizeof(dest_path), "%s/%s", dep_dir, dep_name);
-
-    printf("adding dependency '%s' from '%s'...\n", dep_name, dep_source);
-
-    bool success = copy_directory(dep_source, dest_path);
-    if (!success)
-    {
-        fprintf(stderr, "error: failed to copy directory '%s'\n", dep_source);
-    }
-
-    if (success)
-    {
-        // add dependency to configuration
-        if (config_add_dependency(config, dep_name, dep_source))
-        {
-            // save updated configuration
-            if (config_save(config, "mach.toml"))
-            {
-                printf("dependency '%s' added successfully\n", dep_name);
-            }
-            else
-            {
-                fprintf(stderr, "error: failed to save configuration\n");
-                success = false;
-            }
-        }
-        else
-        {
-            fprintf(stderr, "error: failed to add dependency to configuration\n");
-            success = false;
-        }
-    }
-
-    free(dep_dir);
-    config_dnit(config);
-    free(config);
-    return success ? 0 : 1;
+    return 0;
 }
 
 static int dep_remove_command(int argc, char **argv)
 {
-    if (argc < 3)
-    {
-        fprintf(stderr, "error: 'dep remove' requires a dependency name\n");
-        print_dep_usage();
-        return 1;
-    }
+    (void)argc; // suppress unused parameter warning
+    (void)argv; // suppress unused parameter warning
 
-    const char *dep_name = argv[2];
+    printf("The 'dep remove' command has been removed.\n");
+    printf("Dependencies are now managed using git submodules.\n");
+    printf("\n");
+    printf("To remove a dependency:\n");
+    printf("  1. Remove the git submodule:\n");
+    printf("     git submodule deinit dep/<name>\n");
+    printf("     git rm dep/<name>\n");
+    printf("  2. Commit the changes:\n");
+    printf("     git commit -m \"Remove <name> dependency\"\n");
+    printf("\n");
+    printf("Example:\n");
+    printf("  git submodule deinit dep/std\n");
+    printf("  git rm dep/std\n");
+    printf("  git commit -m \"Remove std dependency\"\n");
 
-    // load project config
-    ProjectConfig *config = config_load_from_dir(".");
-    if (!config)
-    {
-        fprintf(stderr, "error: no mach.toml found in current directory\n");
-        return 1;
-    }
-
-    // check if dependency exists
-    if (!config_has_dependency(config, dep_name))
-    {
-        printf("dependency '%s' not found\n", dep_name);
-        config_dnit(config);
-        free(config);
-        return 0;
-    }
-
-    // resolve dependency directory
-    char *dep_dir = config_resolve_dep_dir(config, ".");
-    if (!dep_dir)
-    {
-        fprintf(stderr, "error: could not resolve dependency directory\n");
-        config_dnit(config);
-        free(config);
-        return 1;
-    }
-
-    // remove dependency directory
-    char dep_path[1024];
-    snprintf(dep_path, sizeof(dep_path), "%s/%s", dep_dir, dep_name);
-
-    printf("removing dependency '%s'...\n", dep_name);
-
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", dep_path);
-    bool success = (system(cmd) == 0);
-
-    if (success)
-    {
-        // remove dependency from configuration
-        if (config_remove_dependency(config, dep_name))
-        {
-            // save updated configuration
-            if (config_save(config, "mach.toml"))
-            {
-                printf("dependency '%s' removed successfully\n", dep_name);
-            }
-            else
-            {
-                fprintf(stderr, "error: failed to save configuration\n");
-                success = false;
-            }
-        }
-        else
-        {
-            fprintf(stderr, "error: failed to remove dependency from configuration\n");
-            success = false;
-        }
-    }
-    else
-    {
-        fprintf(stderr, "error: failed to remove dependency directory\n");
-    }
-
-    free(dep_dir);
-    config_dnit(config);
-    free(config);
-    return success ? 0 : 1;
+    return 0;
 }
 
 static int dep_list_command(int argc, char **argv)
@@ -1425,28 +1322,19 @@ static int dep_list_command(int argc, char **argv)
         return 1;
     }
 
-    printf("project dependencies:\n");
-
+    printf("dependencies:\n");
     if (config->dep_count == 0)
     {
-        printf("  (no dependencies)\n");
+        printf("  (none)\n");
+        printf("  add in [deps] section of mach.toml, e.g.:\n");
+        printf("    [deps]\n    std = { path = \"dep/std\" }\n");
     }
     else
     {
         for (int i = 0; i < config->dep_count; i++)
         {
-            DependencyConfig *dep = config->dependencies[i];
-            printf("  %s", dep->name);
-            if (strcmp(dep->name, dep->project_name) != 0)
-            {
-                printf(" (project: %s)", dep->project_name);
-            }
-            printf(" [%s]", dep->type);
-            if (dep->title && strlen(dep->title) > 0)
-            {
-                printf(" - %s", dep->title);
-            }
-            printf(" (%s)\n", dep->type ? dep->type : "local");
+            DepSpec *d = config->deps[i];
+            printf("  %s -> %s (src=%s)%s\n", d->name, d->path, d->src_dir ? d->src_dir : "src", d->is_runtime ? " [runtime]" : "");
         }
     }
 
@@ -1499,10 +1387,109 @@ int main(int argc, char **argv)
     {
         return dep_command(argc, argv);
     }
+    else if (strcmp(command, "examine") == 0)
+    {
+        return examine_command(argc, argv);
+    }
     else
     {
         fprintf(stderr, "error: unknown command '%s'\n", command);
         print_usage(argv[0]);
         return 1;
     }
+}
+
+
+static bool str_ends_with(const char *s, const char *suffix)
+{
+    size_t ls = strlen(s), lf = strlen(suffix);
+    return lf <= ls && strcmp(s + ls - lf, suffix) == 0;
+}
+
+static int examine_command(int argc, char **argv)
+{
+    if (argc < 3)
+    {
+        fprintf(stderr, "usage: %s examine <file.mach>\n", argv[0]);
+        return 1;
+    }
+    const char *file_path = argv[2];
+    ProjectConfig *config = config_load_from_dir(".");
+    if (!config)
+        config = config_create_default("examine");
+
+    // load source
+    FILE *f = fopen(file_path, "r");
+    if (!f)
+    {
+        fprintf(stderr, "error: cannot open '%s'\n", file_path);
+        config_dnit(config); free(config);
+        return 1;
+    }
+    fseek(f, 0, SEEK_END); long size = ftell(f); fseek(f, 0, SEEK_SET);
+    char *source = malloc(size + 1); fread(source,1,size,f); source[size]='\0'; fclose(f);
+
+    Lexer lexer; lexer_init(&lexer, source);
+    Parser parser; parser_init(&parser, &lexer);
+    AstNode *program = parser_parse_program(&parser);
+    if (!program)
+    {
+        fprintf(stderr, "parse failed\n");
+        parser_dnit(&parser); lexer_dnit(&lexer); free(source); config_dnit(config); free(config); return 1;
+    }
+    SemanticAnalyzer analyzer; semantic_analyzer_init(&analyzer);
+    analyzer.module_manager.config = config;
+    semantic_analyze(&analyzer, program);
+
+    // derive module path heuristic
+    const char *mod = file_path;
+    const char *dep_pos = strstr(file_path, "/dep/");
+    char module_buf[512];
+    if (dep_pos)
+    {
+        dep_pos += 5; // after dep/
+        const char *slash = strchr(dep_pos, '/');
+        if (slash)
+        {
+            size_t pkg_len = (size_t)(slash - dep_pos);
+            const char *rel = slash + 1;
+            const char *srcm = strstr(rel, "/src/");
+            if (srcm) rel = srcm + 5;
+            char rel_copy[256]; strncpy(rel_copy, rel, sizeof(rel_copy)-1); rel_copy[255]='\0';
+            for (char *p = rel_copy; *p; ++p) if (*p=='/') *p='.';
+            if (str_ends_with(rel_copy, ".mach")) rel_copy[strlen(rel_copy)-5]='\0';
+            snprintf(module_buf, sizeof(module_buf), "dep.%.*s.%s", (int)pkg_len, dep_pos, rel_copy);
+            mod = module_buf;
+        }
+    }
+    printf("module: %s\n", mod);
+    printf("symbols:\n");
+    if (analyzer.symbol_table.global_scope)
+    {
+        for (Symbol *s = analyzer.symbol_table.global_scope->symbols; s; s = s->next)
+        {
+            const char *k = "?";
+            switch (s->kind)
+            {
+            case SYMBOL_FUNC: k="fun"; break;
+            case SYMBOL_VAR: k="var"; break;
+            case SYMBOL_VAL: k="val"; break;
+            case SYMBOL_TYPE: k="type"; break;
+            case SYMBOL_MODULE: k="module"; break;
+            default: break;
+            }
+            printf("  %s %s\n", k, s->name ? s->name : "<anon>");
+        }
+    }
+    if (analyzer.has_errors)
+    {
+        printf("errors:\n");
+        semantic_print_errors(&analyzer, &lexer, file_path);
+    }
+    semantic_analyzer_dnit(&analyzer);
+    ast_node_dnit(program); free(program);
+    parser_dnit(&parser); lexer_dnit(&lexer);
+    free(source);
+    config_dnit(config); free(config);
+    return 0;
 }

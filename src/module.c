@@ -72,6 +72,7 @@ void module_manager_init(ModuleManager *manager)
     manager->search_count = 0;
     manager->config       = NULL;
     manager->project_dir  = NULL;
+
     module_error_list_init(&manager->errors);
     manager->had_error = false;
 }
@@ -116,77 +117,12 @@ void module_manager_set_config(ModuleManager *manager, void *config, const char 
     manager->project_dir = project_dir;
 }
 
-char *module_path_to_file_path(ModuleManager *manager, const char *module_path)
+char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
 {
-    // first try dependency resolution if config is available
-    if (manager->config && manager->project_dir)
-    {
-        // need to include config.h here, but to avoid circular includes,
-        // we'll declare the function we need
-        extern char *config_resolve_dependency_module_path(void *config, const char *project_dir, const char *module_path);
-
-        char *dep_path = config_resolve_dependency_module_path(manager->config, manager->project_dir, module_path);
-        if (dep_path)
-        {
-            // add .mach extension to get final file path
-            char *file_path = malloc(strlen(dep_path) + 6); // ".mach" + null
-            strcpy(file_path, dep_path);
-            strcat(file_path, ".mach");
-
-            // check if file exists
-            FILE *test = fopen(file_path, "r");
-            if (test)
-            {
-                fclose(test);
-                free(dep_path);
-                return file_path;
-            }
-
-            free(file_path);
-            free(dep_path);
-        }
-    }
-
-    // fallback to original resolution method
-    // convert module.path to module/path.mach
-    char *file_path = malloc(strlen(module_path) + 6); // ".mach" + null
-    strcpy(file_path, module_path);
-
-    // replace dots with slashes
-    for (char *p = file_path; *p; p++)
-    {
-        if (*p == '.')
-        {
-            *p = '/';
-        }
-    }
-    strcat(file_path, ".mach");
-
-    // try each search path
-    for (int i = 0; i < manager->search_count; i++)
-    {
-        char *full_path = malloc(strlen(manager->search_paths[i]) + strlen(file_path) + 2);
-        if (strcmp(manager->search_paths[i], ".") == 0)
-        {
-            strcpy(full_path, file_path);
-        }
-        else
-        {
-            sprintf(full_path, "%s/%s", manager->search_paths[i], file_path);
-        }
-
-        FILE *test = fopen(full_path, "r");
-        if (test)
-        {
-            fclose(test);
-            free(file_path);
-            return full_path;
-        }
-        free(full_path);
-    }
-
-    free(file_path);
-    return NULL;
+    if (!(manager->config && manager->project_dir))
+        return NULL;
+    extern char *config_resolve_module_fqn(void *cfg, const char *project_dir, const char *fqn);
+    return config_resolve_module_fqn(manager->config, manager->project_dir, module_fqn);
 }
 
 Module *module_manager_find_module(ModuleManager *manager, const char *name)
@@ -206,12 +142,12 @@ Module *module_manager_find_module(ModuleManager *manager, const char *name)
     return NULL;
 }
 
-static Module *module_manager_load_module_internal(ModuleManager *manager, const char *module_path, const char *base_dir)
+static Module *module_manager_load_module_internal(ModuleManager *manager, const char *module_fqn, const char *base_dir)
 {
     (void)base_dir; // currently unused, for future relative path support
 
     // check if already loaded
-    Module *existing = module_manager_find_module(manager, module_path);
+    Module *existing = module_manager_find_module(manager, module_fqn);
     if (existing)
     {
         return existing;
@@ -223,9 +159,9 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         Module *module = manager->modules[i];
         while (module)
         {
-            if (module_has_circular_dependency(manager, module, module_path))
+            if (module_has_circular_dependency(manager, module, module_fqn))
             {
-                module_error_list_add(&manager->errors, module_path, "<unknown>", "Circular dependency detected");
+                module_error_list_add(&manager->errors, module_fqn, "<unknown>", "Circular dependency detected");
                 manager->had_error = true;
                 return NULL;
             }
@@ -233,11 +169,11 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         }
     }
 
-    // find file path
-    char *file_path = module_path_to_file_path(manager, module_path);
+    // find file path via canonical FQN
+    char *file_path = module_path_to_file_path(manager, module_fqn);
     if (!file_path)
     {
-        module_error_list_add(&manager->errors, module_path, "<unknown>", "Could not find module file");
+        module_error_list_add(&manager->errors, module_fqn, "<unknown>", "Could not find module file");
         manager->had_error = true;
         return NULL;
     }
@@ -249,7 +185,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     if (!source)
     {
         printf("failed\n");
-        module_error_list_add(&manager->errors, module_path, file_path, "Could not read module file");
+        module_error_list_add(&manager->errors, module_fqn, file_path, "Could not read module file");
         manager->had_error = true;
         free(file_path);
         return NULL;
@@ -261,7 +197,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     Parser parser;
     parser_init(&parser, &lexer);
 
-    AstNode *ast = parser_parse_program(&parser);
+    AstNode *ast = parser_parse_program(&parser); // modules inside will keep raw paths; normalization handled earlier
 
     // check for parse errors
     if (!ast || parser.had_error)
@@ -276,11 +212,11 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
             // add parsing errors to module error list
             char error_msg[256];
             snprintf(error_msg, sizeof(error_msg), "parsing failed with %d error(s)", parser.errors.count);
-            module_error_list_add(&manager->errors, module_path, file_path, error_msg);
+            module_error_list_add(&manager->errors, module_fqn, file_path, error_msg);
         }
         else
         {
-            module_error_list_add(&manager->errors, module_path, file_path, "Failed to parse module");
+            module_error_list_add(&manager->errors, module_fqn, file_path, "Failed to parse module");
         }
 
         manager->had_error = true;
@@ -294,6 +230,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         lexer_dnit(&lexer);
         free(source);
         free(file_path);
+
         return NULL;
     }
 
@@ -301,13 +238,13 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
 
     // create module
     Module *module = malloc(sizeof(Module));
-    module_init(module, module_path, file_path);
+    module_init(module, module_fqn, file_path);
     module->ast         = ast;
     module->is_parsed   = true;
     module->is_analyzed = false;
 
     // add to hash table
-    unsigned int index      = hash_module_name(module_path, manager->capacity);
+    unsigned int index      = hash_module_name(module_fqn, manager->capacity);
     module->next            = manager->modules[index];
     manager->modules[index] = module;
     manager->count++;

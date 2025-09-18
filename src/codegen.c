@@ -56,9 +56,10 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
     ctx->errors     = NULL;
     ctx->has_errors = false;
 
-    ctx->opt_level  = 2;
-    ctx->debug_info = false;
-    ctx->is_runtime = false;
+    ctx->opt_level    = 2;
+    ctx->debug_info   = false;
+    ctx->is_runtime   = false;
+    ctx->package_name = NULL;
 }
 
 void codegen_context_dnit(CodegenContext *ctx)
@@ -84,6 +85,7 @@ void codegen_context_dnit(CodegenContext *ctx)
     LLVMDisposeModule(ctx->module);
     LLVMDisposeTargetMachine(ctx->target_machine);
     LLVMContextDispose(ctx->context);
+    free(ctx->package_name);
 }
 
 bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *analyzer)
@@ -678,7 +680,7 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         return NULL;
     }
 
-    // only mangle main function from user code to __mach_main
+    // function name mangling: main handled specially; other functions get package__name prefix to avoid collisions
     const char *func_name    = stmt->fun_stmt.name;
     char       *mangled_name = NULL;
 
@@ -694,10 +696,13 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         mangled_name = strdup("__mach_main");
         func_name    = mangled_name;
     }
-    // all other functions keep their original names
-    else
+    // other functions: apply package prefix if available
+    else if (stmt->fun_stmt.name && ctx->package_name)
     {
-        func_name = stmt->fun_stmt.name;
+        size_t len   = strlen(ctx->package_name) + 2 + strlen(stmt->fun_stmt.name) + 1;
+        mangled_name = malloc(len);
+        snprintf(mangled_name, len, "%s__%s", ctx->package_name, stmt->fun_stmt.name);
+        func_name = mangled_name;
     }
 
     // get or create function

@@ -8,6 +8,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+static char *sanitize_module_path(const char *path)
+{
+    if (!path)
+        return NULL;
+    size_t len = strlen(path);
+    char  *buf = malloc(len + 1);
+    if (!buf)
+        return NULL;
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = path[i];
+        buf[i] = (c == '.' || c == '/' || c == ':') ? '_' : c;
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
 void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_pie)
 {
     ctx->context = LLVMContextCreate();
@@ -59,6 +76,7 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
     ctx->opt_level    = 2;
     ctx->debug_info   = false;
     ctx->is_runtime   = false;
+    ctx->use_runtime  = false;
     ctx->package_name = NULL;
 }
 
@@ -519,19 +537,42 @@ LLVMValueRef codegen_stmt_use(CodegenContext *ctx, AstNode *stmt)
 
             LLVMTypeRef llvm_func_type = LLVMFunctionType(return_type, param_types, func_type->function.param_count, false);
 
-            // for external functions, use the target symbol name
-            const char *llvm_name = symbol->name; // default to symbol name
-            if (symbol->func.is_external && symbol->decl && symbol->decl->kind == AST_STMT_EXT)
+            // choose proper llvm symbol name
+            char       *owned_name = NULL;
+            const char *llvm_name  = NULL;
+            if (symbol->decl && symbol->decl->kind == AST_STMT_EXT)
             {
-                // use target symbol name for external functions
                 llvm_name = symbol->decl->ext_stmt.symbol ? symbol->decl->ext_stmt.symbol : symbol->name;
             }
+            else if (!symbol->func.is_defined)
+            {
+                // treat as external-style import with plain name
+                llvm_name = symbol->name;
+            }
+            else
+            {
+                // mangle with module path so it matches dependency object symbol
+                const char *mod_path = module_symbol->module.path;
+                char       *san      = sanitize_module_path(mod_path);
+                if (san)
+                {
+                    size_t nlen = strlen(san) + 2 + strlen(symbol->name) + 1;
+                    owned_name  = malloc(nlen);
+                    if (owned_name)
+                        snprintf(owned_name, nlen, "%s__%s", san, symbol->name);
+                }
+                free(san);
+                llvm_name = owned_name ? owned_name : symbol->name;
+            }
 
-            LLVMValueRef func = LLVMAddFunction(ctx->module, llvm_name, llvm_func_type);
+            LLVMValueRef func = LLVMGetNamedFunction(ctx->module, llvm_name);
+            if (!func)
+                func = LLVMAddFunction(ctx->module, llvm_name, llvm_func_type);
             free(param_types);
 
             // add to symbol map so it can be found later
             codegen_set_symbol_value(ctx, symbol, func);
+            free(owned_name);
         }
     }
 
@@ -684,17 +725,21 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
     const char *func_name    = stmt->fun_stmt.name;
     char       *mangled_name = NULL;
 
-    // don't mangle main function when compiling the runtime module
-    if (ctx->is_runtime && strcmp(func_name, "main") == 0)
+    // mangle rules for main:
+    // - if compiling runtime module, its 'main' remains 'main'
+    // - if building entry with runtime, user 'main' becomes '__mach_main'
+    // - if building without runtime, user 'main' stays 'main'
+    if (strcmp(func_name, "main") == 0)
     {
-        // runtime's main function stays unmangled to be the C entry point
-        func_name = stmt->fun_stmt.name;
-    }
-    // mangle user main function to __mach_main
-    else if (strcmp(func_name, "main") == 0)
-    {
-        mangled_name = strdup("__mach_main");
-        func_name    = mangled_name;
+        if (ctx->is_runtime)
+        {
+            func_name = stmt->fun_stmt.name;
+        }
+        else if (ctx->use_runtime)
+        {
+            mangled_name = strdup("__mach_main");
+            func_name    = mangled_name;
+        }
     }
     // other functions: apply package prefix if available
     else if (stmt->fun_stmt.name && ctx->package_name)
@@ -1359,16 +1404,62 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
             Type *param_type = func_type->function.param_types[i];
             Type *arg_type   = expr->call_expr.args->items[i]->type;
 
-            // handle array-to-pointer conversion for function parameters
-            if (param_type->kind == TYPE_ARRAY && arg_type->kind == TYPE_ARRAY)
+            // resolve aliases for accurate kind checks
+            Type *pt = type_resolve_alias(param_type);
+            Type *at = type_resolve_alias(arg_type);
+
+            // load value as needed first
+            args[i] = codegen_load_if_needed(ctx, args[i], arg_type);
+
+            // array-to-pointer decay for function parameters (e.g., string -> *u8)
+            if (at && at->kind == TYPE_ARRAY && pt && (pt->kind == TYPE_POINTER || pt->kind == TYPE_PTR))
             {
-                // pass fat pointer as-is for arrays
-                args[i] = codegen_load_if_needed(ctx, args[i], arg_type);
+                // arrays are fat pointers { ptr, u64 }, extract the data pointer (index 0)
+                args[i] = LLVMBuildExtractValue(ctx->builder, args[i], 0, "array_data");
             }
-            else
+
+            // numeric conversions to match parameter type
+            if (pt && at)
             {
-                // load values for arguments
-                args[i] = codegen_load_if_needed(ctx, args[i], arg_type);
+                if (type_is_numeric(pt) && type_is_numeric(at))
+                {
+                    LLVMTypeRef expected_llvm = codegen_get_llvm_type(ctx, param_type);
+                    if (type_is_float(at) && type_is_float(pt))
+                    {
+                        if (at->size < pt->size)
+                            args[i] = LLVMBuildFPExt(ctx->builder, args[i], expected_llvm, "fpext");
+                        else if (at->size > pt->size)
+                            args[i] = LLVMBuildFPTrunc(ctx->builder, args[i], expected_llvm, "fptrunc");
+                    }
+                    else if (type_is_integer(at) && type_is_integer(pt))
+                    {
+                        if (at->size < pt->size)
+                        {
+                            if (type_is_signed(at))
+                                args[i] = LLVMBuildSExt(ctx->builder, args[i], expected_llvm, "sext");
+                            else
+                                args[i] = LLVMBuildZExt(ctx->builder, args[i], expected_llvm, "zext");
+                        }
+                        else if (at->size > pt->size)
+                        {
+                            args[i] = LLVMBuildTrunc(ctx->builder, args[i], expected_llvm, "trunc");
+                        }
+                    }
+                    else if (type_is_float(at) && type_is_integer(pt))
+                    {
+                        if (type_is_signed(pt))
+                            args[i] = LLVMBuildFPToSI(ctx->builder, args[i], expected_llvm, "fptosi");
+                        else
+                            args[i] = LLVMBuildFPToUI(ctx->builder, args[i], expected_llvm, "fptoui");
+                    }
+                    else if (type_is_integer(at) && type_is_float(pt))
+                    {
+                        if (type_is_signed(at))
+                            args[i] = LLVMBuildSIToFP(ctx->builder, args[i], expected_llvm, "sitofp");
+                        else
+                            args[i] = LLVMBuildUIToFP(ctx->builder, args[i], expected_llvm, "uitofp");
+                    }
+                }
             }
         }
     }
@@ -1587,9 +1678,6 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
         }
         return value;
     }
-
-    // debug: print if symbol is null
-    fprintf(stderr, "debug: field access '%s' has no symbol\n", expr->field_expr.field);
 
     LLVMValueRef object = codegen_expr(ctx, expr->field_expr.object);
     if (!object)

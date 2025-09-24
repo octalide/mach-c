@@ -276,6 +276,7 @@ void target_config_init(TargetConfig *target)
     memset(target, 0, sizeof(TargetConfig));
     target->opt_level   = 2;    // default optimization level
     target->emit_object = true; // default to emitting object files
+    target->shared      = true; // default shared when building libraries
 }
 
 void target_config_dnit(TargetConfig *target)
@@ -482,6 +483,10 @@ ProjectConfig *config_load(const char *config_path)
             {
                 config->main_file = toml_parse_string(&parser);
             }
+            else if (strcmp(key, "target-name") == 0)
+            {
+                config->target_name = toml_parse_string(&parser);
+            }
             else if (strcmp(key, "default-target") == 0)
             {
                 config->default_target = toml_parse_string(&parser);
@@ -557,6 +562,10 @@ ProjectConfig *config_load(const char *config_path)
                 else if (strcmp(key, "build-library") == 0)
                 {
                     target->build_library = toml_parse_bool(&parser);
+                }
+                else if (strcmp(key, "shared") == 0)
+                {
+                    target->shared = toml_parse_bool(&parser);
                 }
                 else if (strcmp(key, "no-pie") == 0)
                 {
@@ -755,6 +764,8 @@ bool config_save(ProjectConfig *config, const char *config_path)
             fprintf(file, "emit-object = false\n");
         if (target->build_library)
             fprintf(file, "build-library = true\n");
+        if (!target->shared)
+            fprintf(file, "shared = false\n");
         if (target->no_pie)
             fprintf(file, "no-pie = true\n");
     }
@@ -881,6 +892,31 @@ bool config_should_link_executable(ProjectConfig *config, const char *target_nam
         return true;
     TargetConfig *target = config_get_target(config, target_name);
     return target && !target->build_library;
+}
+
+bool config_is_shared_library(ProjectConfig *config, const char *target_name)
+{
+    if (!config || !target_name)
+        return true;
+    TargetConfig *target = config_get_target(config, target_name);
+    return target && target->shared;
+}
+
+char *config_default_executable_name(ProjectConfig *config)
+{
+    const char *name = config && config->target_name ? config->target_name : (config && config->name ? config->name : "a.out");
+    return strdup(name);
+}
+
+char *config_default_library_name(ProjectConfig *config, bool shared)
+{
+    const char *base = config && config->target_name ? config->target_name : (config && config->name ? config->name : "libmach");
+    size_t      nlen = strlen(base);
+    const char *ext  = shared ? ".so" : ".a";
+    size_t      len  = 3 + nlen + strlen(ext) + 1;
+    char       *out  = malloc(len);
+    snprintf(out, len, "lib%s%s", base, ext);
+    return out;
 }
 
 char *config_resolve_main_file(ProjectConfig *config, const char *project_dir)

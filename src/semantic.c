@@ -307,7 +307,7 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         {
             // aliased import: link the module scope to the symbol
             Symbol *module_symbol = use_stmt->use_stmt.module_sym;
-            if (module_symbol && module->symbols)
+            if (module_symbol && module_symbol->kind == SYMBOL_MODULE && module->symbols)
             {
                 module_symbol->module.scope = module->symbols->global_scope;
             }
@@ -451,7 +451,7 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         {
             // aliased import: link the module scope to the symbol
             Symbol *module_symbol = use_stmt->use_stmt.module_sym;
-            if (module_symbol)
+            if (module_symbol && module_symbol->kind == SYMBOL_MODULE)
             {
                 module_symbol->module.scope = module->symbols->global_scope;
             }
@@ -520,7 +520,20 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         semantic_error_list_add(&analyzer->errors, module_analyzer.errors.errors[i].token, module_analyzer.errors.errors[i].message, module->file_path);
     }
 
-    // clean up analyzer (symbol table already transferred)
+    // clean up analyzer (preserve symbol tables referenced by aliases)
+    // the temporary module manager owns Module objects whose symbol tables may now
+    // be referenced by alias scopes in the current analyzer; prevent freeing them
+    // here by detaching their symbol_table pointers before teardown
+    for (int i = 0; i < module_analyzer.module_manager.capacity; i++)
+    {
+        Module *m = module_analyzer.module_manager.modules[i];
+        while (m)
+        {
+            m->symbols = NULL; // prevent module_dnit from freeing active scopes
+            m = m->next;
+        }
+    }
+
     semantic_error_list_dnit(&module_analyzer.errors);
     module_manager_dnit(&module_analyzer.module_manager);
 
@@ -1000,6 +1013,11 @@ bool semantic_analyze_ret_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     if (stmt->ret_stmt.expr)
     {
         // use expected return type as hint for better literal inference
+        if (expected_return == NULL)
+        {
+            semantic_error(analyzer, stmt, "cannot return a value from a void function");
+            return false;
+        }
         Type *actual_return = semantic_analyze_expr_with_hint(analyzer, stmt->ret_stmt.expr, expected_return);
         if (!actual_return)
         {

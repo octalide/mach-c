@@ -17,6 +17,7 @@ typedef struct TargetConfig
     bool emit_object;   // emit object files
     bool build_library; // build as library
     bool no_pie;        // disable PIE
+    bool shared;        // build shared library when building a library
 } TargetConfig;
 
 // explicit dependency specification (parsed from [deps] table)
@@ -99,6 +100,11 @@ bool config_should_emit_asm(ProjectConfig *config, const char *target_name);
 bool config_should_emit_object(ProjectConfig *config, const char *target_name);
 bool config_should_build_library(ProjectConfig *config, const char *target_name);
 bool config_should_link_executable(ProjectConfig *config, const char *target_name);
+// library type queries
+bool config_is_shared_library(ProjectConfig *config, const char *target_name);
+// derive default output names
+char *config_default_executable_name(ProjectConfig *config);
+char *config_default_library_name(ProjectConfig *config, bool shared);
 
 // path resolution (target-specific)
 char *config_resolve_main_file(ProjectConfig *config, const char *project_dir);

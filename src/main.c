@@ -6,6 +6,7 @@
 #include "parser.h"
 #include "semantic.h"
 
+#include <dirent.h>
 #include <llvm-c/Target.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@ typedef struct BuildOptions
     bool        link_executable;
     bool        build_library; // build as library instead of executable
     bool        no_pie;        // disable PIE
+    bool        include_runtime;
     const char *output_file;
     int         opt_level;
     char      **link_objects;  // additional object files to link
@@ -36,6 +38,17 @@ static int  dep_list_command(int argc, char **argv);
 static int  examine_command(int argc, char **argv);
 static bool copy_directory(const char *src, const char *dest);
 static bool is_valid_mach_project(const char *path);
+static bool ensure_directory(const char *path);
+static bool ensure_runtime_module(SemanticAnalyzer *analyzer, const char *module_path);
+typedef struct StringList { char **items; int count; int cap; } StringList;
+static bool sl_add(StringList *list, const char *s);
+static void sl_free(StringList *list);
+static bool collect_library_directory(ProjectConfig *config,
+                                      const char    *dir_path,
+                                      const char    *package_name,
+                                      const char    *relative_prefix,
+                                      StringList    *out_modules);
+static bool prepare_library_modules(SemanticAnalyzer *analyzer, ProjectConfig *config, const char *project_dir);
 
 static void print_usage(const char *program_name)
 {
@@ -57,6 +70,7 @@ static void print_usage(const char *program_name)
     fprintf(stderr, "  --no-link     don't create executable (just compile)\n");
     fprintf(stderr, "  --no-pie      disable position independent executable\n");
     fprintf(stderr, "  --link <obj>  link with additional object file\n");
+    fprintf(stderr, "  --no-runtime  skip linking runtime support\n");
 }
 
 static void print_dep_usage(void)
@@ -71,25 +85,17 @@ static void print_dep_usage(void)
     fprintf(stderr, "  cmach dep add mylib ./libs/mylib  # add local dependency\n");
 }
 
-static char *get_default_target_triple(void)
+static bool ends_with(const char *s, const char *suffix)
 {
-    // initialize LLVM targets to get target info
-    LLVMInitializeAllTargetInfos();
-
-    // get the default target triple from LLVM
-    char *triple = LLVMGetDefaultTargetTriple();
-    if (!triple)
-    {
-        // fallback to a reasonable default
-        return strdup("x86_64-unknown-linux-gnu");
-    }
-
-    // copy the string since LLVM owns the original
-    char *result = strdup(triple);
-    LLVMDisposeMessage(triple);
-
-    return result;
+    if (!s || !suffix)
+        return false;
+    size_t ls = strlen(s), lf = strlen(suffix);
+    if (lf > ls)
+        return false;
+    return strncmp(s + (ls - lf), suffix, lf) == 0;
 }
+
+// removed: get_default_target_triple no longer used during init
 
 static char *read_file(const char *path)
 {
@@ -183,6 +189,241 @@ static char *create_output_filename(const char *input_file, const char *extensio
     return output;
 }
 
+static bool ensure_directory(const char *path)
+{
+    if (!path)
+        return false;
+
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+    {
+        return true;
+    }
+
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", path);
+    return system(cmd) == 0;
+}
+
+static bool ensure_runtime_module(SemanticAnalyzer *analyzer, const char *module_path)
+{
+    if (!analyzer || !module_path || module_path[0] == '\0')
+        return false;
+
+    Module *module = module_manager_load_module(&analyzer->module_manager, module_path);
+    if (!module)
+        return false;
+
+    if (!module_manager_resolve_dependencies(&analyzer->module_manager, module->ast, "."))
+        return false;
+
+    module->needs_linking = true;
+
+    AstNode use_stub;
+    memset(&use_stub, 0, sizeof(use_stub));
+    use_stub.kind                   = AST_STMT_USE;
+    use_stub.use_stmt.module_path   = strdup(module_path);
+    use_stub.use_stmt.alias         = strdup("__mach_runtime");
+    use_stub.use_stmt.module_sym    = NULL;
+
+    if (!use_stub.use_stmt.module_path || !use_stub.use_stmt.alias)
+    {
+        free(use_stub.use_stmt.module_path);
+        free(use_stub.use_stmt.alias);
+        return false;
+    }
+
+    bool success = semantic_analyze_use_stmt(analyzer, &use_stub);
+    if (success)
+        success = semantic_analyze_imported_module(analyzer, &use_stub);
+
+    free(use_stub.use_stmt.module_path);
+    free(use_stub.use_stmt.alias);
+
+    return success;
+}
+
+static bool sl_add(StringList *list, const char *s)
+{
+    if (list->count == list->cap)
+    {
+        int   ncap = list->cap ? list->cap * 2 : 16;
+        char **n    = realloc(list->items, ncap * sizeof(char *));
+        if (!n) return false;
+        list->items = n; list->cap = ncap;
+    }
+    list->items[list->count++] = strdup(s);
+    return true;
+}
+
+static void sl_free(StringList *list)
+{
+    for (int i = 0; i < list->count; i++) free(list->items[i]);
+    free(list->items);
+    memset(list, 0, sizeof(*list));
+}
+
+static bool collect_library_directory(ProjectConfig *config,
+                                      const char    *dir_path,
+                                      const char    *package_name,
+                                      const char    *relative_prefix,
+                                      StringList    *out_modules)
+{
+    DIR *dir = opendir(dir_path);
+    if (!dir)
+        return false;
+
+    bool             success = true;
+    struct dirent   *entry;
+    while (success && (entry = readdir(dir)) != NULL)
+    {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        size_t path_len = strlen(dir_path) + strlen(entry->d_name) + 2;
+        char  *child     = malloc(path_len);
+        if (!child)
+        {
+            success = false;
+            break;
+        }
+        snprintf(child, path_len, "%s/%s", dir_path, entry->d_name);
+
+        struct stat st;
+        if (stat(child, &st) != 0)
+        {
+            free(child);
+            success = false;
+            break;
+        }
+
+        if (S_ISDIR(st.st_mode))
+        {
+            size_t new_prefix_len = relative_prefix ? strlen(relative_prefix) : 0;
+            size_t name_len       = strlen(entry->d_name);
+            size_t total_len      = new_prefix_len + (new_prefix_len > 0 ? 1 : 0) + name_len + 1;
+            char  *new_prefix     = malloc(total_len);
+            if (!new_prefix)
+            {
+                free(child);
+                success = false;
+                break;
+            }
+
+            if (new_prefix_len > 0)
+                snprintf(new_prefix, total_len, "%s.%s", relative_prefix, entry->d_name);
+            else
+                snprintf(new_prefix, total_len, "%s", entry->d_name);
+
+            success = collect_library_directory(config, child, package_name, new_prefix, out_modules);
+            free(new_prefix);
+            free(child);
+            continue;
+        }
+
+        const char *dot = strrchr(entry->d_name, '.');
+        if (!dot || strcmp(dot, ".mach") != 0)
+        {
+            free(child);
+            continue;
+        }
+
+        size_t base_len = (size_t)(dot - entry->d_name);
+        char  *base     = malloc(base_len + 1);
+        if (!base)
+        {
+            free(child);
+            success = false;
+            break;
+        }
+        memcpy(base, entry->d_name, base_len);
+        base[base_len] = '\0';
+
+        size_t prefix_len  = relative_prefix ? strlen(relative_prefix) : 0;
+        size_t module_len  = strlen(package_name) + 1 + prefix_len + (prefix_len > 0 ? 1 : 0) + base_len + 1;
+        char  *module_path = malloc(module_len);
+        if (!module_path)
+        {
+            free(base);
+            free(child);
+            success = false;
+            break;
+        }
+
+        if (prefix_len > 0)
+            snprintf(module_path, module_len, "%s.%s.%s", package_name, relative_prefix, base);
+        else
+            snprintf(module_path, module_len, "%s.%s", package_name, base);
+
+    success = sl_add(out_modules, module_path);
+
+        free(module_path);
+        free(base);
+        free(child);
+    }
+
+    closedir(dir);
+    return success;
+}
+
+static bool prepare_library_modules(SemanticAnalyzer *analyzer, ProjectConfig *config, const char *project_dir)
+{
+    if (!analyzer || !config || !config->name)
+        return false;
+
+    char *src_dir = config_get_package_src_dir(config, project_dir, config->name);
+    if (!src_dir)
+        return false;
+
+    StringList modules = {0};
+    bool       ok      = collect_library_directory(config, src_dir, config->name, NULL, &modules);
+    free(src_dir);
+    if (!ok)
+    {
+        sl_free(&modules);
+        return false;
+    }
+
+    // Build a synthetic program with 'use <module> as __lib_i' for each module
+    AstNode *program = malloc(sizeof(AstNode));
+    if (!program)
+    {
+        sl_free(&modules);
+        return false;
+    }
+    ast_node_init(program, AST_PROGRAM);
+    program->program.stmts = malloc(sizeof(AstList));
+    if (!program->program.stmts)
+    {
+        free(program);
+        sl_free(&modules);
+        return false;
+    }
+    ast_list_init(program->program.stmts);
+
+    for (int i = 0; i < modules.count; i++)
+    {
+        AstNode *use = malloc(sizeof(AstNode));
+        if (!use)
+        {
+            ast_node_dnit(program); free(program); sl_free(&modules); return false;
+        }
+        ast_node_init(use, AST_STMT_USE);
+        use->use_stmt.module_path = strdup(modules.items[i]);
+        char aliasbuf[64]; snprintf(aliasbuf, sizeof(aliasbuf), "__lib_%d", i);
+        use->use_stmt.alias = strdup(aliasbuf);
+        use->use_stmt.module_sym = NULL;
+    ast_list_append(program->program.stmts, use);
+    }
+
+    bool success = semantic_analyze(analyzer, program);
+
+    ast_node_dnit(program);
+    free(program);
+    sl_free(&modules);
+    return success;
+}
+
 static int init_command(int argc, char **argv)
 {
     const char *project_name = "mach-project";
@@ -219,9 +460,6 @@ static int init_command(int argc, char **argv)
     // create standard mach project directory structure
     char path[1024];
 
-    // get the default target triple before creating directories
-    char *target_triple = get_default_target_triple();
-
     // dep/ - dependency source files
     snprintf(path, sizeof(path), "%s/dep", project_dir);
     mkdir(path, 0755);
@@ -234,17 +472,7 @@ static int init_command(int argc, char **argv)
     snprintf(path, sizeof(path), "%s/out", project_dir);
     mkdir(path, 0755);
 
-    // out/<target>/ - target directory
-    snprintf(path, sizeof(path), "%s/out/%s", project_dir, target_triple);
-    mkdir(path, 0755);
-
-    // out/<target>/bin/ - binary output
-    snprintf(path, sizeof(path), "%s/out/%s/bin", project_dir, target_triple);
-    mkdir(path, 0755);
-
-    // out/<target>/obj/ - object files
-    snprintf(path, sizeof(path), "%s/out/%s/obj", project_dir, target_triple);
-    mkdir(path, 0755);
+    // per-target subdirectories are created during builds based on target name
 
     // src/ - source files
     snprintf(path, sizeof(path), "%s/src", project_dir);
@@ -386,7 +614,7 @@ static int init_command(int argc, char **argv)
     printf("  ├── dep/          # dependency source files\n");
     printf("  ├── lib/          # library/object dependencies\n");
     printf("  ├── out/          # output directory\n");
-    printf("  │   └── %s/   # target triple\n", target_triple);
+    printf("  │   └── native/   # build target\n");
     printf("  │       ├── bin/  # binary output\n");
     printf("  │       └── obj/  # object files\n");
     printf("  ├── src/          # source files\n");
@@ -449,6 +677,10 @@ static int clean_command(int argc, char **argv)
 static BuildOptions config_to_build_options(ProjectConfig *config, const char *target_name)
 {
     BuildOptions options = {0};
+    options.link_executable = true;
+    options.opt_level       = 2;
+    options.emit_object     = true;
+    options.include_runtime = true;
 
     if (config && target_name)
     {
@@ -463,20 +695,8 @@ static BuildOptions config_to_build_options(ProjectConfig *config, const char *t
             options.no_pie          = target->no_pie;
             options.opt_level       = target->opt_level;
             options.link_executable = !target->build_library;
+            options.include_runtime = !target->build_library;
         }
-        else
-        {
-            // fallback to default values
-            options.link_executable = true;
-            options.opt_level       = 2;
-            options.emit_object     = true;
-        }
-    }
-    else
-    {
-        options.link_executable = true;
-        options.opt_level       = 2;
-        options.emit_object     = true;
     }
 
     return options;
@@ -489,6 +709,11 @@ static int build_command(int argc, char **argv)
     char          *resolved_main_file = NULL;
     bool           is_project_build   = false;
     const char    *project_dir        = ".";
+    char          *object_dir         = NULL;
+    char          *root_module_name   = NULL;
+    char          *owned_obj_path     = NULL;
+    char          *precomputed_obj_path = NULL;
+    const char    *runtime_module_path = NULL;
 
     // check if a directory path is provided
     if (argc >= 3 && argv[2][0] != '-')
@@ -499,12 +724,10 @@ static int build_command(int argc, char **argv)
         {
             project_dir = argv[2];
             // try to load config from the specified directory
-            config = config_load_from_dir(project_dir);
+            config           = config_load_from_dir(project_dir);
+            is_project_build = config != NULL;
             if (config && config_has_main_file(config))
             {
-                // discover dependencies in the project
-
-                is_project_build   = true;
                 resolved_main_file = config_resolve_main_file(config, project_dir);
                 filename           = resolved_main_file;
             }
@@ -518,28 +741,21 @@ static int build_command(int argc, char **argv)
     }
 
     // if no directory/file specified, try current directory
-    if (!filename && !config)
+    if (!config)
     {
         config = config_load_from_dir(".");
+        is_project_build = config != NULL;
         if (config && config_has_main_file(config))
         {
-            // discover dependencies in the project
-
-            is_project_build   = true;
             resolved_main_file = config_resolve_main_file(config, ".");
             filename           = resolved_main_file;
         }
     }
 
-    if (!filename)
+    if (!config && !filename)
     {
         fprintf(stderr, "error: no input file specified and no project configuration found\n");
         print_usage(argv[0]);
-        if (config)
-        {
-            config_dnit(config);
-            free(config);
-        }
         return 1;
     }
 
@@ -551,6 +767,37 @@ static int build_command(int argc, char **argv)
         target_name = config->targets[0]->name; // use first target for now
     }
     BuildOptions options = config_to_build_options(config, target_name);
+
+    if (config)
+    {
+        if (config_should_emit_ast(config, target_name))
+            options.emit_ast = true;
+        if (config_should_emit_ir(config, target_name))
+            options.emit_ir = true;
+        if (config_should_emit_asm(config, target_name))
+            options.emit_asm = true;
+        if (config_should_emit_object(config, target_name))
+            options.emit_object = true;
+
+        if (config_should_build_library(config, target_name))
+        {
+            options.build_library   = true;
+            options.link_executable = false;
+            options.include_runtime = false;
+        }
+        else if (!config_should_link_executable(config, target_name))
+        {
+            options.link_executable = false;
+        }
+
+        // if the project has no entrypoint, treat it as a library build
+        if (!config_has_main_file(config))
+        {
+            options.build_library   = true;
+            options.link_executable = false;
+            options.include_runtime = false;
+        }
+    }
 
     // parse command line options (these override config)
     int start_idx = is_project_build ? 2 : 3;
@@ -598,6 +845,7 @@ static int build_command(int argc, char **argv)
         {
             options.build_library   = true;
             options.link_executable = false;
+            options.include_runtime = false;
         }
         else if (strcmp(argv[i], "--no-link") == 0)
         {
@@ -606,6 +854,10 @@ static int build_command(int argc, char **argv)
         else if (strcmp(argv[i], "--no-pie") == 0)
         {
             options.no_pie = true;
+        }
+        else if (strcmp(argv[i], "--no-runtime") == 0)
+        {
+            options.include_runtime = false;
         }
         else if (strcmp(argv[i], "--link") == 0)
         {
@@ -632,6 +884,8 @@ static int build_command(int argc, char **argv)
         }
     }
 
+    bool has_entry_file = filename != NULL;
+
     // determine output file
     char *default_output = NULL;
     if (!options.output_file)
@@ -656,27 +910,27 @@ static int build_command(int argc, char **argv)
         // fallback to traditional behavior
         if (!options.output_file)
         {
-            if (options.build_library)
+            if (options.build_library && has_entry_file && filename)
             {
                 default_output      = create_output_filename(filename, ".so");
                 options.output_file = default_output;
             }
-            else if (options.link_executable)
+            else if (options.link_executable && has_entry_file && filename)
             {
                 default_output      = get_base_filename(filename);
                 options.output_file = default_output;
             }
-            else if (options.emit_object && !options.emit_ir && !options.emit_asm)
+            else if (options.emit_object && !options.emit_ir && !options.emit_asm && has_entry_file && filename)
             {
                 default_output      = create_output_filename(filename, ".o");
                 options.output_file = default_output;
             }
-            else if (options.emit_ir && !options.emit_asm && !options.emit_object)
+            else if (options.emit_ir && !options.emit_asm && !options.emit_object && has_entry_file && filename)
             {
                 default_output      = create_output_filename(filename, ".ll");
                 options.output_file = default_output;
             }
-            else if (options.emit_asm && !options.emit_ir && !options.emit_object)
+            else if (options.emit_asm && !options.emit_ir && !options.emit_object && has_entry_file && filename)
             {
                 default_output      = create_output_filename(filename, ".s");
                 options.output_file = default_output;
@@ -684,55 +938,95 @@ static int build_command(int argc, char **argv)
         }
     }
 
-    // read source file
-    char *source = read_file(filename);
-    if (!source)
+    if (!options.link_executable)
     {
-        free(default_output);
-        return 1;
+        options.include_runtime = false;
     }
 
-    // initialize lexer
-    Lexer lexer;
-    lexer_init(&lexer, source);
-
-    // initialize parser
-    Parser parser;
-    parser_init(&parser, &lexer);
-
-    printf("parsing '%s'...\n", filename);
-    fflush(stdout);
-
-    // parse program
-    AstNode *program = parser_parse_program(&parser);
-
-    if (parser.had_error)
+    if (!has_entry_file && !options.build_library)
     {
-        fprintf(stderr, "parsing failed with %d error(s):\n", parser.errors.count);
-        parser_error_list_print(&parser.errors, &lexer, filename);
-
-        ast_node_dnit(program);
-        free(program);
-        parser_dnit(&parser);
-        lexer_dnit(&lexer);
-        free(source);
-        free(default_output);
-        return 1;
-    }
-
-    if (options.emit_ast)
-    {
-        char *ast_file = create_output_filename(filename, ".ast");
-
-        printf("writing abstract syntax tree to '%s'...\n", ast_file);
-        fflush(stdout);
-
-        if (!ast_emit(program, ast_file))
+        fprintf(stderr, "error: no input file specified; provide a source file or configure a library target\n");
+        if (config)
         {
-            printf("failed to write AST\n");
+            config_dnit(config);
+            free(config);
+        }
+        return 1;
+    }
+
+    char   *source             = NULL;
+    bool    lexer_initialized  = false;
+    bool    parser_initialized = false;
+    Lexer   lexer;
+    Parser  parser;
+    AstNode *program = NULL;
+
+    if (has_entry_file)
+    {
+        source = read_file(filename);
+        if (!source)
+        {
+            free(default_output);
+            return 1;
         }
 
-        free(ast_file);
+        lexer_init(&lexer, source);
+        lexer_initialized = true;
+
+        parser_init(&parser, &lexer);
+        parser_initialized = true;
+
+        printf("parsing '%s'...\n", filename);
+        fflush(stdout);
+
+        program = parser_parse_program(&parser);
+
+        if (parser.had_error)
+        {
+            fprintf(stderr, "parsing failed with %d error(s):\n", parser.errors.count);
+            parser_error_list_print(&parser.errors, &lexer, filename);
+
+            ast_node_dnit(program);
+            free(program);
+            parser_dnit(&parser);
+            lexer_dnit(&lexer);
+            free(source);
+            free(default_output);
+            return 1;
+        }
+
+        if (options.emit_ast)
+        {
+            char *ast_file = create_output_filename(filename, ".ast");
+
+            printf("writing abstract syntax tree to '%s'...\n", ast_file);
+            fflush(stdout);
+
+            if (!ast_emit(program, ast_file))
+            {
+                printf("failed to write AST\n");
+            }
+
+            free(ast_file);
+        }
+    }
+    else
+    {
+        program = malloc(sizeof(AstNode));
+        if (!program)
+        {
+            free(default_output);
+            return 1;
+        }
+        ast_node_init(program, AST_PROGRAM);
+        program->program.stmts = malloc(sizeof(AstList));
+        if (!program->program.stmts)
+        {
+            free(program);
+            free(default_output);
+            return 1;
+        }
+        ast_list_init(program->program.stmts);
     }
 
     // initialize semantic analyzer with module manager
@@ -747,7 +1041,18 @@ static int build_command(int argc, char **argv)
     }
 
     // add search paths for modules
-    char *base_dir = get_directory(filename);
+    char *base_dir = NULL;
+    if (has_entry_file)
+    {
+        base_dir = get_directory(filename);
+    }
+    else if (config)
+    {
+        base_dir = config_resolve_src_dir(config, project_dir);
+    }
+    if (!base_dir)
+        base_dir = strdup(".");
+
     module_manager_add_search_path(&analyzer.module_manager, base_dir);
     module_manager_add_search_path(&analyzer.module_manager, ".");
 
@@ -789,7 +1094,8 @@ static int build_command(int argc, char **argv)
         if (analyzer.errors.count > 0)
         {
             fprintf(stderr, "semantic analysis failed with %d error(s):\n", analyzer.errors.count);
-            semantic_print_errors(&analyzer, &lexer, filename);
+            if (has_entry_file)
+                semantic_print_errors(&analyzer, &lexer, filename);
         }
 
         if (analyzer.module_manager.had_error)
@@ -802,6 +1108,29 @@ static int build_command(int argc, char **argv)
         semantic_analyzer_dnit(&analyzer);
         ast_node_dnit(program);
         free(program);
+        if (parser_initialized)
+            parser_dnit(&parser);
+        if (lexer_initialized)
+            lexer_dnit(&lexer);
+        free(source);
+        free(default_output);
+        return 1;
+    }
+
+    if (config)
+        object_dir = config_resolve_obj_dir(config, project_dir, target_name);
+    if (!object_dir)
+        object_dir = strdup("bin/obj");
+
+    if (!object_dir || !ensure_directory(object_dir))
+    {
+        fprintf(stderr, "error: failed to prepare object directory\n");
+
+        free(object_dir);
+        free(base_dir);
+        semantic_analyzer_dnit(&analyzer);
+        ast_node_dnit(program);
+        free(program);
         parser_dnit(&parser);
         lexer_dnit(&lexer);
         free(source);
@@ -809,14 +1138,136 @@ static int build_command(int argc, char **argv)
         return 1;
     }
 
-    // ensure output directory exists for dependency compilation
-    if (system("mkdir -p bin/obj") != 0)
+    if (options.include_runtime)
     {
-        fprintf(stderr, "warning: failed to create bin/obj directory\n");
+        if (config && config_has_runtime_module(config))
+        {
+            runtime_module_path = config->runtime_module;
+        }
+        else
+        {
+            fprintf(stderr, "error: no runtime module configured; set 'runtime.runtime' in mach.toml or pass --no-runtime\n");
+
+            free(object_dir);
+            free(base_dir);
+            semantic_analyzer_dnit(&analyzer);
+            ast_node_dnit(program);
+            free(program);
+            if (parser_initialized)
+                parser_dnit(&parser);
+            if (lexer_initialized)
+                lexer_dnit(&lexer);
+            free(source);
+            free(default_output);
+            return 1;
+        }
+
+        if (runtime_module_path && !ensure_runtime_module(&analyzer, runtime_module_path))
+        {
+            fprintf(stderr, "error: failed to prepare runtime module '%s'\n", runtime_module_path);
+
+            free(object_dir);
+            free(base_dir);
+            semantic_analyzer_dnit(&analyzer);
+            ast_node_dnit(program);
+            free(program);
+            parser_dnit(&parser);
+            lexer_dnit(&lexer);
+            free(source);
+            free(default_output);
+            return 1;
+        }
     }
 
-    // compile module dependencies
-    if (!module_manager_compile_dependencies(&analyzer.module_manager, "bin/obj", options.opt_level, options.no_pie))
+    if (config && object_dir)
+    {
+        const char *preferred_name = NULL;
+        char       *fallback_name  = NULL;
+
+        if (config->target_name && config->target_name[0] != '\0')
+        {
+            preferred_name = config->target_name;
+        }
+        else if (config->name && config->name[0] != '\0')
+        {
+            preferred_name = config->name;
+        }
+        else if (root_module_name && root_module_name[0] != '\0')
+        {
+            preferred_name = root_module_name;
+        }
+        else
+        {
+            if (has_entry_file && filename)
+            {
+                fallback_name  = get_base_filename(filename);
+                preferred_name = fallback_name;
+            }
+            else
+            {
+                preferred_name = "module";
+            }
+        }
+
+        if (preferred_name)
+        {
+            precomputed_obj_path = module_make_object_path(object_dir, preferred_name);
+            if (!precomputed_obj_path)
+            {
+                fprintf(stderr, "error: failed to prepare project object output path\n");
+
+                free(fallback_name);
+                free(object_dir);
+                free(base_dir);
+                semantic_analyzer_dnit(&analyzer);
+                ast_node_dnit(program);
+                free(program);
+                if (parser_initialized)
+                    parser_dnit(&parser);
+                if (lexer_initialized)
+                    lexer_dnit(&lexer);
+                free(source);
+                free(default_output);
+                return 1;
+            }
+        }
+
+        free(fallback_name);
+    }
+
+    if (config && options.build_library)
+    {
+        if (!prepare_library_modules(&analyzer, config, project_dir))
+        {
+            fprintf(stderr, "error: failed to prepare library modules\n");
+            if (analyzer.errors.count > 0)
+            {
+                fprintf(stderr, "semantic errors during library preparation:\n");
+                semantic_print_errors(&analyzer, NULL, NULL);
+            }
+            if (analyzer.module_manager.had_error)
+            {
+                fprintf(stderr, "module loading errors during library preparation:\n");
+                module_error_list_print(&analyzer.module_manager.errors);
+            }
+
+            free(precomputed_obj_path);
+            free(object_dir);
+            free(base_dir);
+            semantic_analyzer_dnit(&analyzer);
+            ast_node_dnit(program);
+            free(program);
+            if (parser_initialized)
+                parser_dnit(&parser);
+            if (lexer_initialized)
+                lexer_dnit(&lexer);
+            free(source);
+            free(default_output);
+            return 1;
+        }
+    }
+
+    if (!module_manager_compile_dependencies(&analyzer.module_manager, object_dir, options.opt_level, options.no_pie))
     {
         fprintf(stderr, "dependency compilation failed\n");
         if (analyzer.module_manager.had_error)
@@ -824,288 +1275,348 @@ static int build_command(int argc, char **argv)
             module_error_list_print(&analyzer.module_manager.errors);
         }
 
+        free(precomputed_obj_path);
+        free(object_dir);
         free(base_dir);
         semantic_analyzer_dnit(&analyzer);
         ast_node_dnit(program);
         free(program);
-        parser_dnit(&parser);
-        lexer_dnit(&lexer);
+        if (parser_initialized)
+            parser_dnit(&parser);
+        if (lexer_initialized)
+            lexer_dnit(&lexer);
         free(source);
         free(default_output);
         return 1;
     }
 
-    // initialize codegen context
-    printf("generating code...\n");
-    fflush(stdout);
+    bool            emit_success       = true;
+    CodegenContext  codegen;
+    bool            codegen_initialized = false;
 
-    CodegenContext codegen;
-    codegen_context_init(&codegen, get_filename(filename), options.no_pie);
-    codegen.opt_level = options.opt_level;
-    if (config && config->name)
+    if (has_entry_file)
     {
-        codegen.package_name = strdup(config->name);
-    }
+        printf("generating code...\n");
+        fflush(stdout);
 
-    // check if we're compiling the runtime module
-    char *base_filename = get_filename(filename);
-    if (base_filename && strcmp(base_filename, "runtime.mach") == 0)
-    {
-        codegen.is_runtime = true;
-    }
-    free(base_filename);
+        char *display_name = get_filename(filename);
+        codegen_context_init(&codegen, display_name ? display_name : filename, options.no_pie);
+        codegen_initialized = true;
+        codegen.opt_level   = options.opt_level;
+        if (display_name && strcmp(display_name, "runtime.mach") == 0)
+        {
+            codegen.is_runtime = true;
+        }
 
-    // generate code
+        if (!root_module_name)
+        {
+            if (config && config->name)
+                root_module_name = strdup(config->name);
+            else
+                root_module_name = get_base_filename(filename);
+        }
+
+        if (root_module_name)
+        {
+            char *root_package = module_sanitize_name(root_module_name);
+            if (root_package)
+                codegen.package_name = root_package;
+        }
+
+        free(display_name);
+
+    // inform codegen whether runtime is in play (affects main mangling)
+    codegen.use_runtime = options.include_runtime;
     bool codegen_success = codegen_generate(&codegen, program, &analyzer);
 
-    if (!codegen_success)
-    {
-        fprintf(stderr, "code generation failed:\n");
-        codegen_print_errors(&codegen);
-
-        codegen_context_dnit(&codegen);
-        free(base_dir);
-        semantic_analyzer_dnit(&analyzer);
-        ast_node_dnit(program);
-        free(program);
-        parser_dnit(&parser);
-        lexer_dnit(&lexer);
-        free(source);
-        free(default_output);
-        return 1;
-    }
-
-    // emit requested outputs
-    bool emit_success = true;
-
-    if (options.emit_ir)
-    {
-        char *ir_file = create_output_filename(filename, ".ll");
-
-        printf("writing llvm ir to '%s'...\n", ir_file);
-        fflush(stdout);
-
-        if (!codegen_emit_llvm_ir(&codegen, ir_file))
+        if (!codegen_success)
         {
-            printf("failed to write LLVM IR\n");
-            emit_success = false;
+            fprintf(stderr, "code generation failed:\n");
+            codegen_print_errors(&codegen);
+
+            codegen_context_dnit(&codegen);
+            free(base_dir);
+            free(object_dir);
+            free(precomputed_obj_path);
+            free(root_module_name);
+            semantic_analyzer_dnit(&analyzer);
+            ast_node_dnit(program);
+            free(program);
+            if (parser_initialized)
+                parser_dnit(&parser);
+            if (lexer_initialized)
+                lexer_dnit(&lexer);
+            free(source);
+            free(default_output);
+            return 1;
         }
 
-        free(ir_file);
-    }
-
-    if (options.emit_asm)
-    {
-        char *asm_file = create_output_filename(filename, ".s");
-
-        printf("writing assembly to '%s'...\n", asm_file);
-        fflush(stdout);
-
-        if (!codegen_emit_assembly(&codegen, asm_file))
+        if (options.emit_ir)
         {
-            printf("failed to write assembly\n");
-            emit_success = false;
-        }
+            char *ir_file = create_output_filename(filename, ".ll");
 
-        free(asm_file);
-    }
-
-    if (options.emit_object || options.link_executable || options.build_library)
-    {
-        char *obj_file = (options.output_file && options.emit_object && !options.link_executable && !options.build_library) ? strdup(options.output_file) : create_output_filename(filename, ".o");
-
-        if (options.emit_object)
-        {
-            printf("writing object file to '%s'...\n", obj_file);
-            fflush(stdout);
-        }
-
-        if (!codegen_emit_object(&codegen, obj_file))
-        {
-            if (options.emit_object)
-                printf("failed to write object file\n");
-            else
-                fprintf(stderr, "error: failed to generate object file\n");
-            emit_success = false;
-        }
-
-        if (options.link_executable && emit_success)
-        {
-            const char *output_exe = options.output_file ? options.output_file : default_output;
-
-            printf("linking executable '%s'...\n", output_exe);
+            printf("writing llvm ir to '%s'...\n", ir_file);
             fflush(stdout);
 
-            // compile runtime if not already compiled
-            char *runtime_obj = NULL;
-            if (base_dir)
+            if (!codegen_emit_llvm_ir(&codegen, ir_file))
             {
-                size_t runtime_path_len = strlen(base_dir) + strlen("/runtime/runtime.mach") + 1;
-                char  *runtime_path     = malloc(runtime_path_len);
-                snprintf(runtime_path, runtime_path_len, "%s/runtime/runtime.mach", base_dir);
-
-                if (access(runtime_path, F_OK) == 0)
-                {
-                    printf("compiling runtime...\n");
-                    fflush(stdout);
-
-                    // compile runtime to object file
-                    runtime_obj = create_output_filename(runtime_path, ".o");
-
-                    // recursive call to compile runtime
-                    size_t runtime_cmd_len = strlen(argv[0]) + strlen(runtime_path) + strlen(runtime_obj) + 64;
-                    char  *runtime_cmd     = malloc(runtime_cmd_len);
-                    snprintf(runtime_cmd, runtime_cmd_len, "%s build %s -o %s --emit-obj --no-link", argv[0], runtime_path, runtime_obj);
-
-                    printf("runtime command: %s\n", runtime_cmd);
-                    fflush(stdout);
-
-                    if (system(runtime_cmd) != 0)
-                    {
-                        fprintf(stderr, "error: failed to compile runtime\n");
-                        emit_success = false;
-                    }
-
-                    free(runtime_cmd);
-                }
-
-                free(runtime_path);
+                printf("failed to write LLVM IR\n");
+                emit_success = false;
             }
 
-            // get dependency object files
-            char **dep_objects = NULL;
-            int    dep_count   = 0;
-            if (!module_manager_get_link_objects(&analyzer.module_manager, &dep_objects, &dep_count))
+            free(ir_file);
+        }
+
+        if (options.emit_asm)
+        {
+            char *asm_file = create_output_filename(filename, ".s");
+
+            printf("writing assembly to '%s'...\n", asm_file);
+            fflush(stdout);
+
+            if (!codegen_emit_assembly(&codegen, asm_file))
             {
-                printf("failed to collect dependency object files\n");
+                printf("failed to write assembly\n");
+                emit_success = false;
+            }
+
+            free(asm_file);
+        }
+
+        if (options.emit_object || options.link_executable || options.build_library)
+        {
+            const char *obj_file = NULL;
+            if (options.emit_object && !options.link_executable && !options.build_library && options.output_file && ends_with(options.output_file, ".o"))
+            {
+                obj_file = options.output_file;
+            }
+            else
+            {
+                if (precomputed_obj_path)
+                {
+                    owned_obj_path       = precomputed_obj_path;
+                    precomputed_obj_path = NULL;
+                    obj_file             = owned_obj_path;
+                }
+                else
+                {
+                    const char *object_name  = NULL;
+                    char       *fallback_name = NULL;
+
+                    if (root_module_name)
+                        object_name = root_module_name;
+                    else
+                        object_name = fallback_name = get_base_filename(filename);
+
+                    owned_obj_path = module_make_object_path(object_dir, object_name ? object_name : "module");
+                    free(fallback_name);
+                    obj_file = owned_obj_path;
+                }
+            }
+
+            if (!obj_file)
+            {
+                fprintf(stderr, "error: failed to determine object file path\n");
                 emit_success = false;
             }
             else
             {
-                // construct linking command with all object files
-                size_t cmd_size = 1024 + (dep_count * 256) + (options.link_count * 256) + 256; // extra space for runtime
-                char  *link_cmd = malloc(cmd_size);
-
-                if (options.no_pie)
+                if (options.emit_object)
                 {
-                    snprintf(link_cmd, cmd_size, "cc -no-pie -o %s %s", output_exe, obj_file);
-                }
-                else
-                {
-                    snprintf(link_cmd, cmd_size, "cc -pie -o %s %s", output_exe, obj_file);
+                    printf("writing object file to '%s'...\n", obj_file);
+                    fflush(stdout);
                 }
 
-                // append dependency object files
-                for (int i = 0; i < dep_count; i++)
+                if (!codegen_emit_object(&codegen, obj_file))
                 {
-                    strcat(link_cmd, " ");
-                    strcat(link_cmd, dep_objects[i]);
-                }
-
-                // append runtime object file if available
-                if (runtime_obj)
-                {
-                    strcat(link_cmd, " ");
-                    strcat(link_cmd, runtime_obj);
-                }
-
-                // append user-specified link objects
-                for (int i = 0; i < options.link_count; i++)
-                {
-                    strcat(link_cmd, " ");
-                    strcat(link_cmd, options.link_objects[i]);
-                }
-
-                if (system(link_cmd) == 0)
-                {
-                    // remove temporary object file
-                    if (!options.emit_object)
-                    {
-                        unlink(obj_file);
-                    }
-
-                    // remove runtime object file (it's always temporary)
-                    if (runtime_obj)
-                    {
-                        unlink(runtime_obj);
-                    }
-                }
-                else
-                {
-                    printf("failed to link executable\n");
+                    if (options.emit_object)
+                        printf("failed to write object file\n");
+                    else
+                        fprintf(stderr, "error: failed to generate object file\n");
                     emit_success = false;
                 }
-
-                free(link_cmd);
-
-                // cleanup dependency object file list
-                for (int i = 0; i < dep_count; i++)
-                {
-                    free(dep_objects[i]);
-                }
-                free(dep_objects);
             }
 
-            // cleanup runtime object file name
-            if (runtime_obj)
+            // decide whether to link an executable
+            bool want_link_exe = (!options.build_library) && (config ? config_should_link_executable(config, target_name) : options.link_executable);
+            if (!want_link_exe && is_project_build && config && config_has_main_file(config))
+                want_link_exe = true;
+            if (want_link_exe && emit_success)
             {
-                free(runtime_obj);
+                const char *output_exe = options.output_file ? options.output_file : (default_output ? default_output : config_default_executable_name(config));
+
+                printf("linking executable '%s'...\n", output_exe);
+                fflush(stdout);
+
+                char **dep_objects = NULL;
+                int    dep_count   = 0;
+                if (!module_manager_get_link_objects(&analyzer.module_manager, &dep_objects, &dep_count))
+                {
+                    fprintf(stderr, "error: failed to collect dependency object files\n");
+                    emit_success = false;
+                }
+                else
+                {
+                    size_t cmd_size = 1024 + (dep_count * 256) + (options.link_count * 256);
+                    char  *link_cmd = malloc(cmd_size);
+
+                    snprintf(link_cmd, cmd_size, options.no_pie ? "cc -no-pie -o %s %s" : "cc -pie -o %s %s", output_exe, obj_file);
+
+                    for (int i = 0; i < dep_count; i++)
+                    {
+                        strcat(link_cmd, " ");
+                        strcat(link_cmd, dep_objects[i]);
+                    }
+
+                    for (int i = 0; i < options.link_count; i++)
+                    {
+                        strcat(link_cmd, " ");
+                        strcat(link_cmd, options.link_objects[i]);
+                    }
+
+                    if (system(link_cmd) != 0)
+                    {
+                        printf("failed to link executable\n");
+                        emit_success = false;
+                    }
+                    else if (!options.emit_object && owned_obj_path)
+                    {
+                        unlink(owned_obj_path);
+                    }
+
+                    free(link_cmd);
+
+                    for (int i = 0; i < dep_count; i++)
+                    {
+                        free(dep_objects[i]);
+                    }
+                    free(dep_objects);
+                }
+            }
+            else if (options.build_library && emit_success)
+            {
+                bool        shared     = config_is_shared_library(config, target_name);
+                char       *auto_name  = config_default_library_name(config, shared);
+                const char *output_lib = options.output_file ? options.output_file : (default_output ? default_output : auto_name);
+
+                printf("linking library '%s'...\n", output_lib);
+                fflush(stdout);
+
+                char **dep_objects = NULL;
+                int    dep_count   = 0;
+                if (!module_manager_get_link_objects(&analyzer.module_manager, &dep_objects, &dep_count))
+                {
+                    fprintf(stderr, "error: failed to collect dependency object files\n");
+                    emit_success = false;
+                }
+                else
+                {
+                    size_t cmd_size = 2048 + (dep_count * 256) + (options.link_count * 256);
+                    char  *link_cmd = malloc(cmd_size);
+
+                    if (shared)
+                        snprintf(link_cmd, cmd_size, "cc -shared -fPIC -o %s %s", output_lib, obj_file);
+                    else
+                        snprintf(link_cmd, cmd_size, "ar rcs %s %s", output_lib, obj_file);
+
+                    for (int i = 0; i < dep_count; i++)
+                    {
+                        strcat(link_cmd, " ");
+                        strcat(link_cmd, dep_objects[i]);
+                    }
+
+                    for (int i = 0; i < options.link_count; i++)
+                    {
+                        strcat(link_cmd, " ");
+                        strcat(link_cmd, options.link_objects[i]);
+                    }
+
+                    if (system(link_cmd) != 0)
+                    {
+                        printf("failed to link library\n");
+                        emit_success = false;
+                    }
+                    else if (!options.emit_object && owned_obj_path)
+                    {
+                        unlink(owned_obj_path);
+                    }
+                    if (!options.output_file && !default_output)
+                        free(auto_name);
+
+                    free(link_cmd);
+
+                    for (int i = 0; i < dep_count; i++)
+                    {
+                        free(dep_objects[i]);
+                    }
+                    free(dep_objects);
+                }
             }
         }
-        else if (options.build_library && emit_success)
+    }
+    else
+    {
+        if (options.emit_ast || options.emit_ir || options.emit_asm)
         {
-            const char *output_lib = options.output_file ? options.output_file : default_output;
+            fprintf(stderr, "warning: entrypoint-less build ignores --emit-* outputs\n");
+        }
 
-            printf("linking library '%s'...\n", output_lib);
-            fflush(stdout);
+        if (options.link_executable)
+        {
+            fprintf(stderr, "error: cannot link executable without an entry file\n");
+            emit_success = false;
+        }
+        else if (options.build_library && (options.output_file || default_output))
+        {
+            bool        shared     = config_is_shared_library(config, target_name);
+            char       *auto_name  = config_default_library_name(config, shared);
+            const char *output_lib = options.output_file ? options.output_file : (default_output ? default_output : auto_name);
 
-            // get dependency object files
             char **dep_objects = NULL;
             int    dep_count   = 0;
             if (!module_manager_get_link_objects(&analyzer.module_manager, &dep_objects, &dep_count))
             {
-                printf("failed to collect dependency object files\n");
+                fprintf(stderr, "error: failed to collect dependency object files\n");
                 emit_success = false;
+            }
+            else if (dep_count == 0)
+            {
+                fprintf(stderr, "error: no objects generated for library output\n");
+                emit_success = false;
+                free(dep_objects);
             }
             else
             {
-                // construct linking command for shared library
-                size_t cmd_size = 1024 + (dep_count * 256) + (options.link_count * 256);
+                size_t cmd_size = 2048 + (dep_count * 256) + (options.link_count * 256);
                 char  *link_cmd = malloc(cmd_size);
 
-                snprintf(link_cmd, cmd_size, "cc -shared -fPIC -o %s %s", output_lib, obj_file);
+                if (shared)
+                    snprintf(link_cmd, cmd_size, "cc -shared -fPIC -o %s %s", output_lib, dep_objects[0]);
+                else
+                    snprintf(link_cmd, cmd_size, "ar rcs %s %s", output_lib, dep_objects[0]);
 
-                // append dependency object files
-                for (int i = 0; i < dep_count; i++)
+                for (int i = 1; i < dep_count; i++)
                 {
                     strcat(link_cmd, " ");
                     strcat(link_cmd, dep_objects[i]);
                 }
 
-                // append user-specified link objects
                 for (int i = 0; i < options.link_count; i++)
                 {
                     strcat(link_cmd, " ");
                     strcat(link_cmd, options.link_objects[i]);
                 }
 
-                if (system(link_cmd) == 0)
-                {
-                    // remove temporary object file
-                    if (!options.emit_object)
-                    {
-                        unlink(obj_file);
-                    }
-                }
-                else
+                if (system(link_cmd) != 0)
                 {
                     printf("failed to link library\n");
                     emit_success = false;
                 }
+                if (!options.output_file && !default_output)
+                    free(auto_name);
 
                 free(link_cmd);
 
-                // cleanup dependency object file list
                 for (int i = 0; i < dep_count; i++)
                 {
                     free(dep_objects[i]);
@@ -1113,23 +1624,27 @@ static int build_command(int argc, char **argv)
                 free(dep_objects);
             }
         }
-
-        if (obj_file != options.output_file)
-            free(obj_file);
     }
 
     // cleanup
-    codegen_context_dnit(&codegen);
+    if (codegen_initialized)
+        codegen_context_dnit(&codegen);
     free(base_dir);
     semantic_analyzer_dnit(&analyzer);
     ast_node_dnit(program);
     free(program);
-    parser_dnit(&parser);
-    lexer_dnit(&lexer);
+    if (parser_initialized)
+        parser_dnit(&parser);
+    if (lexer_initialized)
+        lexer_dnit(&lexer);
     free(source);
     free(default_output);
     free(options.link_objects); // cleanup link objects array
     free(resolved_main_file);
+    free(owned_obj_path);
+    free(precomputed_obj_path);
+    free(object_dir);
+    free(root_module_name);
 
     if (config)
     {

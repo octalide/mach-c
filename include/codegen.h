@@ -62,6 +62,7 @@ struct CodegenContext
     bool  debug_info;
     bool  no_pie;       // disable position independent executable
     bool  is_runtime;   // true when compiling the runtime module
+    bool  use_runtime;  // true when linking runtime alongside the entry
     char *package_name; // root package name for mangling
 };
 

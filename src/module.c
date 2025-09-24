@@ -1,5 +1,6 @@
 #include "module.h"
 #include "config.h"
+#include "codegen.h"
 #include "ioutil.h"
 #include "lexer.h"
 #include "symbol.h"
@@ -7,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include "semantic.h"
 
 // error handling functions
 void module_error_list_init(ModuleErrorList *list)
@@ -327,9 +330,6 @@ bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *progra
             // mark module as needing linking since it's imported
             module->needs_linking = true;
 
-            // store module reference in AST node for semantic analysis
-            stmt->use_stmt.module_sym = (Symbol *)module; // cast for now
-
             // recursively resolve dependencies of the loaded module
             if (!module_manager_resolve_dependencies(manager, module->ast, base_dir))
             {
@@ -406,41 +406,169 @@ bool module_has_circular_dependency(ModuleManager *manager, Module *module, cons
     return false;
 }
 
-// forward declaration for compilation helper
-static bool compile_module_to_object(Module *module, int opt_level, bool no_pie);
+// helper declarations
+static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie);
 
-// dependency compilation and linking functions
+static bool ensure_dirs_recursive(const char *dir)
+{
+    if (!dir || !*dir)
+        return true;
+
+    char *copy = strdup(dir);
+    if (!copy)
+        return false;
+
+    for (char *p = copy + 1; *p; ++p)
+    {
+        if (*p == '/')
+        {
+            *p = '\0';
+            mkdir(copy, 0755);
+            *p = '/';
+        }
+    }
+    int r = mkdir(copy, 0755);
+    (void)r;
+    free(copy);
+    return true;
+}
+
+char *module_make_object_path(const char *output_dir, const char *module_name)
+{
+    if (!output_dir || !module_name)
+        return NULL;
+
+    const char *name = module_name;
+    if (strncmp(name, "dep.", 4) == 0)
+        name += 4; // strip dep prefix
+
+    size_t len = strlen(name);
+    char  *rel = malloc(len + 1);
+    if (!rel)
+        return NULL;
+    for (size_t i = 0; i < len; i++)
+        rel[i] = (name[i] == '.') ? '/' : name[i];
+    rel[len] = '\0';
+
+    size_t dir_len  = strlen(output_dir);
+    size_t path_len = dir_len + 1 + strlen(rel) + 3;
+    char  *path     = malloc(path_len);
+    if (!path)
+    {
+        free(rel);
+        return NULL;
+    }
+    snprintf(path, path_len, "%s/%s.o", output_dir, rel);
+
+    // ensure parent directories exist
+    char *last_slash = strrchr(path, '/');
+    if (last_slash)
+    {
+        *last_slash = '\0';
+        ensure_dirs_recursive(path);
+        *last_slash = '/';
+    }
+
+    free(rel);
+    return path;
+}
+
+char *module_sanitize_name(const char *name)
+{
+    if (!name)
+        return NULL;
+
+    size_t len  = strlen(name);
+    char  *copy = malloc(len + 1);
+    if (!copy)
+        return NULL;
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = name[i];
+        copy[i] = (c == '.' || c == '/' || c == ':') ? '_' : c;
+    }
+    copy[len] = '\0';
+    return copy;
+}
+
 bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie)
 {
-    // iterate through all loaded modules
+    if (!manager)
+        return false;
+
     for (int i = 0; i < manager->capacity; i++)
     {
         Module *module = manager->modules[i];
         while (module)
         {
-            // skip if module doesn't need compilation or is already compiled
-            if (!module->needs_linking || module->is_compiled)
+            if (!module->needs_linking)
             {
                 module = module->next;
                 continue;
             }
 
-            // generate object file path
-            char *base_name   = strdup(module->name);
-            char *object_file = malloc(strlen(output_dir) + strlen(base_name) + 10);
-            sprintf(object_file, "%s/%s.o", output_dir, base_name);
+            if (!module->ast)
+            {
+                module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", "module missing AST");
+                manager->had_error = true;
+                return false;
+            }
 
-            module->object_path = object_file;
-            free(base_name);
+            if (!module->is_analyzed)
+            {
+                SemanticAnalyzer analyzer;
+                semantic_analyzer_init(&analyzer);
+                module_manager_set_config(&analyzer.module_manager, manager->config, manager->project_dir);
 
-            // compile the module
+                bool analyzed = semantic_analyze(&analyzer, module->ast);
+                if (!analyzed)
+                {
+                    // propagate semantic errors to module manager errors
+                    for (int ei = 0; ei < analyzer.errors.count; ei++)
+                    {
+                        module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", analyzer.errors.errors[ei].message ? analyzer.errors.errors[ei].message : "semantic error");
+                    }
+                    manager->had_error = true;
+                    semantic_analyzer_dnit(&analyzer);
+                    return false;
+                }
+
+                if (module->symbols)
+                {
+                    symbol_table_dnit(module->symbols);
+                    free(module->symbols);
+                }
+                module->symbols  = malloc(sizeof(SymbolTable));
+                *module->symbols = analyzer.symbol_table;
+                analyzer.symbol_table.global_scope  = NULL;
+                analyzer.symbol_table.current_scope = NULL;
+
+                // prevent freeing symbol tables of analyzer-managed modules
+                for (int mi = 0; mi < analyzer.module_manager.capacity; mi++)
+                {
+                    Module *m = analyzer.module_manager.modules[mi];
+                    while (m)
+                    {
+                        m->symbols = NULL;
+                        m          = m->next;
+                    }
+                }
+
+                module->is_analyzed = true;
+                semantic_analyzer_dnit(&analyzer);
+            }
+
+            if (module->is_compiled && module->object_path)
+            {
+                module = module->next;
+                continue;
+            }
+
             printf("compiling dependency '%s'...\n", module->name);
             fflush(stdout);
 
-            if (!compile_module_to_object(module, opt_level, no_pie))
+            if (!compile_module_to_object(manager, module, output_dir, opt_level, no_pie))
             {
-                module_error_list_add(&manager->errors, module->name, module->file_path, "failed to compile module dependency");
-                manager->had_error = true;
                 return false;
             }
 
@@ -448,6 +576,7 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
             module              = module->next;
         }
     }
+
     return true;
 }
 
@@ -498,17 +627,68 @@ bool module_manager_get_link_objects(ModuleManager *manager, char ***object_file
     return true;
 }
 
-static bool compile_module_to_object(Module *module, int opt_level, bool no_pie)
+static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie)
 {
-    // construct compilation command
-    char        cmd[2048];
-    const char *compiler = getenv("MACH_COMPILER");
-    if (!compiler)
-        compiler = "./bin/cmach"; // default to current compiler
+    if (!module || !module->ast)
+        return false;
 
-    snprintf(cmd, sizeof(cmd), "%s build %s --emit-obj --no-link -O%d %s -o %s", compiler, module->file_path, opt_level, no_pie ? "--no-pie" : "", module->object_path);
+    char *object_path = module_make_object_path(output_dir, module->name);
+    if (!object_path)
+    {
+        module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", "failed to allocate object path");
+        manager->had_error = true;
+        return false;
+    }
 
-    // execute compilation
-    int result = system(cmd);
-    return result == 0;
+    if (module->object_path)
+    {
+        free(module->object_path);
+        module->object_path = NULL;
+    }
+    module->object_path = object_path;
+
+    CodegenContext ctx;
+    codegen_context_init(&ctx, module->name, no_pie);
+    ctx.opt_level = opt_level;
+
+    char *package_name = module_sanitize_name(module->name);
+    if (package_name)
+        ctx.package_name = package_name;
+
+    if (module->file_path)
+    {
+        const char *slash     = strrchr(module->file_path, '/');
+        const char *file_name = slash ? slash + 1 : module->file_path;
+        if (strcmp(file_name, "runtime.mach") == 0)
+            ctx.is_runtime = true;
+    }
+
+    SemanticAnalyzer stub;
+    memset(&stub, 0, sizeof(stub));
+    if (module->symbols)
+    {
+        stub.symbol_table                  = *module->symbols;
+        stub.symbol_table.current_scope    = stub.symbol_table.global_scope;
+        stub.symbol_table.module_scope     = module->symbols->module_scope;
+    }
+
+    bool success = codegen_generate(&ctx, module->ast, module->symbols ? &stub : NULL);
+    if (success)
+    {
+        success = codegen_emit_object(&ctx, module->object_path);
+        if (!success)
+        {
+            module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", "failed to emit object file");
+            manager->had_error = true;
+        }
+    }
+    else
+    {
+        codegen_print_errors(&ctx);
+        module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", "code generation failed");
+        manager->had_error = true;
+    }
+
+    codegen_context_dnit(&ctx);
+    return success;
 }

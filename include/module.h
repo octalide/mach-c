@@ -76,6 +76,10 @@ bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *progra
 bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie);
 bool module_manager_get_link_objects(ModuleManager *manager, char ***object_files, int *count);
 
+// utility helpers
+char *module_sanitize_name(const char *module_name);
+char *module_make_object_path(const char *output_dir, const char *module_name);
+
 // error handling
 void module_error_list_init(ModuleErrorList *list);
 void module_error_list_dnit(ModuleErrorList *list);

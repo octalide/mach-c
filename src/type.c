@@ -334,6 +334,8 @@ bool type_can_cast_to(Type *from, Type *to)
 
 bool type_can_assign_to(Type *from, Type *to)
 {
+    if (!from || !to)
+        return false;
     while (from->kind == TYPE_ALIAS)
         from = from->alias.target;
     while (to->kind == TYPE_ALIAS)

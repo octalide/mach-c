@@ -489,43 +489,40 @@ char lexer_eval_lit_char(Lexer *lexer, Token *token)
 
 char *lexer_eval_lit_string(Lexer *lexer, Token *token)
 {
-    char *value = calloc(token->len - 1, sizeof(char));
+    int   src_len = token->len - 2; // inside quotes
+    char *value   = malloc((size_t)src_len + 1);
+    if (!value)
+        return NULL;
 
-    for (int i = 0; i < token->len - 2; i++)
+    int j = 0;
+    for (int i = 0; i < src_len; i++)
     {
-        if (lexer->source[token->pos + i + 1] == '\\')
+        char c = lexer->source[token->pos + 1 + i];
+        if (c == '\\' && i + 1 < src_len)
         {
-            switch (lexer->source[token->pos + i + 2])
+            char e = lexer->source[token->pos + 1 + i + 1];
+            switch (e)
             {
-            case '\'':
-                value[i] = '\'';
-                break;
-            case '\"':
-                value[i] = '\"';
-                break;
-            case '\\':
-                value[i] = '\\';
-                break;
-            case 'n':
-                value[i] = '\n';
-                break;
-            case 't':
-                value[i] = '\t';
-                break;
-            case 'r':
-                value[i] = '\r';
-                break;
-            case '0':
-                value[i] = '\0';
+            case '\'': value[j++] = '\''; break;
+            case '"':  value[j++] = '"';  break;
+            case '\\': value[j++] = '\\'; break;
+            case 'n':   value[j++] = '\n'; break;
+            case 't':   value[j++] = '\t'; break;
+            case 'r':   value[j++] = '\r'; break;
+            case '0':   value[j++] = '\0'; break;
+            default:
+                // unknown escape: preserve as-is (common behavior)
+                value[j++] = e;
                 break;
             }
+            i++; // skip the escaped character
         }
         else
         {
-            value[i] = lexer->source[token->pos + i + 1];
+            value[j++] = c;
         }
     }
-
+    value[j] = '\0';
     return value;
 }
 

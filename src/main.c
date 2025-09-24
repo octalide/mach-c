@@ -1492,7 +1492,20 @@ static int build_command(int argc, char **argv)
                 want_link_exe = true;
             if (want_link_exe && emit_success)
             {
-                const char *output_exe = options.output_file ? options.output_file : (default_output ? default_output : config_default_executable_name(config));
+                const char *output_exe = NULL;
+                char       *auto_exe   = NULL;
+                if (is_project_build && config)
+                {
+                    auto_exe = get_executable_path(config, project_dir, target_name);
+                }
+                if (auto_exe)
+                {
+                    output_exe = auto_exe;
+                }
+                else
+                {
+                    output_exe = options.output_file ? options.output_file : (default_output ? default_output : config_default_executable_name(config));
+                }
 
                 printf("linking executable '%s'...\n", output_exe);
                 fflush(stdout);
@@ -1540,6 +1553,8 @@ static int build_command(int argc, char **argv)
                         free(dep_objects[i]);
                     }
                     free(dep_objects);
+                    if (auto_exe)
+                        free(auto_exe);
                 }
             }
             else if (options.build_library && emit_success)

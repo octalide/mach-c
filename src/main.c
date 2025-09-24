@@ -165,6 +165,29 @@ static char *get_executable_path(ProjectConfig *config, const char *project_dir,
     return path;
 }
 
+// produce default library output path inside bin dir (e.g., bin/lib<name>.so)
+static char *get_library_output_path(ProjectConfig *config, const char *project_dir, const char *target_name)
+{
+    if (!config || !project_dir || !target_name)
+        return NULL;
+    bool  shared  = config_is_shared_library(config, target_name);
+    char *bin_dir = config_resolve_bin_dir(config, project_dir, target_name);
+    if (!bin_dir)
+        return NULL;
+    char *lib_name = config_default_library_name(config, shared);
+    if (!lib_name)
+    {
+        free(bin_dir);
+        return NULL;
+    }
+    size_t len  = strlen(bin_dir) + 1 + strlen(lib_name) + 1;
+    char  *path = malloc(len);
+    snprintf(path, len, "%s/%s", bin_dir, lib_name);
+    free(bin_dir);
+    free(lib_name);
+    return path;
+}
+
 static char *get_directory(const char *path)
 {
     const char *last_slash = strrchr(path, '/');
@@ -532,7 +555,7 @@ static int init_command(int argc, char **argv)
             if (copy_directory(mach_std, dest_path))
             {
                 printf("standard library copied to dep/std\n");
-                printf("note: import as 'dep.std.*'\n");
+                printf("note: import as 'std.*'\n");
                 // register std dependency spec
                 DepSpec *std_dep  = calloc(1, sizeof(DepSpec));
                 std_dep->name     = strdup("std");
@@ -595,7 +618,7 @@ static int init_command(int argc, char **argv)
         return 1;
     }
 
-    fprintf(main_file, "use console: dep.std.io.console;\n\n");
+    fprintf(main_file, "use console: std.io.console;\n\n");
     fprintf(main_file, "fun main() u32 {\n");
     fprintf(main_file, "    console.print(\"Hello, world!\\n\");\n");
     fprintf(main_file, "    ret 0;\n");
@@ -892,8 +915,11 @@ static int build_command(int argc, char **argv)
     {
         if (is_project_build && config)
         {
-            // use project config output
-            default_output = get_executable_path(config, project_dir, target_name);
+            // choose default output based on target type
+            if (config_should_build_library(config, target_name) || !config_should_link_executable(config, target_name))
+                default_output = get_library_output_path(config, project_dir, target_name);
+            else
+                default_output = get_executable_path(config, project_dir, target_name);
             if (default_output)
             {
                 options.output_file = default_output;
@@ -1144,7 +1170,30 @@ static int build_command(int argc, char **argv)
         {
             runtime_module_path = config->runtime_module;
         }
-        else
+        else if (config)
+        {
+            const char *inferred = NULL;
+            for (int i = 0; i < config->dep_count && !inferred; i++)
+            {
+                DepSpec *d = config->deps[i];
+                if (d && d->is_runtime && d->name)
+                {
+                    // use <dep>.runtime
+                    // small stack buffer is fine for typical names
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "%s.runtime", d->name);
+                    config_set_runtime_module(config, buf);
+                    inferred = config->runtime_module;
+                }
+            }
+            if (!inferred && config_has_dep(config, "std"))
+            {
+                config_set_runtime_module(config, "std.runtime");
+                inferred = config->runtime_module;
+            }
+            runtime_module_path = inferred;
+        }
+        if (!runtime_module_path)
         {
             fprintf(stderr, "error: no runtime module configured; set 'runtime.runtime' in mach.toml or pass --no-runtime\n");
 
@@ -1496,8 +1545,8 @@ static int build_command(int argc, char **argv)
             else if (options.build_library && emit_success)
             {
                 bool        shared     = config_is_shared_library(config, target_name);
-                char       *auto_name  = config_default_library_name(config, shared);
-                const char *output_lib = options.output_file ? options.output_file : (default_output ? default_output : auto_name);
+                char       *auto_name  = NULL;
+                const char *output_lib = options.output_file ? options.output_file : (default_output ? default_output : (auto_name = get_library_output_path(config, project_dir, target_name)));
 
                 printf("linking library '%s'...\n", output_lib);
                 fflush(stdout);
@@ -1540,7 +1589,7 @@ static int build_command(int argc, char **argv)
                     {
                         unlink(owned_obj_path);
                     }
-                    if (!options.output_file && !default_output)
+                    if (auto_name)
                         free(auto_name);
 
                     free(link_cmd);
@@ -1569,8 +1618,8 @@ static int build_command(int argc, char **argv)
         else if (options.build_library && (options.output_file || default_output))
         {
             bool        shared     = config_is_shared_library(config, target_name);
-            char       *auto_name  = config_default_library_name(config, shared);
-            const char *output_lib = options.output_file ? options.output_file : (default_output ? default_output : auto_name);
+            char       *auto_name  = NULL;
+            const char *output_lib = options.output_file ? options.output_file : (default_output ? default_output : (auto_name = get_library_output_path(config, project_dir, target_name)));
 
             char **dep_objects = NULL;
             int    dep_count   = 0;
@@ -1612,7 +1661,7 @@ static int build_command(int argc, char **argv)
                     printf("failed to link library\n");
                     emit_success = false;
                 }
-                if (!options.output_file && !default_output)
+                if (auto_name)
                     free(auto_name);
 
                 free(link_cmd);
@@ -1796,7 +1845,7 @@ static int dep_add_command(int argc, char **argv)
     printf("\n");
     printf("Example:\n");
     printf("  git submodule add https://github.com/mach-std/std.git dep/std\n");
-    printf("  # Now you can use: use dep.std.io;\n");
+    printf("  # Now you can use: use std.io;\n");
 
     return 0;
 }

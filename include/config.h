@@ -29,6 +29,12 @@ typedef struct DepSpec
 } DepSpec;
 
 // project configuration
+typedef struct ModuleAlias
+{
+    char *name;   // alias exposed to source code
+    char *target; // canonical package prefix (e.g., "dep.std")
+} ModuleAlias;
+
 typedef struct ProjectConfig
 {
     char *name;           // project name
@@ -57,6 +63,11 @@ typedef struct ProjectConfig
     char *runtime_path;   // custom runtime path (deprecated, use runtime_module)
     char *runtime_module; // runtime module path (e.g., "dep.std.runtime", "mylib.custom_runtime")
     char *stdlib_path;    // standard library path
+
+    // module alias configuration
+    ModuleAlias *module_aliases;    // alias table for module path prefixes
+    int          module_alias_count;
+    int          module_alias_capacity;
 } ProjectConfig;
 
 // configuration file management
@@ -113,6 +124,12 @@ char *config_resolve_package_root(ProjectConfig *config, const char *project_dir
 char *config_get_package_src_dir(ProjectConfig *config, const char *project_dir, const char *package_name);
 // load dependency config to fill missing src_dir if needed
 bool config_ensure_dep_loaded(ProjectConfig *config, const char *project_dir, DepSpec *dep);
+
+// module alias utilities
+bool        config_add_module_alias(ProjectConfig *config, const char *alias, const char *target);
+const char *config_get_module_alias(ProjectConfig *config, const char *alias);
+// normalize module paths using alias table and dependency information. returns malloc'd canonical path or NULL on failure.
+char *config_expand_module_path(ProjectConfig *config, const char *module_path);
 
 // canonical module resolution: given FQN pkg.segment1.segment2 -> absolute file path (.mach)
 char *config_resolve_module_fqn(ProjectConfig *config, const char *project_dir, const char *fqn);

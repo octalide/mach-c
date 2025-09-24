@@ -299,6 +299,9 @@ TargetConfig *target_config_create(const char *name, const char *target_triple)
 void config_init(ProjectConfig *config)
 {
     memset(config, 0, sizeof(ProjectConfig));
+    config->module_aliases       = NULL;
+    config->module_alias_count   = 0;
+    config->module_alias_capacity = 0;
 }
 
 void config_dnit(ProjectConfig *config)
@@ -343,6 +346,13 @@ void config_dnit(ProjectConfig *config)
         free(config->lib_dependencies[i]);
     }
     free(config->lib_dependencies);
+
+    for (int i = 0; i < config->module_alias_count; i++)
+    {
+        free(config->module_aliases[i].name);
+        free(config->module_aliases[i].target);
+    }
+    free(config->module_aliases);
 
     memset(config, 0, sizeof(ProjectConfig));
 }
@@ -580,6 +590,18 @@ ProjectConfig *config_load(const char *config_path)
                 config->stdlib_path = toml_parse_string(&parser);
             }
         }
+        else if (strcmp(current_section, "modules") == 0)
+        {
+            char *target = toml_parse_string(&parser);
+            if (target)
+            {
+                if (!config_add_module_alias(config, key, target))
+                {
+                    fprintf(stderr, "warning: failed to register module alias '%s'\n", key);
+                }
+                free(target);
+            }
+        }
         else if (strcmp(current_section, "deps") == 0)
         {
             // parse dependency inline table: name = { path = "dep/std", src = "src", runtime = true }
@@ -746,6 +768,16 @@ bool config_save(ProjectConfig *config, const char *config_path)
             fprintf(file, "runtime = \"%s\"\n", config->runtime_module);
         if (config->stdlib_path)
             fprintf(file, "stdlib-path = \"%s\"\n", config->stdlib_path);
+    }
+
+    if (config->module_alias_count > 0)
+    {
+        fprintf(file, "\n[modules]\n");
+        for (int i = 0; i < config->module_alias_count; i++)
+        {
+            ModuleAlias *alias = &config->module_aliases[i];
+            fprintf(file, "%s = \"%s\"\n", alias->name, alias->target);
+        }
     }
 
     // explicit dependency specs
@@ -1190,6 +1222,175 @@ bool config_has_dep(ProjectConfig *config, const char *name)
     return config_get_dep(config, name) != NULL;
 }
 
+static ModuleAlias *config_find_module_alias(ProjectConfig *config, const char *alias)
+{
+    if (!config || !alias)
+        return NULL;
+
+    for (int i = 0; i < config->module_alias_count; i++)
+    {
+        if (strcmp(config->module_aliases[i].name, alias) == 0)
+        {
+            return &config->module_aliases[i];
+        }
+    }
+    return NULL;
+}
+
+bool config_add_module_alias(ProjectConfig *config, const char *alias, const char *target)
+{
+    if (!config || !alias || !target)
+        return false;
+
+    ModuleAlias *existing = config_find_module_alias(config, alias);
+    if (existing)
+    {
+        char *new_target = strdup(target);
+        if (!new_target)
+            return false;
+        free(existing->target);
+        existing->target = new_target;
+        return true;
+    }
+
+    if (config->module_alias_count == config->module_alias_capacity)
+    {
+        int          new_capacity = config->module_alias_capacity == 0 ? 4 : config->module_alias_capacity * 2;
+        ModuleAlias *new_entries  = realloc(config->module_aliases, (size_t)new_capacity * sizeof(ModuleAlias));
+        if (!new_entries)
+            return false;
+        config->module_aliases        = new_entries;
+        config->module_alias_capacity = new_capacity;
+    }
+
+    ModuleAlias *slot = &config->module_aliases[config->module_alias_count];
+    slot->name        = strdup(alias);
+    slot->target      = strdup(target);
+    if (!slot->name || !slot->target)
+    {
+        free(slot->name);
+        free(slot->target);
+        slot->name   = NULL;
+        slot->target = NULL;
+        return false;
+    }
+
+    config->module_alias_count++;
+    return true;
+}
+
+const char *config_get_module_alias(ProjectConfig *config, const char *alias)
+{
+    ModuleAlias *entry = config_find_module_alias(config, alias);
+    return entry ? entry->target : NULL;
+}
+
+static bool is_self_alias(const char *alias)
+{
+    return alias && strcmp(alias, "self") == 0;
+}
+
+char *config_expand_module_path(ProjectConfig *config, const char *module_path)
+{
+    if (!module_path)
+        return NULL;
+
+    if (!config)
+        return strdup(module_path);
+
+    if (strncmp(module_path, "dep.", 4) == 0)
+        return strdup(module_path);
+
+    size_t project_name_len = config->name ? strlen(config->name) : 0;
+    if (project_name_len > 0 && strncmp(module_path, config->name, project_name_len) == 0)
+    {
+        char next = module_path[project_name_len];
+        if (next == '\0' || next == '.')
+            return strdup(module_path);
+    }
+
+    const char *dot      = strchr(module_path, '.');
+    size_t      head_len = dot ? (size_t)(dot - module_path) : strlen(module_path);
+
+    char *head = malloc(head_len + 1);
+    if (!head)
+        return NULL;
+    memcpy(head, module_path, head_len);
+    head[head_len] = '\0';
+
+    const char *alias_target = NULL;
+    if (is_self_alias(head) && project_name_len > 0)
+    {
+        alias_target = config->name;
+    }
+    else
+    {
+        alias_target = config_get_module_alias(config, head);
+    }
+
+    char *result = NULL;
+    if (alias_target)
+    {
+        size_t alias_len = strlen(alias_target);
+        if (dot)
+        {
+            size_t tail_len = strlen(dot + 1);
+            size_t total    = alias_len + 1 + tail_len + 1;
+            result          = malloc(total);
+            if (result)
+                snprintf(result, total, "%s.%s", alias_target, dot + 1);
+        }
+        else
+        {
+            result = strdup(alias_target);
+        }
+        free(head);
+        return result;
+    }
+
+    if (!dot)
+    {
+        if (config_has_dep(config, head))
+        {
+            size_t dep_len = strlen(head);
+            size_t total   = 4 + dep_len + 1;
+            result         = malloc(total);
+            if (result)
+                snprintf(result, total, "dep.%s", head);
+        }
+        else if (project_name_len > 0)
+        {
+            size_t tail_len = strlen(module_path);
+            size_t total    = project_name_len + 1 + tail_len + 1;
+            result          = malloc(total);
+            if (result)
+                snprintf(result, total, "%s.%s", config->name, module_path);
+        }
+        else
+        {
+            result = strdup(module_path);
+        }
+
+        free(head);
+        return result;
+    }
+
+    if (config_has_dep(config, head))
+    {
+        size_t dep_len  = strlen(head);
+        size_t tail_len = strlen(dot + 1);
+        size_t total    = 4 + dep_len + 1 + tail_len + 1;
+        result          = malloc(total);
+        if (result)
+            snprintf(result, total, "dep.%s.%s", head, dot + 1);
+        free(head);
+        return result;
+    }
+
+    free(head);
+    return NULL;
+}
+
 bool config_ensure_dep_loaded(ProjectConfig *config, const char *project_dir, DepSpec *dep)
 {
     (void)project_dir;
@@ -1262,19 +1463,28 @@ static char *duplicate_range(const char *start, size_t len)
 
 char *config_resolve_module_fqn(ProjectConfig *config, const char *project_dir, const char *fqn)
 {
-    if (!config || !fqn)
+    if (!fqn)
         return NULL;
-    const char *cursor = fqn;
+
+    char *normalized = config_expand_module_path(config, fqn);
+    if (!normalized)
+        return NULL;
+
+    const char *cursor = normalized;
     if (strncmp(cursor, "dep.", 4) == 0)
         cursor += 4; // skip dep prefix
     const char *dot = strchr(cursor, '.');
     if (!dot)
+    {
+        free(normalized);
         return NULL; // need pkg.segment
+    }
     char *pkg     = duplicate_range(cursor, (size_t)(dot - cursor));
     char *src_dir = config_get_package_src_dir(config, project_dir, pkg);
     if (!src_dir)
     {
         free(pkg);
+        free(normalized);
         return NULL;
     }
     const char *rest = dot + 1;
@@ -1290,6 +1500,7 @@ char *config_resolve_module_fqn(ProjectConfig *config, const char *project_dir, 
     free(pkg);
     free(src_dir);
     free(rel);
+    free(normalized);
     return full;
 }
 

@@ -229,85 +229,30 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     char       *module_path = stmt->use_stmt.module_path;
     const char *alias       = stmt->use_stmt.alias;
 
-    // normalization rules:
-    // 1. If starts with dep. keep as-is.
-    // 2. If contains no '.', treat as root project module -> prefix project name.
-    // 3. If has '.', first segment must be either project name or 'dep'. If first segment equals a dep name without dep. prefix -> error.
+    char *raw_path = NULL;
     if (module_path)
     {
-        void          *cfg = analyzer->module_manager.config;
-        ProjectConfig *pc  = (ProjectConfig *)cfg;
-        const char    *dot = strchr(module_path, '.');
-        if (!dot)
+        raw_path = strdup(module_path);
+        ProjectConfig *pc        = (ProjectConfig *)analyzer->module_manager.config;
+        char          *canonical = config_expand_module_path(pc, module_path);
+        if (!canonical)
         {
-            if (pc && pc->name && strcmp(module_path, pc->name) != 0)
-            {
-                size_t new_len = strlen(pc->name) + 1 + strlen(module_path) + 1;
-                char  *norm    = malloc(new_len);
-                snprintf(norm, new_len, "%s.%s", pc->name, module_path);
-                free(stmt->use_stmt.module_path);
-                stmt->use_stmt.module_path = norm;
-                module_path                = norm;
-            }
+            semantic_error(analyzer, stmt, "module path '%s' could not be resolved", raw_path ? raw_path : module_path);
+            free(raw_path);
+            return false;
         }
-        else if (strncmp(module_path, "dep.", 4) != 0 && pc)
-        {
-            size_t first_len = (size_t)(dot - module_path);
-            char  *first     = malloc(first_len + 1);
-            memcpy(first, module_path, first_len);
-            first[first_len] = '\0';
-            bool is_project  = pc->name && strcmp(first, pc->name) == 0;
-            bool is_dep      = false;
-            if (!is_project)
-            {
-                for (int i = 0; i < pc->dep_count; i++)
-                {
-                    if (strcmp(pc->deps[i]->name, first) == 0)
-                    {
-                        is_dep = true;
-                        break;
-                    }
-                }
-            }
-                // allow referencing dependency packages directly (internal or legacy style)
-                if (is_dep)
-                {
-                    // treat as accepted prefix (legacy internal dep import)
-                    free(first);
-                    goto prefix_ok;
-                }
-                if (!is_project)
-            {
-                semantic_error(analyzer, stmt, "unknown package prefix '%s'", first);
-                free(first);
-                return false;
-            }
-            free(first);
-            prefix_ok: ;
-        }
+
+        free(stmt->use_stmt.module_path);
+        stmt->use_stmt.module_path = canonical;
+        module_path                = canonical;
     }
 
     // find the loaded module from the module manager
     Module *module = module_manager_find_module(&analyzer->module_manager, module_path);
     if (!module)
     {
-        // hint: if first segment matches a dep name but missing dep. prefix
-        void *cfg = analyzer->module_manager.config;
-        if (cfg)
-        {
-            ProjectConfig *pc      = (ProjectConfig *)cfg;
-            const char    *dot     = strchr(module_path, '.');
-            size_t         seg_len = dot ? (size_t)(dot - module_path) : strlen(module_path);
-            for (int i = 0; pc && i < pc->dep_count; i++)
-            {
-                if (strlen(pc->deps[i]->name) == seg_len && strncmp(pc->deps[i]->name, module_path, seg_len) == 0)
-                {
-                    semantic_error(analyzer, stmt, "module '%s' not found (did you mean 'dep.%s.%s'?)", module_path, pc->deps[i]->name, dot ? dot + 1 : "");
-                    return false;
-                }
-            }
-        }
         semantic_error(analyzer, stmt, "module '%s' not found", module_path);
+        free(raw_path);
         return false;
     }
 
@@ -322,6 +267,7 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         {
             semantic_error(analyzer, stmt, "module name '%s' already in use", alias);
             symbol_destroy(module_symbol);
+            free(raw_path);
             return false;
         }
 
@@ -337,6 +283,7 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         stmt->use_stmt.module_sym = NULL;
     }
 
+    free(raw_path);
     return true;
 }
 
@@ -430,6 +377,7 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
     // create a separate analyzer for this module
     SemanticAnalyzer module_analyzer;
     semantic_analyzer_init(&module_analyzer);
+    module_manager_set_config(&module_analyzer.module_manager, analyzer->module_manager.config, analyzer->module_manager.project_dir);
 
     // analyze the module
     bool success = true;

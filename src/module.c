@@ -1,4 +1,5 @@
 #include "module.h"
+#include "config.h"
 #include "ioutil.h"
 #include "lexer.h"
 #include "symbol.h"
@@ -63,6 +64,32 @@ static unsigned int hash_module_name(const char *name, int capacity)
     return hash % capacity;
 }
 
+static Module *module_manager_find_canonical(ModuleManager *manager, const char *canonical_name)
+{
+    unsigned int index  = hash_module_name(canonical_name, manager->capacity);
+    Module      *module = manager->modules[index];
+
+    while (module)
+    {
+        if (strcmp(module->name, canonical_name) == 0)
+        {
+            return module;
+        }
+        module = module->next;
+    }
+
+    return NULL;
+}
+
+static char *module_manager_expand_module(ModuleManager *manager, const char *module_fqn)
+{
+    if (!module_fqn)
+        return NULL;
+    if (!manager->config)
+        return strdup(module_fqn);
+    return config_expand_module_path((ProjectConfig *)manager->config, module_fqn);
+}
+
 void module_manager_init(ModuleManager *manager)
 {
     manager->capacity     = 32;
@@ -121,35 +148,37 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
 {
     if (!(manager->config && manager->project_dir))
         return NULL;
-    extern char *config_resolve_module_fqn(void *cfg, const char *project_dir, const char *fqn);
-    return config_resolve_module_fqn(manager->config, manager->project_dir, module_fqn);
+    return config_resolve_module_fqn((ProjectConfig *)manager->config, manager->project_dir, module_fqn);
 }
 
 Module *module_manager_find_module(ModuleManager *manager, const char *name)
 {
-    unsigned int index  = hash_module_name(name, manager->capacity);
-    Module      *module = manager->modules[index];
+    char *canonical = module_manager_expand_module(manager, name);
+    if (!canonical)
+        return NULL;
 
-    while (module)
-    {
-        if (strcmp(module->name, name) == 0)
-        {
-            return module;
-        }
-        module = module->next;
-    }
-
-    return NULL;
+    Module *module = module_manager_find_canonical(manager, canonical);
+    free(canonical);
+    return module;
 }
 
 static Module *module_manager_load_module_internal(ModuleManager *manager, const char *module_fqn, const char *base_dir)
 {
     (void)base_dir; // currently unused, for future relative path support
 
+    char *canonical = module_manager_expand_module(manager, module_fqn);
+    if (!canonical)
+    {
+        module_error_list_add(&manager->errors, module_fqn, "<unknown>", "could not resolve module path");
+        manager->had_error = true;
+        return NULL;
+    }
+
     // check if already loaded
-    Module *existing = module_manager_find_module(manager, module_fqn);
+    Module *existing = module_manager_find_canonical(manager, canonical);
     if (existing)
     {
+        free(canonical);
         return existing;
     }
 
@@ -159,10 +188,11 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         Module *module = manager->modules[i];
         while (module)
         {
-            if (module_has_circular_dependency(manager, module, module_fqn))
+            if (module_has_circular_dependency(manager, module, canonical))
             {
-                module_error_list_add(&manager->errors, module_fqn, "<unknown>", "Circular dependency detected");
+                module_error_list_add(&manager->errors, canonical, "<unknown>", "Circular dependency detected");
                 manager->had_error = true;
+                free(canonical);
                 return NULL;
             }
             module = module->next;
@@ -170,11 +200,12 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     }
 
     // find file path via canonical FQN
-    char *file_path = module_path_to_file_path(manager, module_fqn);
+    char *file_path = module_path_to_file_path(manager, canonical);
     if (!file_path)
     {
-        module_error_list_add(&manager->errors, module_fqn, "<unknown>", "Could not find module file");
+        module_error_list_add(&manager->errors, canonical, "<unknown>", "Could not find module file");
         manager->had_error = true;
+        free(canonical);
         return NULL;
     }
 
@@ -185,9 +216,10 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     if (!source)
     {
         printf("failed\n");
-        module_error_list_add(&manager->errors, module_fqn, file_path, "Could not read module file");
+        module_error_list_add(&manager->errors, canonical, file_path, "Could not read module file");
         manager->had_error = true;
         free(file_path);
+        free(canonical);
         return NULL;
     }
 
@@ -212,11 +244,11 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
             // add parsing errors to module error list
             char error_msg[256];
             snprintf(error_msg, sizeof(error_msg), "parsing failed with %d error(s)", parser.errors.count);
-            module_error_list_add(&manager->errors, module_fqn, file_path, error_msg);
+            module_error_list_add(&manager->errors, canonical, file_path, error_msg);
         }
         else
         {
-            module_error_list_add(&manager->errors, module_fqn, file_path, "Failed to parse module");
+            module_error_list_add(&manager->errors, canonical, file_path, "Failed to parse module");
         }
 
         manager->had_error = true;
@@ -230,6 +262,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         lexer_dnit(&lexer);
         free(source);
         free(file_path);
+        free(canonical);
 
         return NULL;
     }
@@ -238,13 +271,13 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
 
     // create module
     Module *module = malloc(sizeof(Module));
-    module_init(module, module_fqn, file_path);
+    module_init(module, canonical, file_path);
     module->ast         = ast;
     module->is_parsed   = true;
     module->is_analyzed = false;
 
     // add to hash table
-    unsigned int index      = hash_module_name(module_fqn, manager->capacity);
+    unsigned int index      = hash_module_name(canonical, manager->capacity);
     module->next            = manager->modules[index];
     manager->modules[index] = module;
     manager->count++;
@@ -253,6 +286,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     parser_dnit(&parser);
     lexer_dnit(&lexer);
     free(source);
+    free(canonical);
 
     return module;
 }
@@ -270,6 +304,18 @@ bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *progra
         AstNode *stmt = program->program.stmts->items[i];
         if (stmt->kind == AST_STMT_USE)
         {
+            char *normalized = module_manager_expand_module(manager, stmt->use_stmt.module_path);
+            if (!normalized)
+            {
+                module_error_list_add(&manager->errors, stmt->use_stmt.module_path, "<unknown>", "could not resolve module path");
+                manager->had_error = true;
+                return false;
+            }
+
+            char *original = stmt->use_stmt.module_path;
+            stmt->use_stmt.module_path = normalized;
+            free(original);
+
             // load the module
             Module *module = module_manager_load_module_internal(manager, stmt->use_stmt.module_path, base_dir);
             if (!module)

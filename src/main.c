@@ -1438,7 +1438,7 @@ static int examine_command(int argc, char **argv)
         parser_dnit(&parser); lexer_dnit(&lexer); free(source); config_dnit(config); free(config); return 1;
     }
     SemanticAnalyzer analyzer; semantic_analyzer_init(&analyzer);
-    analyzer.module_manager.config = config;
+    module_manager_set_config(&analyzer.module_manager, config, ".");
     semantic_analyze(&analyzer, program);
 
     // derive module path heuristic

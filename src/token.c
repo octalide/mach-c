@@ -1,6 +1,5 @@
 #include "token.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 void token_init(Token *token, TokenKind kind, int pos, int len)

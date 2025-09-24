@@ -166,9 +166,9 @@ bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *anal
         codegen_stmt(ctx, stmt);
     }
 
-    // verify module
+    // verify module (do not abort process; print diagnostics)
     char *error = NULL;
-    if (LLVMVerifyModule(ctx->module, LLVMAbortProcessAction, &error) != 0)
+    if (LLVMVerifyModule(ctx->module, LLVMPrintMessageAction, &error) != 0)
     {
         fprintf(stderr, "error: module verification failed: %s\n", error);
         LLVMDisposeMessage(error);
@@ -822,8 +822,11 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
             }
             else
             {
-                // missing return - this should have been caught by semantic analysis
+                // missing return - report error and emit a default zero to keep IR valid
                 codegen_error(ctx, stmt, "function missing return statement");
+                LLVMTypeRef ret_ty = codegen_get_llvm_type(ctx, stmt->type->function.return_type);
+                LLVMValueRef zero  = LLVMConstNull(ret_ty);
+                LLVMBuildRet(ctx->builder, zero);
             }
         }
 
@@ -1494,6 +1497,10 @@ LLVMValueRef codegen_expr_cast(CodegenContext *ctx, AstNode *expr)
         return NULL;
     }
 
+    // operate on the loaded value unless we're decaying arrays
+    // loading before type resolution ensures correct scalar casts
+    // underlying array-to-pointer cases are handled later
+
     Type *from_type = expr->cast_expr.expr->type;
     Type *to_type   = expr->type;
 
@@ -1505,12 +1512,10 @@ LLVMValueRef codegen_expr_cast(CodegenContext *ctx, AstNode *expr)
     if (!resolved_to_type)
         resolved_to_type = to_type;
 
-    // for array to pointer decay, don't load the array value
+    // for array to pointer decay, don't load the array value; otherwise load
     bool is_array_decay = (resolved_from_type->kind == TYPE_ARRAY && (resolved_to_type->kind == TYPE_POINTER || resolved_to_type->kind == TYPE_PTR));
     if (!is_array_decay)
-    {
         value = codegen_load_if_needed(ctx, value, from_type);
-    }
 
     LLVMTypeRef to_llvm_type = codegen_get_llvm_type(ctx, to_type);
 
@@ -1666,17 +1671,24 @@ bool codegen_is_lvalue(AstNode *expr)
 
 LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
 {
-    // check if this is module member access (symbol is set by semantic analysis)
-    if (expr->symbol)
+    // module member access: object is an identifier bound to a module symbol
+    if (expr->field_expr.object && expr->field_expr.object->kind == AST_EXPR_IDENT)
     {
-        // this is module.member access, get the symbol value
-        LLVMValueRef value = codegen_get_symbol_value(ctx, expr->symbol);
-        if (!value)
+        Symbol *obj_sym = expr->field_expr.object->symbol;
+        if (obj_sym && obj_sym->kind == SYMBOL_MODULE)
         {
-            codegen_error(ctx, expr, "undefined symbol '%s'", expr->field_expr.field);
-            return NULL;
+            // semantic analysis stored the resolved member symbol in expr->symbol
+            if (expr->symbol)
+            {
+                LLVMValueRef value = codegen_get_symbol_value(ctx, expr->symbol);
+                if (!value)
+                {
+                    codegen_error(ctx, expr, "undefined symbol '%s'", expr->field_expr.field);
+                    return NULL;
+                }
+                return value;
+            }
         }
-        return value;
     }
 
     LLVMValueRef object = codegen_expr(ctx, expr->field_expr.object);
@@ -1694,6 +1706,15 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
     {
         codegen_error(ctx, expr, "field access on non-struct type");
         return NULL;
+    }
+
+    // ensure we have an address to GEP from; structs may come back as values
+    if (!LLVMIsAAllocaInst(object) && !LLVMIsAGlobalVariable(object) && !LLVMIsAGetElementPtrInst(object))
+    {
+        LLVMTypeRef llvm_struct_type = codegen_get_llvm_type(ctx, object_type);
+        LLVMValueRef tmp             = codegen_create_alloca(ctx, llvm_struct_type, "tmp_struct");
+        LLVMBuildStore(ctx->builder, object, tmp);
+        object = tmp;
     }
 
     // find the field

@@ -574,6 +574,9 @@ static int init_command(int argc, char **argv)
                     free(std_dep->src_dir);
                     free(std_dep);
                 }
+
+                // set explicit runtime module to avoid hidden inference later
+                config_set_runtime_module(config, "std.runtime");
             }
             else
             {
@@ -1169,29 +1172,6 @@ static int build_command(int argc, char **argv)
         if (config && config_has_runtime_module(config))
         {
             runtime_module_path = config->runtime_module;
-        }
-        else if (config)
-        {
-            const char *inferred = NULL;
-            for (int i = 0; i < config->dep_count && !inferred; i++)
-            {
-                DepSpec *d = config->deps[i];
-                if (d && d->is_runtime && d->name)
-                {
-                    // use <dep>.runtime
-                    // small stack buffer is fine for typical names
-                    char buf[256];
-                    snprintf(buf, sizeof(buf), "%s.runtime", d->name);
-                    config_set_runtime_module(config, buf);
-                    inferred = config->runtime_module;
-                }
-            }
-            if (!inferred && config_has_dep(config, "std"))
-            {
-                config_set_runtime_module(config, "std.runtime");
-                inferred = config->runtime_module;
-            }
-            runtime_module_path = inferred;
         }
         if (!runtime_module_path)
         {

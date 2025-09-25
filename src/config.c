@@ -754,20 +754,14 @@ bool config_save(ProjectConfig *config, const char *config_path)
         if (target->target_triple)
             fprintf(file, "target = \"%s\"\n", target->target_triple);
         fprintf(file, "opt-level = %d\n", target->opt_level);
-        if (target->emit_ast)
-            fprintf(file, "emit-ast = true\n");
-        if (target->emit_ir)
-            fprintf(file, "emit-ir = true\n");
-        if (target->emit_asm)
-            fprintf(file, "emit-asm = true\n");
-        if (!target->emit_object)
-            fprintf(file, "emit-object = false\n");
-        if (target->build_library)
-            fprintf(file, "build-library = true\n");
-        if (!target->shared)
-            fprintf(file, "shared = false\n");
-        if (target->no_pie)
-            fprintf(file, "no-pie = true\n");
+        // always write booleans explicitly for transparency
+        fprintf(file, "emit-ast = %s\n", target->emit_ast ? "true" : "false");
+        fprintf(file, "emit-ir = %s\n", target->emit_ir ? "true" : "false");
+        fprintf(file, "emit-asm = %s\n", target->emit_asm ? "true" : "false");
+        fprintf(file, "emit-object = %s\n", target->emit_object ? "true" : "false");
+        fprintf(file, "build-library = %s\n", target->build_library ? "true" : "false");
+        fprintf(file, "shared = %s\n", target->shared ? "true" : "false");
+        fprintf(file, "no-pie = %s\n", target->no_pie ? "true" : "false");
     }
 
     if (config->runtime_path || config->runtime_module || config->stdlib_path)

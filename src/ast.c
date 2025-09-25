@@ -209,6 +209,10 @@ void ast_node_dnit(AstNode *node)
     case AST_STMT_BRK:
     case AST_STMT_CNT:
         break;
+    case AST_STMT_ASM:
+        free(node->asm_stmt.code);
+        free(node->asm_stmt.constraints);
+        break;
 
     case AST_EXPR_BINARY:
         if (node->binary_expr.left)
@@ -519,6 +523,9 @@ void ast_print(AstNode *node, int indent)
             ast_print(node->str_stmt.fields->items[i], indent + 1);
         }
         break;
+    case AST_STMT_ASM:
+        printf("ASM %s\n", node->asm_stmt.code ? node->asm_stmt.code : "");
+        break;
 
     case AST_STMT_UNI:
         printf("UNI %s\n", node->uni_stmt.name);
@@ -799,6 +806,8 @@ const char *ast_node_kind_to_string(AstKind kind)
         return "BLOCK";
     case AST_STMT_EXPR:
         return "EXPR_STMT";
+    case AST_STMT_ASM:
+        return "ASM";
     case AST_STMT_RET:
         return "RET";
     case AST_STMT_IF:
@@ -982,6 +991,9 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
     case AST_STMT_EXPR:
         fprintf(file, "EXPR_STMT\n");
         ast_print_to_file(node->expr_stmt.expr, file, indent + 1);
+        break;
+    case AST_STMT_ASM:
+        fprintf(file, "ASM %s\n", node->asm_stmt.code ? node->asm_stmt.code : "");
         break;
     case AST_STMT_RET:
         fprintf(file, "RET\n");

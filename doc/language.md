@@ -75,3 +75,76 @@ This document summarizes core syntax and semantics recognized by the compiler.
 
 ## Errors
 - The compiler reports parse and semantic errors with source locations when available.
+
+## Platform Target Module
+The compiler synthesizes a builtin module named `target` containing immutable
+platform constants for conditional logic and compile-time decisions. Import it
+with a normal use statement:
+
+```
+use target;
+
+fun main() {
+  if (OS == OS_LINUX) {
+    // linux-specific path
+  } or if (OS == OS_WINDOWS) {
+    // windows-specific path
+  } or {
+    // fallback
+  }
+  ret;
+}
+```
+
+### Provided constants
+Numeric enum-style ids (stable once published):
+```
+val OS_LINUX: u32 = 1;
+val OS_DARWIN: u32 = 2;
+val OS_WINDOWS: u32 = 3;
+val OS_FREEBSD: u32 = 4;
+val OS_NETBSD: u32 = 5;
+val OS_OPENBSD: u32 = 6;
+val OS_DRAGONFLY: u32 = 7;
+val OS_WASM: u32 = 8;
+val OS_UNKNOWN: u32 = 255;
+
+val ARCH_X86_64: u32 = 1;
+val ARCH_AARCH64: u32 = 2;
+val ARCH_RISCV64: u32 = 3;
+val ARCH_WASM32: u32 = 4;
+val ARCH_WASM64: u32 = 5;
+val ARCH_UNKNOWN: u32 = 255;
+```
+
+Concrete build values:
+```
+val OS: u32;         // one of OS_* ids
+val ARCH: u32;       // one of ARCH_* ids
+val PTR_WIDTH: u8;   // pointer bit width (e.g. 64)
+val ENDIAN: u8;      // 0 little, 1 big
+val DEBUG: u8;       // 1 if debug build (reserved, currently 0)
+val OS_NAME: []u8;   // lowercase OS name string
+val ARCH_NAME: []u8; // architecture name string
+```
+
+### Usage patterns
+Derive helper booleans or select code paths:
+```
+use target;
+val IS_UNIX: u8 = (OS == OS_LINUX or OS == OS_DARWIN or OS == OS_FREEBSD or OS == OS_NETBSD or OS == OS_OPENBSD or OS == OS_DRAGONFLY);
+
+fun init() {
+  if (IS_UNIX) { /* unix setup */ } or { /* fallback */ }
+  ret;
+}
+```
+
+Keep platform-specific numeric constants in ordinary modules using `target`:
+```
+use target;
+val SIGINT: i32 = if (OS == OS_WINDOWS) { 15 } or { 2 };
+```
+
+No macro system or file suffix variants are required; normal `if` chains are
+used and can later be optimized by constant folding.

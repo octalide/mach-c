@@ -218,6 +218,9 @@ bool semantic_analyze_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
             return false;
         }
         return true;
+    case AST_STMT_ASM:
+        // inline assembly currently unchecked
+        return true;
     default:
         semantic_error(analyzer, stmt, "unknown statement kind");
         return false;

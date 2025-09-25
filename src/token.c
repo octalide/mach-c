@@ -79,6 +79,8 @@ char *token_kind_to_string(TokenKind kind)
         return "cnt";
     case TOKEN_KW_BRK:
         return "brk";
+    case TOKEN_KW_ASM:
+        return "asm";
 
     case TOKEN_L_PAREN:
         return "(";
@@ -174,6 +176,10 @@ TokenKind token_kind_from_identifier(const char *text, int len)
     }
     if (len == 3)
     {
+        if (strncmp(text, "asm", 3) == 0)
+        {
+            return TOKEN_KW_ASM;
+        }
         if (strncmp(text, "use", 3) == 0)
         {
             return TOKEN_KW_USE;

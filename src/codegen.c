@@ -492,6 +492,28 @@ LLVMValueRef codegen_stmt(CodegenContext *ctx, AstNode *stmt)
         return NULL;
     case AST_STMT_USE:
         return codegen_stmt_use(ctx, stmt);
+    case AST_STMT_ASM:
+        if (stmt->asm_stmt.code)
+        {
+            // default clobbers to be safe for syscalls and general side-effect asm
+            const char *default_clobbers = "~{memory},~{dirflag},~{fpsr},~{flags}";
+            const char *constr           = stmt->asm_stmt.constraints && stmt->asm_stmt.constraints[0] ? stmt->asm_stmt.constraints : default_clobbers;
+
+            if (ctx->current_function)
+            {
+                // inline asm in function: side-effect call with no operands
+                LLVMTypeRef void_ty   = LLVMVoidTypeInContext(ctx->context);
+                LLVMTypeRef asm_fn_ty = LLVMFunctionType(void_ty, NULL, 0, false);
+                LLVMValueRef inline_asm = LLVMGetInlineAsm(asm_fn_ty, stmt->asm_stmt.code, strlen(stmt->asm_stmt.code), constr, strlen(constr), true, false, LLVMInlineAsmDialectATT, false);
+                LLVMBuildCall2(ctx->builder, asm_fn_ty, inline_asm, NULL, 0, "");
+            }
+            else
+            {
+                // module-level inline asm (e.g., directives)
+                LLVMSetModuleInlineAsm2(ctx->module, stmt->asm_stmt.code, strlen(stmt->asm_stmt.code));
+            }
+        }
+        return NULL;
     default:
         codegen_error(ctx, stmt, "unimplemented statement kind: %s", ast_node_kind_to_string(stmt->kind));
         return NULL;

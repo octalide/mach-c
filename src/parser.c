@@ -42,6 +42,9 @@ static AstList *parser_alloc_list(Parser *parser)
     return list;
 }
 
+// forward for asm stmt
+static AstNode *parser_parse_stmt_asm(Parser *parser);
+
 // parser lifecycle
 void parser_init(Parser *parser, Lexer *lexer)
 {
@@ -389,6 +392,9 @@ AstNode *parser_parse_stmt_top(Parser *parser)
         break;
     case TOKEN_KW_UNI:
         result = parser_parse_stmt_uni(parser);
+        break;
+    case TOKEN_KW_ASM:
+        result = parser_parse_stmt_asm(parser);
         break;
     default:
         parser_error_at_current(parser, "expected statement");
@@ -1184,6 +1190,55 @@ AstNode *parser_parse_stmt_expr(Parser *parser)
         return NULL;
     }
 
+    return node;
+}
+
+static AstNode *parser_parse_stmt_asm(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_KW_ASM, "expected 'asm' keyword"))
+    {
+        return NULL;
+    }
+
+    Token *tok = parser->previous;
+
+    // collect rest of source line (raw) directly from lexer position
+    int start_pos = parser->lexer->pos;
+    while (!lexer_at_end(parser->lexer) && lexer_current(parser->lexer) != '\n')
+    {
+        lexer_advance(parser->lexer);
+    }
+    int len = parser->lexer->pos - start_pos;
+    char *code = calloc((size_t)len + 1, 1);
+    if (len > 0)
+    {
+        memcpy(code, parser->lexer->source + start_pos, len);
+        // trim leading whitespace
+        int leading = 0;
+        while (code[leading] == ' ' || code[leading] == '\t') leading++;
+        if (leading > 0)
+        {
+            memmove(code, code + leading, len - leading + 1);
+        }
+        // trim trailing whitespace
+        size_t newlen = strlen(code);
+        while (newlen > 0 && (code[newlen - 1] == ' ' || code[newlen - 1] == '\t' || code[newlen - 1] == '\r'))
+        {
+            code[--newlen] = '\0';
+        }
+    }
+    if (!lexer_at_end(parser->lexer) && lexer_current(parser->lexer) == '\n')
+    {
+        lexer_advance(parser->lexer);
+    }
+
+    AstNode *node = parser_alloc_node(parser, AST_STMT_ASM, tok);
+    if (!node)
+    {
+        free(code);
+        return NULL;
+    }
+    node->asm_stmt.code = code;
     return node;
 }
 

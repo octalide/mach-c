@@ -65,6 +65,7 @@ typedef struct Type
             struct Type  *return_type;
             struct Type **param_types;
             size_t        param_count;
+            bool          is_variadic;
         } function;
 
         // TYPE_ALIAS
@@ -98,7 +99,7 @@ Type *type_pointer_create(Type *base);
 Type *type_array_create(Type *elem_type);
 Type *type_struct_create(const char *name);
 Type *type_union_create(const char *name);
-Type *type_function_create(Type *return_type, Type **param_types, size_t param_count);
+Type *type_function_create(Type *return_type, Type **param_types, size_t param_count, bool is_variadic);
 Type *type_alias_create(const char *name, Type *target);
 
 // type operations

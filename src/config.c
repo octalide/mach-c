@@ -712,7 +712,76 @@ ProjectConfig *config_load_from_dir(const char *dir_path)
     char config_path[1024];
     snprintf(config_path, sizeof(config_path), "%s/mach.toml", dir_path);
 
-    return config_load(config_path);
+    ProjectConfig *cfg = config_load(config_path);
+    if (!cfg)
+        return NULL;
+
+    // auto-discover dependencies in dep directory so projects work without [deps]
+    // this treats every immediate child directory under dep-dir as a dependency with src = "src"
+    const char *dep_rel = cfg->dep_dir ? cfg->dep_dir : "dep";
+    char        dep_abs[1024];
+    snprintf(dep_abs, sizeof(dep_abs), "%s/%s", dir_path, dep_rel);
+
+    DIR *d = opendir(dep_abs);
+    if (d)
+    {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL)
+        {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                continue;
+
+            // construct child path
+            char child_path[1024];
+            snprintf(child_path, sizeof(child_path), "%s/%s", dep_abs, ent->d_name);
+            struct stat st;
+            if (stat(child_path, &st) != 0 || !S_ISDIR(st.st_mode))
+                continue;
+
+            // ensure it looks like a mach dependency (has a src directory)
+            char src_path[1200];
+            snprintf(src_path, sizeof(src_path), "%s/src", child_path);
+            if (stat(src_path, &st) != 0 || !S_ISDIR(st.st_mode))
+                continue;
+
+            // skip if already declared in [deps]
+            if (config_has_dep(cfg, ent->d_name))
+                continue;
+
+            // add discovered dep with default src = "src" and relative path = <dep-dir>/<name>
+            DepSpec *dep = calloc(1, sizeof(DepSpec));
+            if (!dep)
+                continue;
+            dep->name    = strdup(ent->d_name);
+            dep->src_dir = strdup("src");
+
+            char rel_path[1024];
+            snprintf(rel_path, sizeof(rel_path), "%s/%s", dep_rel, ent->d_name);
+            dep->path = strdup(rel_path);
+
+            DepSpec **new_arr = realloc(cfg->deps, (cfg->dep_count + 1) * sizeof(DepSpec *));
+            if (!new_arr)
+            {
+                free(dep->name);
+                free(dep->src_dir);
+                free(dep->path);
+                free(dep);
+                continue;
+            }
+            cfg->deps                 = new_arr;
+            cfg->deps[cfg->dep_count] = dep;
+            cfg->dep_count++;
+        }
+        closedir(d);
+    }
+
+    // if no runtime configured but std is present, default runtime to std.runtime
+    if (!cfg->runtime_module && config_has_dep(cfg, "std"))
+    {
+        cfg->runtime_module = strdup("std.runtime");
+    }
+
+    return cfg;
 }
 
 bool config_save(ProjectConfig *config, const char *config_path)

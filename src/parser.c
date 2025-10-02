@@ -285,6 +285,8 @@ static Precedence get_binary_precedence(TokenKind kind)
         return PREC_ASSIGNMENT;
     case TOKEN_PIPE_PIPE:
         return PREC_OR;
+    case TOKEN_KW_OR:
+        return PREC_OR;
     case TOKEN_AMPERSAND_AMPERSAND:
         return PREC_AND;
     case TOKEN_PIPE:
@@ -764,12 +766,76 @@ AstNode *parser_parse_stmt_fun(Parser *parser)
         return NULL;
     }
 
-    node->fun_stmt.params = parser_parse_parameter_list(parser);
+    // parse parameter list with optional variadic '...'
+    node->fun_stmt.params      = parser_alloc_list(parser);
+    node->fun_stmt.is_variadic = false;
     if (!node->fun_stmt.params)
     {
         ast_node_dnit(node);
         free(node);
         return NULL;
+    }
+
+    if (!parser_check(parser, TOKEN_R_PAREN))
+    {
+        do
+        {
+            if (parser_check(parser, TOKEN_ELLIPSIS))
+            {
+                if (node->fun_stmt.is_variadic)
+                {
+                    parser_error_at_current(parser, "multiple '...' in parameter list");
+                }
+                parser_advance(parser);
+                node->fun_stmt.is_variadic = true;
+                // ellipsis must be last
+                if (!parser_check(parser, TOKEN_R_PAREN))
+                {
+                    parser_error_at_current(parser, "'...' must be last parameter");
+                }
+                break;
+            }
+
+            AstNode *param = parser_alloc_node(parser, AST_STMT_PARAM, parser->current);
+            if (!param)
+            {
+                ast_node_dnit(node);
+                free(node);
+                return NULL;
+            }
+
+            param->param_stmt.is_variadic = false;
+            param->param_stmt.name        = parser_parse_identifier(parser);
+            if (!param->param_stmt.name)
+            {
+                ast_node_dnit(param);
+                free(param);
+                ast_node_dnit(node);
+                free(node);
+                return NULL;
+            }
+
+            if (!parser_consume(parser, TOKEN_COLON, "expected ':' after parameter name"))
+            {
+                ast_node_dnit(param);
+                free(param);
+                ast_node_dnit(node);
+                free(node);
+                return NULL;
+            }
+
+            param->param_stmt.type = parser_parse_type(parser);
+            if (!param->param_stmt.type)
+            {
+                ast_node_dnit(param);
+                free(param);
+                ast_node_dnit(node);
+                free(node);
+                return NULL;
+            }
+
+            ast_list_append(node->fun_stmt.params, param);
+        } while (parser_match(parser, TOKEN_COMMA));
     }
 
     if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after parameters"))
@@ -1153,6 +1219,67 @@ AstNode *parser_parse_stmt_block(Parser *parser)
             ast_node_dnit(node);
             free(node);
             return NULL;
+        }
+        // attach trailing 'or' branches if present and not already consumed
+        if (stmt->kind == AST_STMT_IF)
+        {
+            AstNode **tail = &stmt->cond_stmt.stmt_or;
+            while (parser_match(parser, TOKEN_KW_OR))
+            {
+                AstNode *or_node = parser_alloc_node(parser, AST_STMT_OR, parser->previous);
+                if (!or_node)
+                {
+                    ast_node_dnit(stmt);
+                    free(stmt);
+                    ast_node_dnit(node);
+                    free(node);
+                    return NULL;
+                }
+
+                // optional condition
+                if (parser_match(parser, TOKEN_L_PAREN))
+                {
+                    or_node->cond_stmt.cond = parser_parse_expr(parser);
+                    if (!or_node->cond_stmt.cond)
+                    {
+                        parser_error_at_current(parser, "expected condition expression");
+                        ast_node_dnit(or_node);
+                        free(or_node);
+                        ast_node_dnit(stmt);
+                        free(stmt);
+                        ast_node_dnit(node);
+                        free(node);
+                        return NULL;
+                    }
+
+                    if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after 'or' condition"))
+                    {
+                        ast_node_dnit(or_node);
+                        free(or_node);
+                        ast_node_dnit(stmt);
+                        free(stmt);
+                        ast_node_dnit(node);
+                        free(node);
+                        return NULL;
+                    }
+                }
+
+                or_node->cond_stmt.body = parser_parse_stmt_block(parser);
+                if (!or_node->cond_stmt.body)
+                {
+                    parser_error_at_current(parser, "expected block after 'or'");
+                    ast_node_dnit(or_node);
+                    free(or_node);
+                    ast_node_dnit(stmt);
+                    free(stmt);
+                    ast_node_dnit(node);
+                    free(node);
+                    return NULL;
+                }
+
+                *tail = or_node;
+                tail  = &or_node->cond_stmt.stmt_or;
+            }
         }
         ast_list_append(node->block_stmt.stmts, stmt);
     }
@@ -1897,10 +2024,25 @@ AstNode *parser_parse_type_fun(Parser *parser)
         return NULL;
     }
 
+    fun->type_fun.is_variadic = false;
     if (!parser_check(parser, TOKEN_R_PAREN))
     {
         do
         {
+            if (parser_check(parser, TOKEN_ELLIPSIS))
+            {
+                if (fun->type_fun.is_variadic)
+                {
+                    parser_error_at_current(parser, "multiple '...' in function type");
+                }
+                parser_advance(parser);
+                fun->type_fun.is_variadic = true;
+                if (!parser_check(parser, TOKEN_R_PAREN))
+                {
+                    parser_error_at_current(parser, "'...' must be last parameter in function type");
+                }
+                break;
+            }
             AstNode *param_type = parser_parse_type(parser);
             if (!param_type)
             {
@@ -2087,6 +2229,12 @@ AstList *parser_parse_parameter_list(Parser *parser)
 
     do
     {
+        if (parser_check(parser, TOKEN_ELLIPSIS))
+        {
+            // caller should handle variadic; here treat as error to avoid misuse
+            parser_error_at_current(parser, "'...' not allowed here");
+            return list;
+        }
         AstNode *param = parser_alloc_node(parser, AST_STMT_PARAM, parser->current);
         if (!param)
         {
@@ -2114,7 +2262,8 @@ AstList *parser_parse_parameter_list(Parser *parser)
             return NULL;
         }
 
-        param->param_stmt.type = parser_parse_type(parser);
+    param->param_stmt.type        = parser_parse_type(parser);
+    param->param_stmt.is_variadic = false;
         if (!param->param_stmt.type)
         {
             ast_node_dnit(param);

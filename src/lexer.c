@@ -598,6 +598,10 @@ Token *lexer_next(Lexer *lexer)
     case '@':
         return lexer_emit(lexer, TOKEN_AT, 1);
     case '.':
+        if (lexer_peek(lexer, 1) == '.' && lexer_peek(lexer, 2) == '.')
+        {
+            return lexer_emit(lexer, TOKEN_ELLIPSIS, 3);
+        }
         return lexer_emit(lexer, TOKEN_DOT, 1);
     case ',':
         return lexer_emit(lexer, TOKEN_COMMA, 1);

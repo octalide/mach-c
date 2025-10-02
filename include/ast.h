@@ -130,6 +130,7 @@ struct AstNode
             AstNode *return_type; // null for no return
             AstNode *body;        // null for external functions
             bool     no_mangle;   // true if #! mangle=false attribute present
+            bool     is_variadic; // true if function has variadic arguments
         } fun_stmt;
 
         // struct statement
@@ -158,6 +159,7 @@ struct AstNode
         {
             char    *name;
             AstNode *type;
+            bool     is_variadic; // sentinel for '...'
         } param_stmt;
 
         // block statement
@@ -297,6 +299,7 @@ struct AstNode
         {
             AstList *params;
             AstNode *return_type; // null for no return
+            bool     is_variadic; // true if function type is variadic
         } type_fun;
 
         struct

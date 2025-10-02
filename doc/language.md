@@ -20,6 +20,10 @@ This document summarizes core syntax and semantics recognized by the compiler.
 - Pointers: `*T` (typed pointer). Address-of `?expr`, dereference `@expr`.
 - Arrays: `[N]T` or `[]T` (unbounded/fat pointer). Index with `a[i]`.
 - Function types: `fun(T1, T2) R` or `fun() R`. Omit `R` for no return.
+  - Variadic: append `, ...` as last parameter (e.g., `fun(i32, ...) i32`). In declarations `fun name(a: i32, ...) { }` or external types `ext "C:printf" printf: fun(*u8, ...) i32;`.
+  - Inside a variadic function, intrinsics:
+    - `va_count()` -> `u64` number of extra arguments
+    - `va_arg(i)` -> `ptr` pointer to i-th extra argument (0-based). The pointed memory contains the original argument value; user must cast and dereference.
 - Struct/Union types:
   - Named: `str Name { field: T; ... }`, `uni Name { field: T; ... }`.
   - Anonymous in types: `str { field: T; ... }`, `uni { field: T; ... }`.

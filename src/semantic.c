@@ -310,10 +310,12 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         {
             // aliased import: link the module scope to the symbol
             Symbol *module_symbol = use_stmt->use_stmt.module_sym;
-            if (module_symbol && module_symbol->kind == SYMBOL_MODULE && module->symbols)
-            {
+                if (!module_symbol || module_symbol->kind != SYMBOL_MODULE || !module->symbols || !module->symbols->global_scope)
+                {
+                    semantic_error(analyzer, use_stmt, "module '%s' has no symbols to import", module_path);
+                    return false;
+                }
                 module_symbol->module.scope = module->symbols->global_scope;
-            }
         }
         else
         {
@@ -370,6 +372,123 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
 
     printf("analyzing module '%s'...\n", module_path);
 
+    // fast path: modules that contain only extern declarations
+    if (module->ast && module->ast->kind == AST_PROGRAM)
+    {
+        bool extern_only = true;
+        for (int i = 0; i < module->ast->program.stmts->count; i++)
+        {
+            AstNode *s = module->ast->program.stmts->items[i];
+            if (s->kind != AST_STMT_EXT)
+            {
+                extern_only = false;
+                break;
+            }
+        }
+
+        if (extern_only)
+        {
+            if (module->symbols)
+            {
+                symbol_table_dnit(module->symbols);
+                free(module->symbols);
+            }
+            module->symbols = malloc(sizeof(SymbolTable));
+            symbol_table_init(module->symbols);
+
+            // analyze ext statements into module's symbol table using a fresh analyzer
+            SemanticAnalyzer tmp;
+            semantic_analyzer_init(&tmp);
+            // use the module's symbol table for symbol writes
+            tmp.symbol_table = *module->symbols;
+
+            bool ok = true;
+            for (int i = 0; i < module->ast->program.stmts->count; i++)
+            {
+                if (!semantic_analyze_ext_stmt(&tmp, module->ast->program.stmts->items[i]))
+                {
+                    ok = false;
+                    break;
+                }
+            }
+            // write back any table header updates (current scope etc.)
+            *module->symbols = tmp.symbol_table;
+            // detach symbol table to avoid double free when tmp is destroyed
+            tmp.symbol_table.global_scope  = NULL;
+            tmp.symbol_table.current_scope = NULL;
+            tmp.symbol_table.module_scope  = NULL;
+            semantic_analyzer_dnit(&tmp);
+
+            if (!ok)
+            {
+                semantic_error(analyzer, use_stmt, "failed to analyze externs in module '%s'", module_path);
+                return false;
+            }
+
+            // finalize
+            module->is_analyzed = true;
+
+            // handle import linking now
+            if (alias)
+            {
+                Symbol *module_symbol = use_stmt->use_stmt.module_sym;
+                if (!module_symbol || module_symbol->kind != SYMBOL_MODULE || !module->symbols || !module->symbols->global_scope)
+                {
+                    semantic_error(analyzer, use_stmt, "module '%s' has no symbols to import", module_path);
+                    return false;
+                }
+                module_symbol->module.scope = module->symbols->global_scope;
+            }
+            else
+            {
+                if (module->symbols && module->symbols->global_scope)
+                {
+                    Symbol *sym = module->symbols->global_scope->symbols;
+                    while (sym)
+                    {
+                        Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, sym->name);
+                        if (existing)
+                        {
+                            semantic_error(analyzer, use_stmt, "symbol '%s' from module '%s' conflicts with existing symbol", sym->name, module_path);
+                            return false;
+                        }
+                        Symbol *imported_sym = symbol_create(sym->kind, sym->name, sym->type, sym->decl);
+                        switch (sym->kind)
+                        {
+                        case SYMBOL_VAR:
+                        case SYMBOL_VAL:
+                            imported_sym->var = sym->var;
+                            break;
+                        case SYMBOL_FUNC:
+                            imported_sym->func = sym->func;
+                            break;
+                        case SYMBOL_TYPE:
+                            imported_sym->type_def = sym->type_def;
+                            break;
+                        case SYMBOL_FIELD:
+                            imported_sym->field = sym->field;
+                            break;
+                        case SYMBOL_PARAM:
+                            imported_sym->param = sym->param;
+                            break;
+                        case SYMBOL_MODULE:
+                            imported_sym->module = sym->module;
+                            break;
+                        }
+                        symbol_add(analyzer->symbol_table.current_scope, imported_sym);
+                        sym = sym->next;
+                    }
+                }
+                else
+                {
+                    semantic_error(analyzer, use_stmt, "module '%s' has no symbols to import", module_path);
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
     // create a new symbol table for the module
     if (!module->symbols)
     {
@@ -381,6 +500,15 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
     SemanticAnalyzer module_analyzer;
     semantic_analyzer_init(&module_analyzer);
     module_manager_set_config(&module_analyzer.module_manager, analyzer->module_manager.config, analyzer->module_manager.project_dir);
+    // inherit search paths and aliases from parent manager for CLI/minimal builds
+    for (int i = 0; i < analyzer->module_manager.search_count; i++)
+    {
+        module_manager_add_search_path(&module_analyzer.module_manager, analyzer->module_manager.search_paths[i]);
+    }
+    for (int i = 0; i < analyzer->module_manager.alias_count; i++)
+    {
+        module_manager_add_alias(&module_analyzer.module_manager, analyzer->module_manager.alias_names[i], analyzer->module_manager.alias_paths[i]);
+    }
 
     // analyze the module
     bool success = true;
@@ -533,6 +661,7 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         while (m)
         {
             m->symbols = NULL; // prevent module_dnit from freeing active scopes
+            m->ast     = NULL; // prevent freeing AST nodes referenced by decl pointers
             m = m->next;
         }
     }
@@ -702,7 +831,24 @@ static bool stmt_has_return(AstNode *stmt)
         return false;
 
     case AST_STMT_IF:
-        return stmt->cond_stmt.stmt_or && stmt_has_return(stmt->cond_stmt.body) && stmt_has_return(stmt->cond_stmt.stmt_or);
+        if (!stmt_has_return(stmt->cond_stmt.body))
+            return false;
+        // walk chained or branches
+        AstNode *or_node = stmt->cond_stmt.stmt_or;
+        while (or_node)
+        {
+            if (!stmt_has_return(or_node->cond_stmt.body))
+                return false;
+            or_node = or_node->cond_stmt.stmt_or;
+        }
+        return true;
+
+    case AST_STMT_OR:
+        if (!stmt_has_return(stmt->cond_stmt.body))
+            return false;
+        if (stmt->cond_stmt.stmt_or)
+            return stmt_has_return(stmt->cond_stmt.stmt_or);
+        return true;
 
     default:
         return false;
@@ -726,28 +872,41 @@ bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     }
 
     // resolve parameter types
-    size_t param_count = stmt->fun_stmt.params ? stmt->fun_stmt.params->count : 0;
-    Type **param_types = NULL;
-
-    if (param_count > 0)
+    size_t original_param_nodes = stmt->fun_stmt.params ? stmt->fun_stmt.params->count : 0;
+    size_t fixed_param_count    = 0;
+    // first pass: count fixed params (ignore variadic sentinel)
+    for (size_t i = 0; i < original_param_nodes; i++)
     {
-        param_types = malloc(sizeof(Type *) * param_count);
-        for (size_t i = 0; i < param_count; i++)
-        {
-            AstNode *param = stmt->fun_stmt.params->items[i];
-            param_types[i] = resolve_type(analyzer, param->param_stmt.type);
-            if (!param_types[i])
-            {
-                semantic_error(analyzer, param, "cannot resolve type for parameter '%s'", param->param_stmt.name);
-                free(param_types);
-                return false;
-            }
-            // store resolved type in param node
-            param->type = param_types[i];
-        }
+        AstNode *param = stmt->fun_stmt.params->items[i];
+        if (!param->param_stmt.is_variadic)
+            fixed_param_count++;
     }
 
-    Type *func_type = type_function_create(return_type, param_types, param_count);
+    Type **param_types = NULL;
+    if (fixed_param_count > 0)
+        param_types = malloc(sizeof(Type *) * fixed_param_count);
+
+    size_t idx = 0;
+    for (size_t i = 0; i < original_param_nodes; i++)
+    {
+        AstNode *param = stmt->fun_stmt.params->items[i];
+        if (param->param_stmt.is_variadic)
+            continue;
+        param_types[idx] = resolve_type(analyzer, param->param_stmt.type);
+        if (!param_types[idx])
+        {
+            semantic_error(analyzer, param, "cannot resolve type for parameter '%s'", param->param_stmt.name);
+            free(param_types);
+            return false;
+        }
+        param->type = param_types[idx];
+        idx++;
+    }
+
+    size_t param_count = fixed_param_count;
+
+    bool  is_variadic = stmt->fun_stmt.is_variadic;
+    Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
     free(param_types);
 
     // check for existing declaration
@@ -799,11 +958,14 @@ bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         // add parameters to function scope
         if (stmt->fun_stmt.params)
         {
+            size_t param_index = 0;
             for (int i = 0; i < stmt->fun_stmt.params->count; i++)
             {
-                AstNode *param            = stmt->fun_stmt.params->items[i];
-                Symbol  *param_symbol     = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param->type, param);
-                param_symbol->param.index = (size_t)i;
+                AstNode *param = stmt->fun_stmt.params->items[i];
+                if (param->param_stmt.is_variadic)
+                    continue; // variadic sentinel has no symbol
+                Symbol *param_symbol         = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param->type, param);
+                param_symbol->param.index    = param_index++;
                 symbol_add(func_scope, param_symbol);
                 param->symbol = param_symbol;
             }
@@ -952,19 +1114,20 @@ bool semantic_analyze_if_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 
 bool semantic_analyze_or_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    // analyze condition
-    Type *cond_type = semantic_analyze_expr(analyzer, stmt->cond_stmt.cond);
-    if (!cond_type)
+    // else-branch: 'or { ... }' has no condition
+    if (stmt->cond_stmt.cond)
     {
-        semantic_error(analyzer, stmt, "invalid condition in or statement");
-        return false;
-    }
-
-    // condition should be truthy (numeric or pointer-like)
-    if (!type_is_truthy(cond_type))
-    {
-        semantic_error(analyzer, stmt, "condition must be numeric or pointer-like");
-        return false;
+        Type *cond_type = semantic_analyze_expr(analyzer, stmt->cond_stmt.cond);
+        if (!cond_type)
+        {
+            semantic_error(analyzer, stmt, "invalid condition in or statement");
+            return false;
+        }
+        if (!type_is_truthy(cond_type))
+        {
+            semantic_error(analyzer, stmt, "condition must be numeric or pointer-like");
+            return false;
+        }
     }
 
     // analyze body
@@ -1202,6 +1365,7 @@ Type *semantic_analyze_binary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     case TOKEN_GREATER_EQUAL:
     case TOKEN_AMPERSAND_AMPERSAND:
     case TOKEN_PIPE_PIPE:
+    case TOKEN_KW_OR:
         // comparison/logical operators return u8 (bool)
         result_type = type_u8();
         break;
@@ -1270,7 +1434,19 @@ Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 
     switch (expr->unary_expr.op)
     {
-    case TOKEN_QUESTION: // address-of
+    case TOKEN_QUESTION:
+        // treat '?0' as null pointer literal
+        if (expr->unary_expr.expr->kind == AST_EXPR_LIT && expr->unary_expr.expr->lit_expr.kind == TOKEN_LIT_INT && expr->unary_expr.expr->lit_expr.int_val == 0)
+        {
+            expr->type = type_ptr();
+            return expr->type;
+        }
+        // otherwise address-of
+        if (!is_lvalue(expr->unary_expr.expr))
+        {
+            semantic_error(analyzer, expr, "address-of requires lvalue");
+            return NULL;
+        }
         expr->type = type_pointer_create(operand_type);
         return expr->type;
 
@@ -1285,6 +1461,15 @@ Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     case TOKEN_BANG:            // logical not
         expr->type = type_u8(); // logical not returns u8 (0 or 1)
         return type_u8();
+
+    case TOKEN_TILDE: // bitwise not
+        if (!type_is_integer(operand_type))
+        {
+            semantic_error(analyzer, expr, "bitwise not requires integer operand");
+            return NULL;
+        }
+        expr->type = operand_type;
+        return operand_type;
 
     default: // arithmetic unary
         expr->type = operand_type;
@@ -1413,6 +1598,47 @@ Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             // type_of() returns a compile-time constant representing the type
             // for now, we'll represent this as a u64 hash/id
             expr->type = type_u64(); // type_of() returns u64
+            return expr->type;
+        }
+
+        // handle va_count() intrinsic - number of variadic args inside current variadic function
+        if (strcmp(func_name, "va_count") == 0)
+        {
+            if (!analyzer->current_function || !analyzer->current_function->fun_stmt.is_variadic)
+            {
+                semantic_error(analyzer, expr, "va_count() used outside a variadic function");
+                return NULL;
+            }
+            if (expr->call_expr.args && expr->call_expr.args->count != 0)
+            {
+                semantic_error(analyzer, expr, "va_count() expects no arguments");
+                return NULL;
+            }
+            expr->type = type_u64();
+            return expr->type;
+        }
+
+        // handle va_arg(i) intrinsic - pointer to i-th variadic argument (as untyped ptr)
+        if (strcmp(func_name, "va_arg") == 0)
+        {
+            if (!analyzer->current_function || !analyzer->current_function->fun_stmt.is_variadic)
+            {
+                semantic_error(analyzer, expr, "va_arg() used outside a variadic function");
+                return NULL;
+            }
+            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            {
+                semantic_error(analyzer, expr, "va_arg() expects exactly one argument (index)");
+                return NULL;
+            }
+            AstNode *idx = expr->call_expr.args->items[0];
+            Type    *it  = semantic_analyze_expr(analyzer, idx);
+            if (!it || !type_is_integer(it))
+            {
+                semantic_error(analyzer, expr, "va_arg() index must be integer");
+                return NULL;
+            }
+            expr->type = type_ptr();
             return expr->type;
         }
     }
@@ -1958,6 +2184,7 @@ bool semantic_check_binary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *le
 
     case TOKEN_AMPERSAND_AMPERSAND:
     case TOKEN_PIPE_PIPE:
+    case TOKEN_KW_OR:
         // in Mach, logical operators work on any type (truthiness)
         return true;
 
@@ -2013,7 +2240,12 @@ bool semantic_check_unary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *ope
         return true;
 
     case TOKEN_QUESTION:
-        // address-of requires an lvalue
+        // allow null literal '?0'
+        if (node->unary_expr.expr && node->unary_expr.expr->kind == AST_EXPR_LIT && node->unary_expr.expr->lit_expr.kind == TOKEN_LIT_INT && node->unary_expr.expr->lit_expr.int_val == 0)
+        {
+            return true;
+        }
+        // otherwise address-of requires an lvalue
         if (!is_lvalue(node->unary_expr.expr))
         {
             semantic_error(analyzer, node, "address-of operator requires an lvalue");
@@ -2037,27 +2269,46 @@ bool semantic_check_unary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *ope
 
 bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, AstList *args, AstNode *node)
 {
-    size_t expected_count = func_type->function.param_count;
-    size_t actual_count   = args ? args->count : 0;
+    size_t fixed_count  = func_type->function.param_count;
+    size_t actual_count = args ? args->count : 0;
+    bool   is_variadic  = func_type->function.is_variadic;
 
-    if (expected_count != actual_count)
+    if (!is_variadic)
     {
-        semantic_error(analyzer, node, "function expects %zu arguments, got %zu", expected_count, actual_count);
-        return false;
+        if (fixed_count != actual_count)
+        {
+            semantic_error(analyzer, node, "function expects %zu arguments, got %zu", fixed_count, actual_count);
+            return false;
+        }
+    }
+    else
+    {
+        if (actual_count < fixed_count)
+        {
+            semantic_error(analyzer, node, "variadic function expects at least %zu arguments, got %zu", fixed_count, actual_count);
+            return false;
+        }
     }
 
-    for (size_t i = 0; i < expected_count; i++)
+    // check fixed arguments
+    for (size_t i = 0; i < fixed_count; i++)
     {
         Type *param_type = func_type->function.param_types[i];
-        // use parameter type as hint for better literal inference
-        Type *arg_type = semantic_analyze_expr_with_hint(analyzer, args->items[i], param_type);
-
+        Type *arg_type   = semantic_analyze_expr_with_hint(analyzer, args->items[i], param_type);
         if (!arg_type)
             return false;
-
         if (!semantic_check_assignment(analyzer, param_type, arg_type, args->items[i]))
-        {
             return false;
+    }
+
+    // analyze variadic arguments for side effects and basic validity
+    if (is_variadic)
+    {
+        for (size_t i = fixed_count; i < actual_count; i++)
+        {
+            // no type checking beyond being a valid expression
+            if (!semantic_analyze_expr(analyzer, args->items[i]))
+                return false;
         }
     }
 

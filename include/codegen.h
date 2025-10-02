@@ -3,6 +3,7 @@
 
 #include "ast.h"
 #include "semantic.h"
+#include "lexer.h"
 #include <llvm-c/Core.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
@@ -47,6 +48,7 @@ struct CodegenContext
 
     // current function context
     LLVMValueRef      current_function;
+    Type             *current_function_type; // mach type for current function
     LLVMBasicBlockRef break_block;
     LLVMBasicBlockRef continue_block;
 
@@ -64,6 +66,16 @@ struct CodegenContext
     bool  is_runtime;   // true when compiling the runtime module
     bool  use_runtime;  // true when linking runtime alongside the entry
     char *package_name; // root package name for mangling
+
+    // source context for diagnostics
+    const char *source_file; // current file being compiled
+    Lexer      *source_lexer; // lexer for mapping pos->line/column
+
+    // variadic function support (active only inside current variadic function)
+    LLVMValueRef *current_varargs;      // array of allocas pointing to each extra argument
+    int           current_vararg_count; // number of variadic arguments
+    int           current_vararg_capacity;
+    size_t        current_fixed_param_count; // number of fixed parameters in current function
 };
 
 // context lifecycle

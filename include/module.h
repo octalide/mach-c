@@ -49,6 +49,10 @@ struct ModuleManager
     int             count;        // number of loaded modules
     char          **search_paths; // directories to search for modules
     int             search_count; // number of search paths
+    // simple alias map for config-less resolution: name -> base directory
+    char          **alias_names;
+    char          **alias_paths;
+    int             alias_count;
     ModuleErrorList errors;       // accumulated errors during loading
     bool            had_error;    // true if any module failed to load/parse
 
@@ -63,6 +67,7 @@ void module_manager_dnit(ModuleManager *manager);
 
 // search path management
 void module_manager_add_search_path(ModuleManager *manager, const char *path);
+void module_manager_add_alias(ModuleManager *manager, const char *name, const char *base_dir);
 void module_manager_set_config(ModuleManager *manager, void *config, const char *project_dir);
 
 // module loading

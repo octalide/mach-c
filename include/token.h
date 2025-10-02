@@ -60,6 +60,7 @@ typedef enum TokenKind
     TOKEN_DOT,        // .
     TOKEN_COMMA,      // ,
     TOKEN_UNDERSCORE, // _
+    TOKEN_ELLIPSIS,   // ...
 
     // operators - single character
     TOKEN_PLUS,      // +

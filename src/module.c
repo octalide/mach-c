@@ -105,6 +105,9 @@ void module_manager_init(ModuleManager *manager)
     manager->modules      = calloc(manager->capacity, sizeof(Module *));
     manager->search_paths = NULL;
     manager->search_count = 0;
+    manager->alias_names  = NULL;
+    manager->alias_paths  = NULL;
+    manager->alias_count  = 0;
     manager->config       = NULL;
     manager->project_dir  = NULL;
 
@@ -135,6 +138,15 @@ void module_manager_dnit(ModuleManager *manager)
     }
     free(manager->search_paths);
 
+    // clean up aliases
+    for (int i = 0; i < manager->alias_count; i++)
+    {
+        free(manager->alias_names[i]);
+        free(manager->alias_paths[i]);
+    }
+    free(manager->alias_names);
+    free(manager->alias_paths);
+
     // clean up errors
     module_error_list_dnit(&manager->errors);
 }
@@ -146,6 +158,17 @@ void module_manager_add_search_path(ModuleManager *manager, const char *path)
     manager->search_count++;
 }
 
+void module_manager_add_alias(ModuleManager *manager, const char *name, const char *base_dir)
+{
+    if (!name || !base_dir)
+        return;
+    manager->alias_names = realloc(manager->alias_names, (manager->alias_count + 1) * sizeof(char *));
+    manager->alias_paths = realloc(manager->alias_paths, (manager->alias_count + 1) * sizeof(char *));
+    manager->alias_names[manager->alias_count] = strdup(name);
+    manager->alias_paths[manager->alias_count] = strdup(base_dir);
+    manager->alias_count++;
+}
+
 void module_manager_set_config(ModuleManager *manager, void *config, const char *project_dir)
 {
     manager->config      = config;
@@ -154,9 +177,89 @@ void module_manager_set_config(ModuleManager *manager, void *config, const char 
 
 char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
 {
-    if (!(manager->config && manager->project_dir))
+    if (!module_fqn)
         return NULL;
-    return config_resolve_module_fqn((ProjectConfig *)manager->config, manager->project_dir, module_fqn);
+
+    // prefer config resolution if available
+    if (manager->config && manager->project_dir)
+        return config_resolve_module_fqn((ProjectConfig *)manager->config, manager->project_dir, module_fqn);
+
+    const char *dot      = strchr(module_fqn, '.');
+    size_t      head_len = dot ? (size_t)(dot - module_fqn) : strlen(module_fqn);
+    const char  *tail    = dot ? dot + 1 : NULL;
+
+    // aliases: name -> base dir
+    for (int i = 0; i < manager->alias_count; i++)
+    {
+        if (strlen(manager->alias_names[i]) == head_len && strncmp(manager->alias_names[i], module_fqn, head_len) == 0)
+        {
+            const char *base = manager->alias_paths[i];
+            size_t      base_len = strlen(base);
+            if (tail)
+            {
+                size_t tail_len = strlen(tail);
+                char  *tail_buf = malloc(tail_len + 1);
+                if (!tail_buf) return NULL;
+                memcpy(tail_buf, tail, tail_len + 1);
+                for (char *p = tail_buf; *p; ++p) if (*p == '.') *p = '/';
+                size_t path_len = base_len + 1 + tail_len + 5 + 1; // '/' + tail + '.mach' + NUL
+                char  *path = malloc(path_len);
+                if (!path) { free(tail_buf); return NULL; }
+                snprintf(path, path_len, "%s/%s.mach", base, tail_buf);
+                free(tail_buf);
+                FILE *f = fopen(path, "r");
+                if (f) { fclose(f); return path; }
+                free(path);
+                return NULL;
+            }
+            else
+            {
+                size_t path_len = base_len + 1 + 4 + 5 + 1; // '/' + 'main' + '.mach' + NUL
+                char  *path = malloc(path_len);
+                if (!path) return NULL;
+                snprintf(path, path_len, "%s/main.mach", base);
+                FILE *f = fopen(path, "r");
+                if (f) { fclose(f); return path; }
+                free(path);
+                return NULL;
+            }
+        }
+    }
+
+    // search paths: base/name/(tail or main).mach
+    for (int si = 0; si < manager->search_count; si++)
+    {
+        const char *base = manager->search_paths[si];
+        size_t      base_len = strlen(base);
+        if (tail)
+        {
+            size_t tail_len = strlen(tail);
+            char  *tail_buf = malloc(tail_len + 1);
+            if (!tail_buf) continue;
+            memcpy(tail_buf, tail, tail_len + 1);
+            for (char *p = tail_buf; *p; ++p) if (*p == '.') *p = '/';
+            size_t path_len = base_len + 1 + head_len + 1 + tail_len + 5 + 1;
+            char  *path = malloc(path_len);
+            if (!path) { free(tail_buf); continue; }
+            snprintf(path, path_len, "%s/%.*s/%s.mach", base, (int)head_len, module_fqn, tail_buf);
+            free(tail_buf);
+            FILE *f = fopen(path, "r");
+            if (f) { fclose(f); return path; }
+            free(path);
+        }
+        else
+        {
+            size_t path_len = base_len + 1 + head_len + 1 + 4 + 5 + 1;
+            char  *path = malloc(path_len);
+            if (!path) continue;
+            snprintf(path, path_len, "%s/%.*s/main.mach", base, (int)head_len, module_fqn);
+            FILE *f = fopen(path, "r");
+            if (f) { fclose(f); return path; }
+            free(path);
+        }
+    }
+
+    return NULL;
 }
 
 Module *module_manager_find_module(ModuleManager *manager, const char *name)
@@ -237,7 +340,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
             return NULL;
         }
 
-        printf("parsing `%s`... ", file_path);
+    // no info output
 
         // read and parse module
         source = read_file(file_path);
@@ -254,7 +357,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
 
     if (is_target_builtin)
     {
-        printf("parsing `%s`... ", file_path);
+        // no info output
     }
 
     Lexer lexer;
@@ -301,7 +404,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         return NULL;
     }
 
-    printf("done\n");
+    // no info output
 
     // create module
     Module *module = malloc(sizeof(Module));
@@ -729,8 +832,7 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
                 continue;
             }
 
-            printf("compiling dependency '%s'...\n", module->name);
-            fflush(stdout);
+            // no info output
 
             if (!compile_module_to_object(manager, module, output_dir, opt_level, no_pie))
             {

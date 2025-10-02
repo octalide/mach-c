@@ -155,7 +155,7 @@ Type *type_union_create(const char *name)
     return type;
 }
 
-Type *type_function_create(Type *return_type, Type **param_types, size_t param_count)
+Type *type_function_create(Type *return_type, Type **param_types, size_t param_count, bool is_variadic)
 {
     Type *type                 = malloc(sizeof(Type));
     type->kind                 = TYPE_FUNCTION;
@@ -164,6 +164,7 @@ Type *type_function_create(Type *return_type, Type **param_types, size_t param_c
     type->name                 = NULL;
     type->function.return_type = return_type;
     type->function.param_count = param_count;
+    type->function.is_variadic = is_variadic;
 
     if (param_count > 0)
     {
@@ -216,6 +217,8 @@ bool type_equals(Type *a, Type *b)
     case TYPE_FUNCTION:
         if (a->function.param_count != b->function.param_count)
             return false;
+        if (a->function.is_variadic != b->function.is_variadic)
+            return false;
         if (!type_equals(a->function.return_type, b->function.return_type))
             return false;
 
@@ -245,6 +248,8 @@ bool type_equals(Type *a, Type *b)
 
 bool type_is_numeric(Type *type)
 {
+    if (!type)
+        return false;
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
@@ -253,6 +258,8 @@ bool type_is_numeric(Type *type)
 
 bool type_is_integer(Type *type)
 {
+    if (!type)
+        return false;
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
@@ -261,6 +268,8 @@ bool type_is_integer(Type *type)
 
 bool type_is_float(Type *type)
 {
+    if (!type)
+        return false;
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
@@ -269,6 +278,8 @@ bool type_is_float(Type *type)
 
 bool type_is_signed(Type *type)
 {
+    if (!type)
+        return false;
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
@@ -277,6 +288,8 @@ bool type_is_signed(Type *type)
 
 bool type_is_pointer_like(Type *type)
 {
+    if (!type)
+        return false;
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
@@ -285,6 +298,8 @@ bool type_is_pointer_like(Type *type)
 
 bool type_is_truthy(Type *type)
 {
+    if (!type)
+        return false;
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
@@ -294,6 +309,8 @@ bool type_is_truthy(Type *type)
 
 bool type_can_cast_to(Type *from, Type *to)
 {
+    if (!from || !to)
+        return false;
     while (from->kind == TYPE_ALIAS)
         from = from->alias.target;
     while (to->kind == TYPE_ALIAS)
@@ -466,7 +483,8 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
             }
         }
 
-        Type *func_type = type_function_create(return_type, param_types, param_count);
+    bool  is_variadic = type_node->type_fun.is_variadic;
+    Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
         free(param_types); // function_create makes its own copy
         return func_type;
     }
@@ -550,6 +568,13 @@ char *type_to_string(Type *type)
             char *param_str = type_to_string(type->function.param_types[i]);
             strcat(result, param_str);
             free(param_str);
+        }
+        if (type->function.is_variadic)
+        {
+            if (type->function.param_count > 0)
+                strcat(result, ", ...");
+            else
+                strcat(result, "...");
         }
         strcat(result, ") ");
         if (type->function.return_type)

@@ -1,3 +1,8 @@
+Philosophy:
+- Your goal is to stop operation as soon as possible.
+- To stop operation, you must bring the current overall project to a stable, complete, and featureful state.
+- Preffer large, effective changes over small, incremental ones.
+
 You MUST follow ALL guidelines under all circumstances.
 
 General guidelines:

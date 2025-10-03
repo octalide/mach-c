@@ -342,12 +342,6 @@ void config_dnit(ProjectConfig *config)
     }
     free(config->deps);
 
-    for (int i = 0; i < config->lib_dep_count; i++)
-    {
-        free(config->lib_dependencies[i]);
-    }
-    free(config->lib_dependencies);
-
     for (int i = 0; i < config->module_alias_count; i++)
     {
         free(config->module_aliases[i].name);
@@ -871,14 +865,7 @@ bool config_save(ProjectConfig *config, const char *config_path)
     }
 
     // save library dependencies
-    if (config->lib_dep_count > 0)
-    {
-        fprintf(file, "\n[lib-dependencies]\n");
-        for (int i = 0; i < config->lib_dep_count; i++)
-        {
-            fprintf(file, "\"%s\" = { path = \"lib\" }\n", config->lib_dependencies[i]);
-        }
-    }
+    // no lib-dependencies block
 
     fclose(file);
     return true;
@@ -1604,54 +1591,4 @@ char *config_resolve_module_fqn(ProjectConfig *config, const char *project_dir, 
 }
 
 // simple placeholder lock writing (hashing not yet implemented)
-bool config_write_lock(ProjectConfig *config, const char *project_dir, const char *lock_path)
-{
-    (void)project_dir;
-    FILE *f = fopen(lock_path, "w");
-    if (!f)
-        return false;
-    fprintf(f, "# mach.lock (prototype)\n");
-    for (int i = 0; i < config->dep_count; i++)
-    {
-        DepSpec *d = config->deps[i];
-        fprintf(f, "%s path=%s\n", d->name, d->path);
-    }
-    fclose(f);
-    return true;
-}
-
-bool config_load_lock(ProjectConfig *config, const char *lock_path)
-{
-    (void)config;
-    (void)lock_path;
-    return true;
-}
-
-bool config_add_lib_dependency(ProjectConfig *config, const char *lib_name, const char *lib_path)
-{
-    if (!config || !lib_name || !lib_path)
-        return false;
-
-    // check if lib dependency already exists
-    for (int i = 0; i < config->lib_dep_count; i++)
-    {
-        if (strcmp(config->lib_dependencies[i], lib_name) == 0)
-            return false; // already exists
-    }
-
-    // resize array if needed
-    if (config->lib_dep_count % 8 == 0)
-    {
-        int    new_capacity = config->lib_dep_count + 8;
-        char **new_deps     = realloc(config->lib_dependencies, new_capacity * sizeof(char *));
-        if (!new_deps)
-            return false;
-        config->lib_dependencies = new_deps;
-    }
-
-    // add lib dependency
-    config->lib_dependencies[config->lib_dep_count] = strdup(lib_name);
-    config->lib_dep_count++;
-
-    return true;
-}
+// lockfile and lib-dependency APIs removed

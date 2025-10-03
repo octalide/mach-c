@@ -55,10 +55,8 @@ typedef struct ProjectConfig
     int            target_count; // number of targets
 
     // explicit dependencies
-    DepSpec **deps;             // dependency specs (excluding root project)
-    int       dep_count;        // number of deps
-    char    **lib_dependencies; // library dependencies (binary/object files)
-    int       lib_dep_count;    // number of library dependencies
+    DepSpec **deps;      // dependency specs (excluding root project)
+    int       dep_count; // number of deps
 
     // runtime configuration
     char *runtime_path;   // custom runtime path (deprecated, use runtime_module)
@@ -139,10 +137,6 @@ char *config_expand_module_path(ProjectConfig *config, const char *module_path);
 
 // canonical module resolution: given FQN pkg.segment1.segment2 -> absolute file path (.mach)
 char *config_resolve_module_fqn(ProjectConfig *config, const char *project_dir, const char *fqn);
-
-// lock file support (simple directory hash) - optional failure is non-fatal
-bool config_write_lock(ProjectConfig *config, const char *project_dir, const char *lock_path);
-bool config_load_lock(ProjectConfig *config, const char *lock_path); // stub for future
 
 // directory management
 bool config_ensure_directories(ProjectConfig *config, const char *project_dir);

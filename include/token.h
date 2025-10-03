@@ -31,6 +31,7 @@ typedef enum TokenKind
     TOKEN_KW_CNT, // cnt
     TOKEN_KW_BRK, // brk
     TOKEN_KW_ASM, // asm
+    TOKEN_KW_NIL, // nil
 
     // type keywords
     // TOKEN_TYPE_PTR, // untyped pointer

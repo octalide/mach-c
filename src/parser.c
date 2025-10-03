@@ -285,8 +285,6 @@ static Precedence get_binary_precedence(TokenKind kind)
         return PREC_ASSIGNMENT;
     case TOKEN_PIPE_PIPE:
         return PREC_OR;
-    case TOKEN_KW_OR:
-        return PREC_OR;
     case TOKEN_AMPERSAND_AMPERSAND:
         return PREC_AND;
     case TOKEN_PIPE:
@@ -371,6 +369,22 @@ AstNode *parser_parse_stmt_top(Parser *parser)
 
     switch (parser->current->kind)
     {
+    case TOKEN_KW_NIL:
+    {
+        // parse 'nil' as the unary expression '?0' for exact equivalence
+        AstNode *zero = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
+        if (!zero) { return NULL; }
+        zero->lit_expr.kind    = TOKEN_LIT_INT;
+        zero->lit_expr.int_val = 0;
+
+        AstNode *un = parser_alloc_node(parser, AST_EXPR_UNARY, parser->current);
+        if (!un) { ast_node_dnit(zero); free(zero); return NULL; }
+        un->unary_expr.op   = TOKEN_QUESTION;
+        un->unary_expr.expr = zero;
+
+        parser_advance(parser);
+        return un;
+    }
     case TOKEN_KW_USE:
         result = parser_parse_stmt_use(parser);
         break;

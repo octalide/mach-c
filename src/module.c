@@ -98,6 +98,88 @@ static char *module_manager_expand_module(ModuleManager *manager, const char *mo
     return config_expand_module_path((ProjectConfig *)manager->config, module_fqn);
 }
 
+// build a best-guess file path for diagnostics even if the file doesn't exist
+static char *module_guess_file_path(ModuleManager *manager, const char *module_fqn)
+{
+    if (!module_fqn)
+        return NULL;
+
+    // if config is present, try config-based resolve (even if it may point to non-existent)
+    if (manager->config && manager->project_dir)
+    {
+        char *guess = config_resolve_module_fqn((ProjectConfig *)manager->config, manager->project_dir, module_fqn);
+        if (guess)
+            return guess;
+    }
+
+    const char *dot      = strchr(module_fqn, '.');
+    size_t      head_len = dot ? (size_t)(dot - module_fqn) : strlen(module_fqn);
+    const char  *tail    = dot ? dot + 1 : NULL;
+
+    // alias paths take precedence
+    for (int i = 0; i < manager->alias_count; i++)
+    {
+        if (strlen(manager->alias_names[i]) == head_len && strncmp(manager->alias_names[i], module_fqn, head_len) == 0)
+        {
+            const char *base = manager->alias_paths[i];
+            size_t      base_len = strlen(base);
+            if (tail)
+            {
+                size_t tail_len = strlen(tail);
+                char  *tail_buf = malloc(tail_len + 1);
+                if (!tail_buf) return NULL;
+                memcpy(tail_buf, tail, tail_len + 1);
+                for (char *p = tail_buf; *p; ++p) if (*p == '.') *p = '/';
+                size_t path_len = base_len + 1 + tail_len + 5 + 1;
+                char  *path     = malloc(path_len);
+                if (!path) { free(tail_buf); return NULL; }
+                snprintf(path, path_len, "%s/%s.mach", base, tail_buf);
+                free(tail_buf);
+                return path;
+            }
+            else
+            {
+                size_t path_len = base_len + 1 + 4 + 5 + 1; // "/" + "main" + ".mach" + NUL
+                char  *path     = malloc(path_len);
+                if (!path) return NULL;
+                snprintf(path, path_len, "%s/main.mach", base);
+                return path;
+            }
+        }
+    }
+
+    // fallback to first search path, if any
+    if (manager->search_count > 0)
+    {
+        const char *base = manager->search_paths[0];
+        size_t      base_len = strlen(base);
+        if (tail)
+        {
+            size_t tail_len = strlen(tail);
+            char  *tail_buf = malloc(tail_len + 1);
+            if (!tail_buf) return NULL;
+            memcpy(tail_buf, tail, tail_len + 1);
+            for (char *p = tail_buf; *p; ++p) if (*p == '.') *p = '/';
+            size_t path_len = base_len + 1 + head_len + 1 + tail_len + 5 + 1;
+            char  *path     = malloc(path_len);
+            if (!path) { free(tail_buf); return NULL; }
+            snprintf(path, path_len, "%s/%.*s/%s.mach", base, (int)head_len, module_fqn, tail_buf);
+            free(tail_buf);
+            return path;
+        }
+        else
+        {
+            size_t path_len = base_len + 1 + head_len + 1 + 4 + 5 + 1;
+            char  *path     = malloc(path_len);
+            if (!path) return NULL;
+            snprintf(path, path_len, "%s/%.*s/main.mach", base, (int)head_len, module_fqn);
+            return path;
+        }
+    }
+
+    return NULL;
+}
+
 void module_manager_init(ModuleManager *manager)
 {
     manager->capacity     = 32;
@@ -334,7 +416,9 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         file_path = module_path_to_file_path(manager, canonical);
         if (!file_path)
         {
-            module_error_list_add(&manager->errors, canonical, "<unknown>", "Could not find module file");
+            char *guess = module_guess_file_path(manager, canonical);
+            module_error_list_add(&manager->errors, canonical, guess ? guess : "<unknown>", "Could not find module file");
+            if (guess) free(guess);
             manager->had_error = true;
             free(canonical);
             return NULL;

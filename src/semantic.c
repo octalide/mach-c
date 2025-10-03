@@ -1365,7 +1365,6 @@ Type *semantic_analyze_binary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     case TOKEN_GREATER_EQUAL:
     case TOKEN_AMPERSAND_AMPERSAND:
     case TOKEN_PIPE_PIPE:
-    case TOKEN_KW_OR:
         // comparison/logical operators return u8 (bool)
         result_type = type_u8();
         break;
@@ -1435,7 +1434,7 @@ Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     switch (expr->unary_expr.op)
     {
     case TOKEN_QUESTION:
-        // treat '?0' as null pointer literal
+            // treat '?0' as null pointer literal request
         if (expr->unary_expr.expr->kind == AST_EXPR_LIT && expr->unary_expr.expr->lit_expr.kind == TOKEN_LIT_INT && expr->unary_expr.expr->lit_expr.int_val == 0)
         {
             expr->type = type_ptr();
@@ -1833,6 +1832,13 @@ Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *e
         {
             unsigned long long value = expr->lit_expr.int_val;
             Type              *int_type;
+
+            // allow 0 (including 'nil') to adopt expected pointer type in context
+            if (expected_type && type_is_pointer_like(expected_type) && value == 0)
+            {
+                expr->type = expected_type;
+                return expected_type;
+            }
 
             // if we have an expected integer type and value fits, use it
             if (expected_type && type_is_integer(expected_type))

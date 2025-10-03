@@ -57,7 +57,6 @@ static bool codegen_eval_const_i64(CodegenContext *ctx, AstNode *expr, int64_t *
             if (!codegen_eval_const_i64(ctx, expr->binary_expr.left, &l) || !codegen_eval_const_i64(ctx, expr->binary_expr.right, &r)) return false;
             *out = (l == r) ? 1 : 0; return true;
         case TOKEN_PIPE_PIPE:
-        case TOKEN_KW_OR:
             if (!codegen_eval_const_i64(ctx, expr->binary_expr.left, &l) || !codegen_eval_const_i64(ctx, expr->binary_expr.right, &r)) return false;
             *out = ((l != 0) || (r != 0)) ? 1 : 0; return true;
         case TOKEN_AMPERSAND_AMPERSAND:

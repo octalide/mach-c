@@ -65,17 +65,16 @@ struct CodegenContext
     bool  no_pie;       // disable position independent executable
     bool  is_runtime;   // true when compiling the runtime module
     bool  use_runtime;  // true when linking runtime alongside the entry
-    char *package_name; // root package name for mangling
+    char *package_name; // selected package name for mangling (optional)
 
     // source context for diagnostics
     const char *source_file; // current file being compiled
     Lexer      *source_lexer; // lexer for mapping pos->line/column
 
-    // variadic function support (active only inside current variadic function)
-    LLVMValueRef *current_varargs;      // array of allocas pointing to each extra argument
-    int           current_vararg_count; // number of variadic arguments
-    int           current_vararg_capacity;
-    size_t        current_fixed_param_count; // number of fixed parameters in current function
+    // variadic function support (Mach ABI)
+    LLVMValueRef current_vararg_count_value; // u64 count parameter passed to current function (null if none)
+    LLVMValueRef current_vararg_array;       // i8** pointing to packed variadic argument slots
+    size_t       current_fixed_param_count;  // number of fixed parameters in current function
 };
 
 // context lifecycle
@@ -128,7 +127,7 @@ LLVMValueRef codegen_expr_struct(CodegenContext *ctx, AstNode *expr);
 
 // utility functions
 LLVMValueRef codegen_create_alloca(CodegenContext *ctx, LLVMTypeRef type, const char *name);
-LLVMValueRef codegen_load_if_needed(CodegenContext *ctx, LLVMValueRef value, Type *type);
+LLVMValueRef codegen_load_if_needed(CodegenContext *ctx, LLVMValueRef value, Type *type, AstNode *source_expr);
 bool         codegen_is_lvalue(AstNode *expr);
 
 #endif

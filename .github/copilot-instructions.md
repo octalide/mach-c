@@ -13,7 +13,6 @@ General guidelines:
 - Prioritize modifying existing code over creating new code.
 - Follow existing code styles and patterns.
 - Follow instructions carefully.
-- Do not attempt to execute code to test it. If you need to test code, ask the user to do so.
 - Do NOT, under any circumstances, leave written code unimplemented.
 - Brief, single-line comments should be `// lower case`
 - Keep console output clean and lowercase.

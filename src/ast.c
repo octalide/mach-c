@@ -42,7 +42,6 @@ void ast_node_dnit(AstNode *node)
 
     case AST_STMT_USE:
         free(node->use_stmt.module_path);
-        free(node->use_stmt.alias);
         break;
 
     case AST_STMT_EXT:
@@ -448,12 +447,7 @@ void ast_print(AstNode *node, int indent)
         }
         break;
     case AST_STMT_USE:
-        printf("USE %s", node->use_stmt.module_path);
-        if (node->use_stmt.alias)
-        {
-            printf(" as %s", node->use_stmt.alias);
-        }
-        printf("\n");
+        printf("USE %s\n", node->use_stmt.module_path);
         break;
 
     case AST_STMT_EXT:
@@ -897,12 +891,7 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         }
         break;
     case AST_STMT_USE:
-        fprintf(file, "USE %s", node->use_stmt.module_path);
-        if (node->use_stmt.alias)
-        {
-            fprintf(file, " as %s", node->use_stmt.alias);
-        }
-        fprintf(file, "\n");
+        fprintf(file, "USE %s\n", node->use_stmt.module_path);
         break;
     case AST_STMT_EXT:
         fprintf(file, "EXT %s:\n", node->ext_stmt.name);

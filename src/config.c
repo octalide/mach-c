@@ -769,12 +769,6 @@ ProjectConfig *config_load_from_dir(const char *dir_path)
         closedir(d);
     }
 
-    // if no runtime configured but std is present, default runtime to std.runtime
-    if (!cfg->runtime_module && config_has_dep(cfg, "std"))
-    {
-        cfg->runtime_module = strdup("std.runtime");
-    }
-
     return cfg;
 }
 
@@ -1384,8 +1378,11 @@ char *config_expand_module_path(ProjectConfig *config, const char *module_path)
     if (!config)
         return strdup(module_path);
 
-    if (strncmp(module_path, "dep.", 4) == 0)
-        return strdup(module_path);
+    // special-case builtin target module to avoid prefixing with project or dep
+    if (strcmp(module_path, "target") == 0)
+        return strdup("target");
+
+    // legacy 'dep.' prefix removed
 
     size_t project_name_len = config->name ? strlen(config->name) : 0;
     if (project_name_len > 0 && strncmp(module_path, config->name, project_name_len) == 0)
@@ -1436,15 +1433,7 @@ char *config_expand_module_path(ProjectConfig *config, const char *module_path)
 
     if (!dot)
     {
-        if (config_has_dep(config, head))
-        {
-            size_t dep_len = strlen(head);
-            size_t total   = 4 + dep_len + 1;
-            result         = malloc(total);
-            if (result)
-                snprintf(result, total, "dep.%s", head);
-        }
-        else if (project_name_len > 0)
+        if (project_name_len > 0)
         {
             size_t tail_len = strlen(module_path);
             size_t total    = project_name_len + 1 + tail_len + 1;
@@ -1461,20 +1450,9 @@ char *config_expand_module_path(ProjectConfig *config, const char *module_path)
         return result;
     }
 
-    if (config_has_dep(config, head))
-    {
-        size_t dep_len  = strlen(head);
-        size_t tail_len = strlen(dot + 1);
-        size_t total    = 4 + dep_len + 1 + tail_len + 1;
-        result          = malloc(total);
-        if (result)
-            snprintf(result, total, "dep.%s.%s", head, dot + 1);
-        free(head);
-        return result;
-    }
-
+    // no dependency prefixing; assume already fully qualified - return original path
     free(head);
-    return NULL;
+    return strdup(module_path);
 }
 
 bool config_ensure_dep_loaded(ProjectConfig *config, const char *project_dir, DepSpec *dep)
@@ -1557,9 +1535,7 @@ char *config_resolve_module_fqn(ProjectConfig *config, const char *project_dir, 
         return NULL;
 
     const char *cursor = normalized;
-    if (strncmp(cursor, "dep.", 4) == 0)
-        cursor += 4; // skip dep prefix
-    const char *dot = strchr(cursor, '.');
+    const char *dot    = strchr(cursor, '.');
     if (!dot)
     {
         free(normalized);

@@ -13,19 +13,79 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <limits.h>
 
-// helper: sanitize module path to symbol-safe package name
-static char *sanitize_pkg(const char *s) {
-    if (!s) return NULL;
-    size_t len = strlen(s);
-    char *buf = malloc(len + 1);
-    if (!buf) return NULL;
-    for (size_t i = 0; i < len; i++) {
-        char c = s[i];
-        buf[i] = (c == '.' || c == '/' || c == ':') ? '_' : c;
+typedef struct
+{
+    char **items;
+    int    count;
+    int    cap;
+} StringVec;
+
+typedef struct
+{
+    char **names;
+    char **dirs;
+    int    count;
+    int    cap;
+} AliasVec;
+
+static char *derive_module_name_from_aliases(const char *filename, const AliasVec *aliases)
+{
+    if (!filename || !aliases || aliases->count == 0)
+        return NULL;
+
+    char *abs_file = realpath(filename, NULL);
+    if (!abs_file)
+        return NULL;
+
+    char *module_name = NULL;
+    for (int i = 0; i < aliases->count && !module_name; i++)
+    {
+        char *abs_dir = realpath(aliases->dirs[i], NULL);
+        if (!abs_dir)
+            continue;
+
+        size_t dir_len = strlen(abs_dir);
+        size_t file_len = strlen(abs_file);
+        if (file_len >= dir_len && strncmp(abs_file, abs_dir, dir_len) == 0 &&
+            (abs_file[dir_len] == '/' || abs_file[dir_len] == '\\' || abs_file[dir_len] == '\0'))
+        {
+            const char *rel = abs_file + dir_len;
+            if (*rel == '/' || *rel == '\\')
+                rel++;
+
+            size_t rel_len = strlen(rel);
+            if (rel_len >= 5 && strcmp(rel + rel_len - 5, ".mach") == 0)
+                rel_len -= 5;
+
+            size_t alias_len = strlen(aliases->names[i]);
+            size_t total_len = alias_len + (rel_len > 0 ? (1 + rel_len) : 0);
+            module_name = malloc(total_len + 1);
+            if (module_name)
+            {
+                memcpy(module_name, aliases->names[i], alias_len);
+                size_t pos = alias_len;
+                if (rel_len > 0)
+                {
+                    module_name[pos++] = '.';
+                    for (size_t j = 0; j < rel_len; j++)
+                    {
+                        char c = rel[j];
+                        if (c == '/' || c == '\\')
+                            c = '.';
+                        module_name[pos++] = c;
+                    }
+                }
+                module_name[pos] = '\0';
+            }
+        }
+
+        free(abs_dir);
     }
-    buf[len] = '\0';
-    return buf;
+
+    free(abs_file);
+    return module_name;
 }
 
 static char *read_file_simple(const char *path)
@@ -56,7 +116,57 @@ static char *dirname_dup(const char *path)
 
 static char *find_project_root(const char *start_path)
 {
-    // walk up from directory of start_path until a mach.toml is found or root reached
+    char resolved[PATH_MAX];
+    if (realpath(start_path, resolved))
+    {
+        struct stat st;
+        if (stat(resolved, &st) != 0)
+            return strdup(".");
+
+        if (!S_ISDIR(st.st_mode))
+        {
+            char *slash = strrchr(resolved, '/');
+            if (slash)
+                *slash = '\0';
+        }
+
+        if (resolved[0] == '\0')
+            strcpy(resolved, "/");
+
+        char *dir = strdup(resolved);
+        if (!dir)
+            return NULL;
+
+        for (int depth = 0; depth < 64; depth++)
+        {
+            char cfg[PATH_MAX];
+            snprintf(cfg, sizeof(cfg), "%s/mach.toml", dir);
+            if (file_exists(cfg))
+                return dir;
+
+            if (strcmp(dir, "/") == 0 || dir[0] == '\0')
+                break;
+
+            char *slash = strrchr(dir, '/');
+            if (!slash)
+            {
+                dir[0] = '\0';
+            }
+            else if (slash == dir)
+            {
+                slash[1] = '\0';
+            }
+            else
+            {
+                *slash = '\0';
+            }
+        }
+
+        free(dir);
+        return strdup(".");
+    }
+
+    // fallback to relative walk if realpath fails
     char *dir = dirname_dup(start_path);
     for (int i = 0; i < 16 && dir; i++)
     {
@@ -64,7 +174,6 @@ static char *find_project_root(const char *start_path)
         snprintf(cfg, sizeof(cfg), "%s/mach.toml", dir);
         if (file_exists(cfg))
             return dir;
-        // go up one
         const char *slash = strrchr(dir, '/');
         if (!slash) { free(dir); return strdup("."); }
         if (slash == dir) { dir[1] = '\0'; return dir; }
@@ -109,12 +218,14 @@ void mach_print_usage(const char *program_name)
     fprintf(stderr, "  -o <file>     set output file name\n");
     fprintf(stderr, "  -O<level>     optimization level (0-3, default: 2)\n");
     fprintf(stderr, "  --emit-obj    emit object file (.o file)\n");
+    fprintf(stderr, "  --emit-ast[=<file>]  dump parsed AST for debugging\n");
+    fprintf(stderr, "  --emit-ir[=<file>]   dump LLVM IR\n");
+    fprintf(stderr, "  --emit-asm[=<file>]  dump target assembly\n");
     fprintf(stderr, "  --no-link     don't create executable (just compile)\n");
     fprintf(stderr, "  --no-pie      disable position independent executable\n");
     fprintf(stderr, "  --link <obj>  link with additional object file\n");
     fprintf(stderr, "  -I <dir>      add module search directory\n");
     fprintf(stderr, "  -M n=dir      map module prefix 'n' to base directory 'dir'\n");
-    fprintf(stderr, "  --package <n> set explicit package name (for symbol mangling)\n");
 }
 
 int mach_cmd_build(int argc, char **argv)
@@ -122,11 +233,13 @@ int mach_cmd_build(int argc, char **argv)
     if (argc < 3) { mach_print_usage(argv[0]); return 1; }
 
     const char *filename = argv[2];
-    const char *output_file = NULL; int opt_level = 2; int link_exe = 1; int no_pie = 0; const char *package_name_opt = NULL;
+    const char *output_file = NULL; int opt_level = 2; int link_exe = 1; int no_pie = 0;
+    int emit_ast = 0; int emit_ir = 0; int emit_asm = 0;
+    const char *emit_ast_path = NULL; const char *emit_ir_path = NULL; const char *emit_asm_path = NULL;
 
-    typedef struct { char **items; int count; int cap; } Vec;
-    Vec inc = (Vec){0}; Vec link_objs = (Vec){0};
-    typedef struct { char **names; char **dirs; int count; int cap; } AVec; AVec al = (AVec){0};
+    StringVec inc       = (StringVec){0};
+    StringVec link_objs = (StringVec){0};
+    AliasVec  al        = (AliasVec){0};
     #define VPUSH(v, s) do { if ((v).count == (v).cap) { int n = (v).cap? (v).cap*2:4; void *nn = realloc((v).items, n*sizeof(char*)); if(!nn){fprintf(stderr,"error: oom\n"); return 1;} (v).items = nn; (v).cap = n;} (v).items[(v).count++] = (s); } while(0)
     #define APUSH(v, n, d) do { if ((v).count == (v).cap) { int ncap=(v).cap? (v).cap*2:4; char **nn=realloc((v).names,ncap*sizeof(char*)); char **nd=realloc((v).dirs,ncap*sizeof(char*)); if(!nn||!nd){fprintf(stderr,"error: oom\n"); return 1;} (v).names=nn; (v).dirs=nd; (v).cap=ncap;} (v).names[(v).count]=(n); (v).dirs[(v).count]=(d); (v).count++; } while(0)
 
@@ -135,14 +248,28 @@ int mach_cmd_build(int argc, char **argv)
         else if (strncmp(argv[i], "-O", 2) == 0) { opt_level = atoi(argv[i] + 2); if (opt_level<0||opt_level>3){fprintf(stderr,"error: invalid optimization level\n"); return 1;} }
         else if (strcmp(argv[i], "--emit-obj") == 0) { link_exe = 0; }
         else if (strcmp(argv[i], "--no-link") == 0) { link_exe = 0; }
+        else if (strncmp(argv[i], "--emit-ast", 10) == 0)
+        {
+            emit_ast = 1;
+            if (argv[i][10] == '=' && argv[i][11] != '\0')
+                emit_ast_path = argv[i] + 11;
+        }
+        else if (strncmp(argv[i], "--emit-ir", 9) == 0)
+        {
+            emit_ir = 1;
+            if (argv[i][9] == '=' && argv[i][10] != '\0')
+                emit_ir_path = argv[i] + 10;
+        }
+        else if (strncmp(argv[i], "--emit-asm", 10) == 0)
+        {
+            emit_asm = 1;
+            if (argv[i][10] == '=' && argv[i][11] != '\0')
+                emit_asm_path = argv[i] + 11;
+        }
         else if (strcmp(argv[i], "--no-pie") == 0) { no_pie = 1; }
         else if (strcmp(argv[i], "--link") == 0) {
             if (i + 1 < argc) { VPUSH(link_objs, argv[++i]); }
             else { fprintf(stderr, "error: --link requires an object file\n"); return 1; }
-        }
-        else if (strcmp(argv[i], "--package") == 0) {
-            if (i + 1 < argc) { package_name_opt = argv[++i]; }
-            else { fprintf(stderr, "error: --package requires a name\n"); return 1; }
         }
         else if (strcmp(argv[i], "-I") == 0) { if (i+1<argc) VPUSH(inc, argv[++i]); else { fprintf(stderr, "error: -I requires a directory\n"); return 1; } }
         else if (strcmp(argv[i], "-M") == 0) { if (i+1<argc) { char *a=argv[++i]; char *eq=strchr(a,'='); if(!eq){fprintf(stderr,"error: -M expects name=dir\n"); return 1;} *eq='\0'; APUSH(al, a, eq+1); } else { fprintf(stderr, "error: -M requires name=dir\n"); return 1; } }
@@ -154,10 +281,15 @@ int mach_cmd_build(int argc, char **argv)
     Lexer lx; lexer_init(&lx, source); Parser ps; parser_init(&ps, &lx); AstNode *prog = parser_parse_program(&ps);
     if (ps.had_error) { fprintf(stderr, "parsing failed with %d error(s):\n", ps.errors.count); parser_error_list_print(&ps.errors, &lx, filename); parser_dnit(&ps); lexer_dnit(&lx); free(source); return 1; }
 
+    char *module_name_override = derive_module_name_from_aliases(filename, &al);
+
     // find project root for config-based dependency resolution
     char *project_dir_root = find_project_root(filename);
 
+    const char *semantic_module_name = module_name_override ? module_name_override : filename;
+
     SemanticAnalyzer an; semantic_analyzer_init(&an);
+    semantic_analyzer_set_module(&an, semantic_module_name);
     // try to load project config (mach.toml) to enable long-term dependency resolution
     ProjectConfig *cfg = config_load_from_dir(project_dir_root);
     if (cfg)
@@ -179,57 +311,73 @@ int mach_cmd_build(int argc, char **argv)
         if (an.errors.count > 0) { fprintf(stderr, "semantic analysis failed with %d error(s):\n", an.errors.count); semantic_print_errors(&an, &lx, filename); }
         if (an.module_manager.had_error) { fprintf(stderr, "module loading failed with %d error(s):\n", an.module_manager.errors.count); module_error_list_print(&an.module_manager.errors); }
         if (cfg) { config_dnit(cfg); free(cfg); }
+        free(module_name_override);
         semantic_analyzer_dnit(&an); ast_node_dnit(prog); free(prog); parser_dnit(&ps); lexer_dnit(&lx); free(source); return 1; }
 
-    CodegenContext cg; codegen_context_init(&cg, filename, no_pie); cg.opt_level = opt_level; cg.use_runtime = (cfg && config_has_runtime_module(cfg)); cg.source_file = filename; cg.source_lexer = &lx;
-    
+    const char *config_target_name = NULL;
+    if (cfg)
+    {
+        TargetConfig *def_target = config_get_default_target(cfg);
+        if (def_target)
+            config_target_name = def_target->name;
+    }
+    if (cfg && config_target_name)
+    {
+        if (config_should_emit_ast(cfg, config_target_name)) emit_ast = 1;
+        if (config_should_emit_ir(cfg, config_target_name)) emit_ir = 1;
+        if (config_should_emit_asm(cfg, config_target_name)) emit_asm = 1;
+    }
 
-    // set package name: explicit flag > project config name > inferred from -M mapping and source path
-    if (package_name_opt) {
-        cg.package_name = strdup(package_name_opt);
-    } else if (cfg && cfg->name) {
-        cg.package_name = strdup(cfg->name);
-    } else if (al.count > 0) {
-        // try to infer module fqn from the first matching alias whose dir prefixes the filename
-    const char *best_alias = NULL;
-        size_t      best_len   = 0;
-        for (int i = 0; i < al.count; i++) {
-            const char *dir = al.dirs[i];
-            size_t dlen = strlen(dir);
-            if (strncmp(filename, dir, dlen) == 0 && (filename[dlen] == '/' || filename[dlen] == '\\' || filename[dlen] == '\0')) {
-                if (dlen > best_len) { best_len = dlen; best_alias = al.names[i]; }
-            }
+    char *auto_ast = NULL;
+    if (emit_ast)
+    {
+        const char *ast_path = emit_ast_path;
+        if (!ast_path || ast_path[0] == '\0')
+        {
+            auto_ast = create_out_name(filename, ".ast");
+            ast_path = auto_ast;
         }
-        if (best_alias) {
-            const char *rel = filename + best_len;
-            if (*rel == '/' || *rel == '\\') rel++;
-            size_t rlen = strlen(rel);
-            // strip extension .mach if present
-            size_t blen = rlen;
-            if (rlen > 5 && strcmp(rel + rlen - 5, ".mach") == 0) blen = rlen - 5;
-            char *rel_mod = malloc(blen + 1);
-            if (rel_mod) {
-                memcpy(rel_mod, rel, blen); rel_mod[blen] = '\0';
-                for (size_t i = 0; i < blen; i++) if (rel_mod[i] == '/' || rel_mod[i] == '\\') rel_mod[i] = '.';
-                size_t total = strlen(best_alias) + (blen ? 1 : 0) + blen + 1;
-                char *fqn = malloc(total);
-                if (fqn) {
-                    if (blen)
-                        snprintf(fqn, total, "%s.%s", best_alias, rel_mod);
-                    else
-                        snprintf(fqn, total, "%s", best_alias);
-                    cg.package_name = sanitize_pkg(fqn);
-                    free(fqn);
-                }
-                free(rel_mod);
-            }
+        if (!ast_emit(prog, ast_path))
+        {
+            fprintf(stderr, "error: failed to emit ast file '%s'\n", ast_path);
         }
     }
-    if (!codegen_generate(&cg, prog, &an)) { fprintf(stderr, "code generation failed:\n"); codegen_print_errors(&cg); codegen_context_dnit(&cg); if (cfg) { config_dnit(cfg); free(cfg); } semantic_analyzer_dnit(&an); ast_node_dnit(prog); free(prog); parser_dnit(&ps); lexer_dnit(&lx); free(source); return 1; }
 
-    const char *obj_file = NULL; char *auto_obj = NULL;
+    CodegenContext cg; codegen_context_init(&cg, semantic_module_name, no_pie); cg.opt_level = opt_level; cg.use_runtime = (cfg && config_has_runtime_module(cfg)); cg.source_file = filename; cg.source_lexer = &lx;
+
+    if (!codegen_generate(&cg, prog, &an)) { fprintf(stderr, "code generation failed:\n"); codegen_print_errors(&cg); codegen_context_dnit(&cg); if (cfg) { config_dnit(cfg); free(cfg); } free(module_name_override); semantic_analyzer_dnit(&an); ast_node_dnit(prog); free(prog); parser_dnit(&ps); lexer_dnit(&lx); free(source); free(auto_ast); return 1; }
+
+    const char *obj_file = NULL; char *auto_obj = NULL; char *auto_ir = NULL; char *auto_asm = NULL;
     if (!output_file) { auto_obj = create_out_name(filename, ".o"); obj_file = auto_obj; } else obj_file = output_file;
     if (!codegen_emit_object(&cg, obj_file)) { fprintf(stderr, "error: failed to write object file '%s'\n", obj_file); }
+
+    if (emit_ir)
+    {
+        const char *ir_path = emit_ir_path;
+        if (!ir_path || ir_path[0] == '\0')
+        {
+            auto_ir = create_out_name(filename, ".ll");
+            ir_path = auto_ir;
+        }
+        if (!codegen_emit_llvm_ir(&cg, ir_path))
+        {
+            fprintf(stderr, "error: failed to emit llvm ir '%s'\n", ir_path);
+        }
+    }
+
+    if (emit_asm)
+    {
+        const char *asm_path = emit_asm_path;
+        if (!asm_path || asm_path[0] == '\0')
+        {
+            auto_asm = create_out_name(filename, ".s");
+            asm_path = auto_asm;
+        }
+        if (!codegen_emit_assembly(&cg, asm_path))
+        {
+            fprintf(stderr, "error: failed to emit assembly '%s'\n", asm_path);
+        }
+    }
 
     // compile dependencies to objects if config is present
     char **dep_objs = NULL; int dep_count = 0; char dep_out_dir[1024]; dep_out_dir[0] = '\0';
@@ -241,7 +389,8 @@ int mach_cmd_build(int argc, char **argv)
         {
             fprintf(stderr, "error: failed to compile dependencies\n");
             if (cfg) { config_dnit(cfg); free(cfg); }
-            semantic_analyzer_dnit(&an); ast_node_dnit(prog); free(prog); parser_dnit(&ps); lexer_dnit(&lx); free(source); free(project_dir_root); free(auto_obj); codegen_context_dnit(&cg); return 1;
+            free(module_name_override);
+            semantic_analyzer_dnit(&an); ast_node_dnit(prog); free(prog); parser_dnit(&ps); lexer_dnit(&lx); free(source); free(project_dir_root); free(auto_obj); free(auto_ir); free(auto_asm); free(auto_ast); codegen_context_dnit(&cg); return 1;
         }
     module_manager_get_link_objects(&an.module_manager, &dep_objs, &dep_count);
     // no lockfile writing; reproducibility can be handled by VCS and pinned dep paths
@@ -278,6 +427,7 @@ int mach_cmd_build(int argc, char **argv)
     semantic_analyzer_dnit(&an);
     ast_node_dnit(prog); free(prog);
     parser_dnit(&ps); lexer_dnit(&lx);
-    free(source); free(auto_obj); free(project_dir_root);
+    free(source); free(auto_obj); free(auto_ir); free(auto_asm); free(auto_ast); free(project_dir_root);
+    free(module_name_override);
     return 0;
 }

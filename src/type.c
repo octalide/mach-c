@@ -9,6 +9,15 @@
 // builtin types storage
 static Type *g_builtin_types[TYPE_PTR + 1] = {0};
 
+typedef struct PointerCacheEntry
+{
+    Type                   *base;
+    Type                   *pointer;
+    struct PointerCacheEntry *next;
+} PointerCacheEntry;
+
+static PointerCacheEntry *g_pointer_cache = NULL;
+
 // type info table for builtin types
 static struct
 {
@@ -57,6 +66,16 @@ void type_system_dnit(void)
             g_builtin_types[i] = NULL;
         }
     }
+
+    PointerCacheEntry *entry = g_pointer_cache;
+    while (entry)
+    {
+        PointerCacheEntry *next = entry->next;
+        free(entry->pointer);
+        free(entry);
+        entry = next;
+    }
+    g_pointer_cache = NULL;
 }
 
 // builtin type accessors
@@ -111,12 +130,27 @@ Type *type_ptr(void)
 
 Type *type_pointer_create(Type *base)
 {
+    for (PointerCacheEntry *entry = g_pointer_cache; entry; entry = entry->next)
+    {
+        if (entry->base == base)
+        {
+            return entry->pointer;
+        }
+    }
+
     Type *type         = malloc(sizeof(Type));
     type->kind         = TYPE_POINTER;
     type->size         = 8; // 64-bit pointers
     type->alignment    = 8;
     type->name         = NULL;
     type->pointer.base = base;
+
+    PointerCacheEntry *entry = malloc(sizeof(PointerCacheEntry));
+    entry->base    = base;
+    entry->pointer = type;
+    entry->next    = g_pointer_cache;
+    g_pointer_cache = entry;
+
     return type;
 }
 

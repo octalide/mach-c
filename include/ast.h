@@ -92,9 +92,7 @@ struct AstNode
         // use statement
         struct
         {
-            char   *module_path;
-            char   *alias;      // null if unaliased
-            Symbol *module_sym; // filled during semantic analysis
+            char *module_path;
         } use_stmt;
 
         // external statement
@@ -104,6 +102,7 @@ struct AstNode
             char    *convention; // calling convention (e.g., "C")
             char    *symbol;     // target symbol name (default: same as name)
             AstNode *type;
+            bool     is_public;
         } ext_stmt;
 
         // type definition
@@ -111,6 +110,7 @@ struct AstNode
         {
             char    *name;
             AstNode *type;
+            bool     is_public;
         } def_stmt;
 
         // value/variable statement
@@ -120,6 +120,7 @@ struct AstNode
             AstNode *type; // explicit type or null
             AstNode *init; // initializer expression
             bool     is_val;
+            bool     is_public;
         } var_stmt;
 
         // function statement
@@ -129,8 +130,8 @@ struct AstNode
             AstList *params;
             AstNode *return_type; // null for no return
             AstNode *body;        // null for external functions
-            bool     no_mangle;   // true if #! mangle=false attribute present
             bool     is_variadic; // true if function has variadic arguments
+            bool     is_public;
         } fun_stmt;
 
         // struct statement
@@ -138,6 +139,7 @@ struct AstNode
         {
             char    *name;
             AstList *fields;
+            bool     is_public;
         } str_stmt;
 
         // union statement
@@ -145,6 +147,7 @@ struct AstNode
         {
             char    *name;
             AstList *fields;
+            bool     is_public;
         } uni_stmt;
 
         // field statement
@@ -269,6 +272,7 @@ struct AstNode
         {
             AstNode *type;  // element type
             AstList *elems; // elements
+            bool     is_slice_literal; // true when expressed as pointer+length literal
         } array_expr;
 
         // struct literal

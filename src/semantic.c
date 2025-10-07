@@ -21,6 +21,7 @@ void semantic_analyzer_init(SemanticAnalyzer *analyzer)
     analyzer->current_function = NULL;
     analyzer->loop_depth       = 0;
     analyzer->has_errors       = false;
+    analyzer->current_module_name = NULL;
 }
 
 void semantic_analyzer_dnit(SemanticAnalyzer *analyzer)
@@ -28,6 +29,71 @@ void semantic_analyzer_dnit(SemanticAnalyzer *analyzer)
     symbol_table_dnit(&analyzer->symbol_table);
     module_manager_dnit(&analyzer->module_manager);
     semantic_error_list_dnit(&analyzer->errors);
+    analyzer->current_module_name = NULL;
+}
+
+void semantic_analyzer_set_module(SemanticAnalyzer *analyzer, const char *module_name)
+{
+    if (!analyzer)
+        return;
+
+    analyzer->current_module_name = module_name;
+
+    if (!module_name)
+    {
+        analyzer->symbol_table.module_scope  = NULL;
+        analyzer->symbol_table.current_scope = analyzer->symbol_table.global_scope;
+        return;
+    }
+
+    Symbol *module_symbol = symbol_find_module(&analyzer->symbol_table, module_name);
+    if (!module_symbol)
+    {
+        module_symbol = symbol_create_module(module_name, module_name);
+        symbol_add_module(&analyzer->symbol_table, module_symbol);
+    }
+
+    if (module_symbol->module.scope)
+    {
+        module_symbol->module.scope->parent = analyzer->symbol_table.global_scope;
+        analyzer->symbol_table.module_scope = module_symbol->module.scope;
+        scope_enter(&analyzer->symbol_table, analyzer->symbol_table.module_scope);
+    }
+    else
+    {
+        analyzer->symbol_table.module_scope  = NULL;
+        analyzer->symbol_table.current_scope = analyzer->symbol_table.global_scope;
+    }
+}
+
+static bool semantic_in_top_level_scope(SemanticAnalyzer *analyzer)
+{
+    if (!analyzer)
+        return false;
+
+    if (analyzer->symbol_table.current_scope == analyzer->symbol_table.global_scope)
+        return true;
+
+    if (analyzer->symbol_table.module_scope && analyzer->symbol_table.current_scope == analyzer->symbol_table.module_scope)
+        return true;
+
+    return false;
+}
+
+static bool scope_has_module_import(Scope *scope, const char *module_name)
+{
+    if (!scope || !module_name)
+        return false;
+
+    for (Symbol *sym = scope->symbols; sym; sym = sym->next)
+    {
+        if (sym->is_imported && sym->import_module && strcmp(sym->import_module, module_name) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
@@ -229,10 +295,9 @@ bool semantic_analyze_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 
 bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    char       *module_path = stmt->use_stmt.module_path;
-    const char *alias       = stmt->use_stmt.alias;
+    char *module_path = stmt->use_stmt.module_path;
+    char *raw_path    = NULL;
 
-    char *raw_path = NULL;
     if (module_path)
     {
         raw_path = strdup(module_path);
@@ -250,7 +315,6 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         module_path                = canonical;
     }
 
-    // find the loaded module from the module manager
     Module *module = module_manager_find_module(&analyzer->module_manager, module_path);
     if (!module)
     {
@@ -259,43 +323,90 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         return false;
     }
 
-    if (alias)
-    {
-        // aliased import: create module symbol for qualified access
-        Symbol *module_symbol = symbol_create_module(alias, module_path);
+    free(raw_path);
+    return true;
+}
 
-        // check for redefinition
-        Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, alias);
+static bool semantic_import_public_symbols(SemanticAnalyzer *analyzer, Module *module, AstNode *use_stmt)
+{
+    if (!module->symbols || !module->symbols->global_scope)
+    {
+        semantic_error(analyzer, use_stmt, "module '%s' has no symbols to import", use_stmt->use_stmt.module_path);
+        return false;
+    }
+
+    if (scope_has_module_import(analyzer->symbol_table.current_scope, module->name))
+    {
+        return true;
+    }
+
+    Scope *export_scope = module->symbols->module_scope ? module->symbols->module_scope : module->symbols->global_scope;
+    if (!export_scope)
+    {
+        semantic_error(analyzer, use_stmt, "module '%s' has no export scope", use_stmt->use_stmt.module_path);
+        return false;
+    }
+
+    for (Symbol *sym = export_scope->symbols; sym; sym = sym->next)
+    {
+        if (sym->kind == SYMBOL_MODULE || sym->is_imported || !sym->is_public)
+            continue;
+
+        Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, sym->name);
         if (existing)
         {
-            semantic_error(analyzer, stmt, "module name '%s' already in use", alias);
-            symbol_destroy(module_symbol);
-            free(raw_path);
+            if (existing->is_imported && existing->import_module && strcmp(existing->import_module, module->name) == 0)
+                continue;
+            semantic_error(analyzer, use_stmt, "symbol '%s' from module '%s' conflicts with existing symbol", sym->name, use_stmt->use_stmt.module_path);
             return false;
         }
 
-        // the module scope will be linked after the module is analyzed
-        stmt->use_stmt.module_sym = module_symbol;
+        Symbol *imported_sym = symbol_create(sym->kind, sym->name, sym->type, sym->decl);
+        imported_sym->is_imported   = true;
+        imported_sym->is_public     = sym->is_public;
+        imported_sym->has_const_i64 = sym->has_const_i64;
+        imported_sym->const_i64     = sym->const_i64;
+        imported_sym->import_module = module->name;
 
-        // add to symbol table
-        symbol_add_module(&analyzer->symbol_table, module_symbol);
-    }
-    else
-    {
-        // unaliased import: symbols will be imported directly into current scope
-        stmt->use_stmt.module_sym = NULL;
+        switch (sym->kind)
+        {
+        case SYMBOL_VAR:
+        case SYMBOL_VAL:
+            imported_sym->var = sym->var;
+            break;
+        case SYMBOL_FUNC:
+            imported_sym->func = sym->func;
+            if (sym->func.extern_name)
+                imported_sym->func.extern_name = strdup(sym->func.extern_name);
+            if (sym->func.convention)
+                imported_sym->func.convention = strdup(sym->func.convention);
+            if (sym->func.mangled_name)
+                imported_sym->func.mangled_name = strdup(sym->func.mangled_name);
+            break;
+        case SYMBOL_TYPE:
+            imported_sym->type_def = sym->type_def;
+            break;
+        case SYMBOL_FIELD:
+            imported_sym->field = sym->field;
+            break;
+        case SYMBOL_PARAM:
+            imported_sym->param = sym->param;
+            break;
+        case SYMBOL_MODULE:
+            // modules are skipped above
+            break;
+        }
+
+        symbol_add(analyzer->symbol_table.current_scope, imported_sym);
     }
 
-    free(raw_path);
     return true;
 }
 
 bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_stmt)
 {
     const char *module_path = use_stmt->use_stmt.module_path;
-    const char *alias       = use_stmt->use_stmt.alias;
 
-    // find the loaded module
     Module *module = module_manager_find_module(&analyzer->module_manager, module_path);
     if (!module)
     {
@@ -303,76 +414,11 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         return false;
     }
 
-    // if already analyzed, handle symbol importing
     if (module->is_analyzed)
     {
-        if (alias)
-        {
-            // aliased import: link the module scope to the symbol
-            Symbol *module_symbol = use_stmt->use_stmt.module_sym;
-                if (!module_symbol || module_symbol->kind != SYMBOL_MODULE || !module->symbols || !module->symbols->global_scope)
-                {
-                    semantic_error(analyzer, use_stmt, "module '%s' has no symbols to import", module_path);
-                    return false;
-                }
-                module_symbol->module.scope = module->symbols->global_scope;
-        }
-        else
-        {
-            // unaliased import: import all symbols directly
-            if (module->symbols && module->symbols->global_scope)
-            {
-                // import all symbols from the module into current scope
-                Symbol *sym = module->symbols->global_scope->symbols;
-                while (sym)
-                {
-                    // check for name conflicts
-                    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, sym->name);
-                    if (existing)
-                    {
-                        semantic_error(analyzer, use_stmt, "symbol '%s' from module '%s' conflicts with existing symbol", sym->name, module_path);
-                        return false;
-                    }
-
-                    // create a copy of the symbol for the current scope
-                    Symbol *imported_sym = symbol_create(sym->kind, sym->name, sym->type, sym->decl);
-
-                    // copy kind-specific data
-                    switch (sym->kind)
-                    {
-                    case SYMBOL_VAR:
-                    case SYMBOL_VAL:
-                        imported_sym->var = sym->var;
-                        break;
-                    case SYMBOL_FUNC:
-                        imported_sym->func = sym->func;
-                        break;
-                    case SYMBOL_TYPE:
-                        imported_sym->type_def = sym->type_def;
-                        break;
-                    case SYMBOL_FIELD:
-                        imported_sym->field = sym->field;
-                        break;
-                    case SYMBOL_PARAM:
-                        imported_sym->param = sym->param;
-                        break;
-                    case SYMBOL_MODULE:
-                        imported_sym->module = sym->module;
-                        break;
-                    }
-
-                    symbol_add(analyzer->symbol_table.current_scope, imported_sym);
-
-                    sym = sym->next;
-                }
-            }
-        }
-        return true;
+        return semantic_import_public_symbols(analyzer, module, use_stmt);
     }
 
-    printf("analyzing module '%s'...\n", module_path);
-
-    // fast path: modules that contain only extern declarations
     if (module->ast && module->ast->kind == AST_PROGRAM)
     {
         bool extern_only = true;
@@ -396,10 +442,9 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
             module->symbols = malloc(sizeof(SymbolTable));
             symbol_table_init(module->symbols);
 
-            // analyze ext statements into module's symbol table using a fresh analyzer
             SemanticAnalyzer tmp;
             semantic_analyzer_init(&tmp);
-            // use the module's symbol table for symbol writes
+            semantic_analyzer_set_module(&tmp, module->name);
             tmp.symbol_table = *module->symbols;
 
             bool ok = true;
@@ -411,9 +456,8 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
                     break;
                 }
             }
-            // write back any table header updates (current scope etc.)
+
             *module->symbols = tmp.symbol_table;
-            // detach symbol table to avoid double free when tmp is destroyed
             tmp.symbol_table.global_scope  = NULL;
             tmp.symbol_table.current_scope = NULL;
             tmp.symbol_table.module_scope  = NULL;
@@ -425,103 +469,35 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
                 return false;
             }
 
-            // finalize
             module->is_analyzed = true;
-
-            // handle import linking now
-            if (alias)
-            {
-                Symbol *module_symbol = use_stmt->use_stmt.module_sym;
-                if (!module_symbol || module_symbol->kind != SYMBOL_MODULE || !module->symbols || !module->symbols->global_scope)
-                {
-                    semantic_error(analyzer, use_stmt, "module '%s' has no symbols to import", module_path);
-                    return false;
-                }
-                module_symbol->module.scope = module->symbols->global_scope;
-            }
-            else
-            {
-                if (module->symbols && module->symbols->global_scope)
-                {
-                    Symbol *sym = module->symbols->global_scope->symbols;
-                    while (sym)
-                    {
-                        Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, sym->name);
-                        if (existing)
-                        {
-                            semantic_error(analyzer, use_stmt, "symbol '%s' from module '%s' conflicts with existing symbol", sym->name, module_path);
-                            return false;
-                        }
-                        Symbol *imported_sym = symbol_create(sym->kind, sym->name, sym->type, sym->decl);
-                        switch (sym->kind)
-                        {
-                        case SYMBOL_VAR:
-                        case SYMBOL_VAL:
-                            imported_sym->var = sym->var;
-                            break;
-                        case SYMBOL_FUNC:
-                            imported_sym->func = sym->func;
-                            break;
-                        case SYMBOL_TYPE:
-                            imported_sym->type_def = sym->type_def;
-                            break;
-                        case SYMBOL_FIELD:
-                            imported_sym->field = sym->field;
-                            break;
-                        case SYMBOL_PARAM:
-                            imported_sym->param = sym->param;
-                            break;
-                        case SYMBOL_MODULE:
-                            imported_sym->module = sym->module;
-                            break;
-                        }
-                        symbol_add(analyzer->symbol_table.current_scope, imported_sym);
-                        sym = sym->next;
-                    }
-                }
-                else
-                {
-                    semantic_error(analyzer, use_stmt, "module '%s' has no symbols to import", module_path);
-                    return false;
-                }
-            }
-            return true;
+            return semantic_import_public_symbols(analyzer, module, use_stmt);
         }
     }
 
-    // create a new symbol table for the module
     if (!module->symbols)
     {
         module->symbols = malloc(sizeof(SymbolTable));
         symbol_table_init(module->symbols);
     }
 
-    // create a separate analyzer for this module
     SemanticAnalyzer module_analyzer;
     semantic_analyzer_init(&module_analyzer);
     module_manager_set_config(&module_analyzer.module_manager, analyzer->module_manager.config, analyzer->module_manager.project_dir);
-    // inherit search paths and aliases from parent manager for CLI/minimal builds
+    semantic_analyzer_set_module(&module_analyzer, module->name);
     for (int i = 0; i < analyzer->module_manager.search_count; i++)
-    {
         module_manager_add_search_path(&module_analyzer.module_manager, analyzer->module_manager.search_paths[i]);
-    }
     for (int i = 0; i < analyzer->module_manager.alias_count; i++)
-    {
         module_manager_add_alias(&module_analyzer.module_manager, analyzer->module_manager.alias_names[i], analyzer->module_manager.alias_paths[i]);
-    }
 
-    // analyze the module
     bool success = true;
     if (module->ast && module->ast->kind == AST_PROGRAM)
     {
-        // first resolve module dependencies
         if (!module_manager_resolve_dependencies(&module_analyzer.module_manager, module->ast, "."))
         {
             success = false;
         }
         else
         {
-            // process use statements first
             for (int i = 0; i < module->ast->program.stmts->count; i++)
             {
                 AstNode *stmt = module->ast->program.stmts->items[i];
@@ -534,7 +510,6 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
                 }
             }
 
-            // analyze imported modules
             for (int i = 0; success && i < module->ast->program.stmts->count; i++)
             {
                 AstNode *stmt = module->ast->program.stmts->items[i];
@@ -547,25 +522,19 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
                 }
             }
 
-            // then analyze other statements
             for (int i = 0; success && i < module->ast->program.stmts->count; i++)
             {
                 AstNode *stmt = module->ast->program.stmts->items[i];
-
                 if (stmt->kind == AST_STMT_USE)
-                    continue; // already processed
-
+                    continue;
                 if (!semantic_analyze_stmt(&module_analyzer, stmt))
-                {
                     success = false;
-                }
             }
         }
     }
 
     if (success)
     {
-        // transfer the analyzed symbol table to the module
         if (module->symbols)
         {
             symbol_table_dnit(module->symbols);
@@ -573,96 +542,31 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
         }
         module->symbols  = malloc(sizeof(SymbolTable));
         *module->symbols = module_analyzer.symbol_table;
-
-        // prevent double cleanup by clearing the analyzer's references
         module_analyzer.symbol_table.global_scope  = NULL;
         module_analyzer.symbol_table.current_scope = NULL;
-
-        if (alias)
-        {
-            // aliased import: link the module scope to the symbol
-            Symbol *module_symbol = use_stmt->use_stmt.module_sym;
-            if (module_symbol && module_symbol->kind == SYMBOL_MODULE)
-            {
-                module_symbol->module.scope = module->symbols->global_scope;
-            }
-        }
-        else
-        {
-            // unaliased import: import all symbols directly
-            if (module->symbols && module->symbols->global_scope)
-            {
-                // import all symbols from the module into current scope
-                Symbol *sym = module->symbols->global_scope->symbols;
-                while (sym)
-                {
-                    // check for name conflicts
-                    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, sym->name);
-                    if (existing)
-                    {
-                        semantic_error(analyzer, use_stmt, "symbol '%s' from module '%s' conflicts with existing symbol", sym->name, module_path);
-                        return false;
-                    }
-
-                    // create a copy of the symbol for the current scope
-                    Symbol *imported_sym = symbol_create(sym->kind, sym->name, sym->type, sym->decl);
-
-                    // copy kind-specific data
-                    switch (sym->kind)
-                    {
-                    case SYMBOL_VAR:
-                    case SYMBOL_VAL:
-                        imported_sym->var = sym->var;
-                        break;
-                    case SYMBOL_FUNC:
-                        imported_sym->func = sym->func;
-                        break;
-                    case SYMBOL_TYPE:
-                        imported_sym->type_def = sym->type_def;
-                        break;
-                    case SYMBOL_FIELD:
-                        imported_sym->field = sym->field;
-                        break;
-                    case SYMBOL_PARAM:
-                        imported_sym->param = sym->param;
-                        break;
-                    case SYMBOL_MODULE:
-                        imported_sym->module = sym->module;
-                        break;
-                    }
-
-                    symbol_add(analyzer->symbol_table.current_scope, imported_sym);
-
-                    sym = sym->next;
-                }
-            }
-        }
+        module_analyzer.symbol_table.module_scope  = NULL;
 
         module->is_analyzed = true;
+        success             = semantic_import_public_symbols(analyzer, module, use_stmt);
     }
     else
     {
         semantic_error(analyzer, use_stmt, "failed to analyze module '%s'", module_path);
     }
 
-    // copy errors if any, but don't copy tokens since they're from different files
     for (int i = 0; i < module_analyzer.errors.count; i++)
     {
         semantic_error_list_add(&analyzer->errors, module_analyzer.errors.errors[i].token, module_analyzer.errors.errors[i].message, module->file_path);
     }
 
-    // clean up analyzer (preserve symbol tables referenced by aliases)
-    // the temporary module manager owns Module objects whose symbol tables may now
-    // be referenced by alias scopes in the current analyzer; prevent freeing them
-    // here by detaching their symbol_table pointers before teardown
     for (int i = 0; i < module_analyzer.module_manager.capacity; i++)
     {
         Module *m = module_analyzer.module_manager.modules[i];
         while (m)
         {
-            m->symbols = NULL; // prevent module_dnit from freeing active scopes
-            m->ast     = NULL; // prevent freeing AST nodes referenced by decl pointers
-            m = m->next;
+            m->symbols = NULL;
+            m->ast     = NULL;
+            m          = m->next;
         }
     }
 
@@ -699,6 +603,14 @@ bool semantic_analyze_ext_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 
     Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, type, stmt);
     symbol->func.is_external = true;
+    if (stmt->ext_stmt.symbol)
+        symbol->func.extern_name = strdup(stmt->ext_stmt.symbol);
+    if (stmt->ext_stmt.convention)
+        symbol->func.convention = strdup(stmt->ext_stmt.convention);
+    if (semantic_in_top_level_scope(analyzer) && stmt->ext_stmt.is_public)
+    {
+        symbol->is_public = true;
+    }
     symbol_add(analyzer->symbol_table.current_scope, symbol);
     stmt->symbol = symbol;
 
@@ -727,6 +639,10 @@ bool semantic_analyze_def_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     Type   *alias_type        = type_alias_create(name, target_type);
     Symbol *symbol            = symbol_create(SYMBOL_TYPE, name, alias_type, stmt);
     symbol->type_def.is_alias = true;
+    if (semantic_in_top_level_scope(analyzer) && stmt->def_stmt.is_public)
+    {
+        symbol->is_public = true;
+    }
     symbol_add(analyzer->symbol_table.current_scope, symbol);
     stmt->symbol = symbol;
     stmt->type   = alias_type;
@@ -799,8 +715,12 @@ bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     // create symbol
     SymbolKind kind       = is_val ? SYMBOL_VAL : SYMBOL_VAR;
     Symbol    *symbol     = symbol_create(kind, name, final_type, stmt);
-    symbol->var.is_global = (analyzer->symbol_table.current_scope == analyzer->symbol_table.global_scope);
+    symbol->var.is_global = semantic_in_top_level_scope(analyzer);
     symbol->var.is_const  = is_val;
+    if (symbol->var.is_global && stmt->var_stmt.is_public)
+    {
+        symbol->is_public = true;
+    }
 
     symbol_add(analyzer->symbol_table.current_scope, symbol);
     stmt->symbol = symbol;
@@ -934,6 +854,11 @@ bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
             existing->func.is_defined = true;
             existing->decl            = stmt;
         }
+        existing->func.uses_mach_varargs = is_variadic;
+        if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
+        {
+            existing->is_public = true;
+        }
         stmt->symbol = existing;
         stmt->type   = func_type;
     }
@@ -941,8 +866,13 @@ bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     {
         // create new symbol
         Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, func_type, stmt);
-        symbol->func.is_external = false;
-        symbol->func.is_defined  = (stmt->fun_stmt.body != NULL);
+        symbol->func.is_external         = false;
+        symbol->func.is_defined          = (stmt->fun_stmt.body != NULL);
+        symbol->func.uses_mach_varargs   = is_variadic;
+        if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
+        {
+            symbol->is_public = true;
+        }
         symbol_add(analyzer->symbol_table.current_scope, symbol);
         stmt->symbol = symbol;
         stmt->type   = func_type;
@@ -1011,6 +941,10 @@ bool semantic_analyze_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 
     Type   *struct_type   = type_struct_create(name);
     Symbol *struct_symbol = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
+    if (semantic_in_top_level_scope(analyzer) && stmt->str_stmt.is_public)
+    {
+        struct_symbol->is_public = true;
+    }
     symbol_add(analyzer->symbol_table.current_scope, struct_symbol);
 
     // analyze fields
@@ -1054,6 +988,10 @@ bool semantic_analyze_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 
     Type   *union_type   = type_union_create(name);
     Symbol *union_symbol = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
+    if (semantic_in_top_level_scope(analyzer) && stmt->uni_stmt.is_public)
+    {
+        union_symbol->is_public = true;
+    }
     symbol_add(analyzer->symbol_table.current_scope, union_symbol);
 
     // analyze fields
@@ -1483,32 +1421,6 @@ Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     {
         const char *func_name = expr->call_expr.func->ident_expr.name;
 
-        // handle len() intrinsic
-        if (strcmp(func_name, "len") == 0)
-        {
-            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
-            {
-                semantic_error(analyzer, expr, "len() expects exactly one argument");
-                return NULL;
-            }
-
-            AstNode *arg      = expr->call_expr.args->items[0];
-            Type    *arg_type = semantic_analyze_expr(analyzer, arg);
-            if (!arg_type)
-                return NULL;
-
-            arg_type = type_resolve_alias(arg_type);
-
-            if (arg_type->kind != TYPE_ARRAY)
-            {
-                semantic_error(analyzer, expr, "len() can only be applied to arrays");
-                return NULL;
-            }
-
-            expr->type = type_u64(); // len() returns u64
-            return expr->type;
-        }
-
         // handle size_of() intrinsic
         if (strcmp(func_name, "size_of") == 0)
         {
@@ -1736,12 +1648,34 @@ Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     if (!object_type)
         return NULL;
 
-    // handle pointer to struct dereference
-    if (object_type->kind == TYPE_POINTER)
+    object_type = type_resolve_alias(object_type);
+
+    if (object_type && object_type->kind == TYPE_POINTER)
     {
-        object_type = object_type->pointer.base;
+        object_type = type_resolve_alias(object_type->pointer.base);
     }
 
+    if (!object_type)
+        return NULL;
+
+    if (object_type->kind == TYPE_ARRAY)
+    {
+        if (strcmp(expr->field_expr.field, "length") == 0)
+        {
+            expr->type = type_u64();
+            return expr->type;
+        }
+        if (strcmp(expr->field_expr.field, "data") == 0)
+        {
+            expr->type = type_pointer_create(object_type->array.elem_type);
+            return expr->type;
+        }
+
+        semantic_error(analyzer, expr, "no member named '%s' on array", expr->field_expr.field);
+        return NULL;
+    }
+
+    // handle pointer to struct dereference
     if (object_type->kind != TYPE_STRUCT && object_type->kind != TYPE_UNION)
     {
         semantic_error(analyzer, expr, "member access on non-struct/union type");
@@ -1954,7 +1888,41 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     {
         // for []T{...} or alias{...} syntax where alias resolves to array, use it directly
         // but validate that all elements match the element type
-        Type *elem_type = resolved_type->array.elem_type;
+        Type *elem_type  = resolved_type->array.elem_type;
+        int   elem_count = expr->array_expr.elems ? expr->array_expr.elems->count : 0;
+
+        if (elem_count == 2)
+        {
+            AstNode *data_node = expr->array_expr.elems->items[0];
+            AstNode *len_node  = expr->array_expr.elems->items[1];
+
+            Type *data_type = semantic_analyze_expr(analyzer, data_node);
+            if (!data_type)
+                return NULL;
+
+            Type *len_type = semantic_analyze_expr(analyzer, len_node);
+            if (!len_type)
+                return NULL;
+
+            if (type_is_pointer_like(data_type) && type_is_integer(len_type))
+            {
+                Type *expected_ptr = type_pointer_create(elem_type);
+                if (!semantic_check_assignment(analyzer, expected_ptr, data_type, data_node))
+                {
+                    return NULL;
+                }
+
+                Type *expected_len = type_u64();
+                if (!semantic_check_assignment(analyzer, expected_len, len_type, len_node))
+                {
+                    return NULL;
+                }
+
+                expr->array_expr.is_slice_literal = true;
+                expr->type                        = specified_type;
+                return expr->type;
+            }
+        }
 
         if (expr->array_expr.elems)
         {

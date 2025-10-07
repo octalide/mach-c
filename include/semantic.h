@@ -32,11 +32,13 @@ typedef struct SemanticAnalyzer
     AstNode          *current_function; // for return type checking
     int               loop_depth;       // for break/continue checking
     bool              has_errors;
+    const char       *current_module_name;      // optional: canonical module path
 } SemanticAnalyzer;
 
 // semantic analyzer operations
 void semantic_analyzer_init(SemanticAnalyzer *analyzer);
 void semantic_analyzer_dnit(SemanticAnalyzer *analyzer);
+void semantic_analyzer_set_module(SemanticAnalyzer *analyzer, const char *module_name);
 
 // main analysis entry point
 bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root);

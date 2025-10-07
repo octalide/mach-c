@@ -12,6 +12,9 @@ commands:
 - `-o <file>`: set output file name
 - `-O<level>`: optimization level (0–3, default 2)
 - `--emit-obj`: write object `.o` (skip linking)
+- `--emit-ast[=<file>]`: dump the parsed AST to a file (defaults to `<input>.ast`)
+- `--emit-ir[=<file>]`: dump the generated LLVM IR (defaults to `<input>.ll`)
+- `--emit-asm[=<file>]`: dump the generated assembly (defaults to `<input>.s`)
 - `--no-link`: do not link an executable
 - `--no-pie`: disable PIE
 - `--link <obj>`: link additional object file(s)

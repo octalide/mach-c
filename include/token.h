@@ -19,6 +19,7 @@ typedef enum TokenKind
     TOKEN_KW_USE, // use
     TOKEN_KW_EXT, // ext
     TOKEN_KW_DEF, // def
+    TOKEN_KW_PUB, // pub
     TOKEN_KW_STR, // str
     TOKEN_KW_UNI, // uni
     TOKEN_KW_VAL, // val

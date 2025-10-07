@@ -365,12 +365,19 @@ AstNode *parser_parse_program(Parser *parser)
 // parse top-level statements
 AstNode *parser_parse_stmt_top(Parser *parser)
 {
-    AstNode *result = NULL;
+    bool     is_public = parser_match(parser, TOKEN_KW_PUB);
+    AstNode *result    = NULL;
 
     switch (parser->current->kind)
     {
     case TOKEN_KW_NIL:
     {
+        if (is_public)
+        {
+            parser_error_at_current(parser, "'pub' cannot precede 'nil'");
+            parser_synchronize(parser);
+            return NULL;
+        }
         // parse 'nil' as the unary expression '?0' for exact equivalence
         AstNode *zero = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
         if (!zero) { return NULL; }
@@ -386,33 +393,51 @@ AstNode *parser_parse_stmt_top(Parser *parser)
         return un;
     }
     case TOKEN_KW_USE:
+        if (is_public)
+        {
+            parser_error_at_current(parser, "'pub' cannot be applied to use statements");
+            parser_synchronize(parser);
+            return NULL;
+        }
         result = parser_parse_stmt_use(parser);
         break;
     case TOKEN_KW_EXT:
-        result = parser_parse_stmt_ext(parser);
+        result = parser_parse_stmt_ext(parser, is_public);
         break;
     case TOKEN_KW_DEF:
-        result = parser_parse_stmt_def(parser);
+        result = parser_parse_stmt_def(parser, is_public);
         break;
     case TOKEN_KW_VAL:
-        result = parser_parse_stmt_val(parser);
+        result = parser_parse_stmt_val(parser, is_public);
         break;
     case TOKEN_KW_VAR:
-        result = parser_parse_stmt_var(parser);
+        result = parser_parse_stmt_var(parser, is_public);
         break;
     case TOKEN_KW_FUN:
-        result = parser_parse_stmt_fun(parser);
+        result = parser_parse_stmt_fun(parser, is_public);
         break;
     case TOKEN_KW_STR:
-        result = parser_parse_stmt_str(parser);
+        result = parser_parse_stmt_str(parser, is_public);
         break;
     case TOKEN_KW_UNI:
-        result = parser_parse_stmt_uni(parser);
+        result = parser_parse_stmt_uni(parser, is_public);
         break;
     case TOKEN_KW_ASM:
+        if (is_public)
+        {
+            parser_error_at_current(parser, "'pub' cannot be applied to asm blocks");
+            parser_synchronize(parser);
+            return NULL;
+        }
         result = parser_parse_stmt_asm(parser);
         break;
     default:
+        if (is_public)
+        {
+            parser_error_at_current(parser, "'pub' must precede a declaration");
+            parser_synchronize(parser);
+            return NULL;
+        }
         parser_error_at_current(parser, "expected statement");
         break;
     }
@@ -427,9 +452,9 @@ AstNode *parser_parse_stmt(Parser *parser)
     switch (parser->current->kind)
     {
     case TOKEN_KW_VAL:
-        return parser_parse_stmt_val(parser);
+        return parser_parse_stmt_val(parser, false);
     case TOKEN_KW_VAR:
-        return parser_parse_stmt_var(parser);
+        return parser_parse_stmt_var(parser, false);
     case TOKEN_KW_IF:
         return parser_parse_stmt_if(parser);
     case TOKEN_KW_FOR:
@@ -470,24 +495,17 @@ AstNode *parser_parse_stmt_use(Parser *parser)
         return NULL;
     }
 
-    // check for alias
     if (parser_match(parser, TOKEN_COLON))
     {
-        node->use_stmt.alias       = first;
-        node->use_stmt.module_path = parser_parse_identifier(parser);
-        if (!node->use_stmt.module_path)
-        {
-            parser_error_at_current(parser, "expected module path after alias");
-            ast_node_dnit(node);
-            free(node);
-            return NULL;
-        }
+        parser_error(parser, parser->previous, "import aliases are not supported");
+        free(first);
+        ast_node_dnit(node);
+        free(node);
+        parser_synchronize(parser);
+        return NULL;
     }
-    else
-    {
-        node->use_stmt.module_path = first;
-        node->use_stmt.alias       = NULL;
-    }
+
+    node->use_stmt.module_path = first;
 
     // parse rest of module path
     while (parser_match(parser, TOKEN_DOT))
@@ -519,7 +537,7 @@ AstNode *parser_parse_stmt_use(Parser *parser)
     return node;
 }
 
-AstNode *parser_parse_stmt_ext(Parser *parser)
+AstNode *parser_parse_stmt_ext(Parser *parser, bool is_public)
 {
     if (!parser_consume(parser, TOKEN_KW_EXT, "expected 'ext' keyword"))
     {
@@ -537,6 +555,7 @@ AstNode *parser_parse_stmt_ext(Parser *parser)
     node->ext_stmt.convention = NULL;
     node->ext_stmt.symbol     = NULL;
     node->ext_stmt.type       = NULL;
+    node->ext_stmt.is_public  = is_public;
 
     // check for optional calling convention/symbol specification
     if (parser_match(parser, TOKEN_LIT_STRING))
@@ -611,7 +630,7 @@ AstNode *parser_parse_stmt_ext(Parser *parser)
     return node;
 }
 
-AstNode *parser_parse_stmt_def(Parser *parser)
+AstNode *parser_parse_stmt_def(Parser *parser, bool is_public)
 {
     if (!parser_consume(parser, TOKEN_KW_DEF, "expected 'def' keyword"))
     {
@@ -656,11 +675,13 @@ AstNode *parser_parse_stmt_def(Parser *parser)
         return NULL;
     }
 
+    node->def_stmt.is_public = is_public;
+
     return node;
 }
 
 // helper for val/var parsing since they're so similar
-static AstNode *parser_parse_var_decl(Parser *parser, bool is_val)
+static AstNode *parser_parse_var_decl(Parser *parser, bool is_val, bool is_public)
 {
     TokenKind keyword = is_val ? TOKEN_KW_VAL : TOKEN_KW_VAR;
 
@@ -675,7 +696,8 @@ static AstNode *parser_parse_var_decl(Parser *parser, bool is_val)
         return NULL;
     }
 
-    node->var_stmt.is_val = is_val;
+    node->var_stmt.is_val    = is_val;
+    node->var_stmt.is_public = is_public;
     node->var_stmt.name   = parser_parse_identifier(parser);
     if (!node->var_stmt.name)
     {
@@ -741,17 +763,17 @@ static AstNode *parser_parse_var_decl(Parser *parser, bool is_val)
     return node;
 }
 
-AstNode *parser_parse_stmt_val(Parser *parser)
+AstNode *parser_parse_stmt_val(Parser *parser, bool is_public)
 {
-    return parser_parse_var_decl(parser, true);
+    return parser_parse_var_decl(parser, true, is_public);
 }
 
-AstNode *parser_parse_stmt_var(Parser *parser)
+AstNode *parser_parse_stmt_var(Parser *parser, bool is_public)
 {
-    return parser_parse_var_decl(parser, false);
+    return parser_parse_var_decl(parser, false, is_public);
 }
 
-AstNode *parser_parse_stmt_fun(Parser *parser)
+AstNode *parser_parse_stmt_fun(Parser *parser, bool is_public)
 {
     if (!parser_consume(parser, TOKEN_KW_FUN, "expected 'fun' keyword"))
     {
@@ -859,6 +881,8 @@ AstNode *parser_parse_stmt_fun(Parser *parser)
         return NULL;
     }
 
+    node->fun_stmt.is_public = is_public;
+
     // optional return type
     if (!parser_check(parser, TOKEN_L_BRACE))
     {
@@ -884,7 +908,7 @@ AstNode *parser_parse_stmt_fun(Parser *parser)
     return node;
 }
 
-AstNode *parser_parse_stmt_str(Parser *parser)
+AstNode *parser_parse_stmt_str(Parser *parser, bool is_public)
 {
     if (!parser_consume(parser, TOKEN_KW_STR, "expected 'str' keyword"))
     {
@@ -928,10 +952,12 @@ AstNode *parser_parse_stmt_str(Parser *parser)
         return NULL;
     }
 
+    node->str_stmt.is_public = is_public;
+
     return node;
 }
 
-AstNode *parser_parse_stmt_uni(Parser *parser)
+AstNode *parser_parse_stmt_uni(Parser *parser, bool is_public)
 {
     if (!parser_consume(parser, TOKEN_KW_UNI, "expected 'uni' keyword"))
     {
@@ -974,6 +1000,8 @@ AstNode *parser_parse_stmt_uni(Parser *parser)
         free(node);
         return NULL;
     }
+
+    node->uni_stmt.is_public = is_public;
 
     return node;
 }
@@ -1691,6 +1719,19 @@ AstNode *parser_parse_expr_atom(Parser *parser)
     {
         parser_advance(parser);
         return parser_parse_array_literal(parser);
+    }
+
+    case TOKEN_KW_NIL:
+    {
+        AstNode *lit = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
+        if (!lit)
+        {
+            return NULL;
+        }
+        lit->lit_expr.kind    = TOKEN_LIT_INT;
+        lit->lit_expr.int_val = 0;
+        parser_advance(parser);
+        return lit;
     }
 
     case TOKEN_IDENTIFIER:

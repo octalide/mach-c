@@ -14,9 +14,9 @@ typedef struct SymbolTable SymbolTable;
 // represents a loaded module
 struct Module
 {
-    char        *name;          // module name
-    char        *file_path;     // absolute file path
-    char        *object_path;   // compiled object file path
+    char        *name;            // module name
+    char        *file_path;       // absolute file path
+    char        *object_path;     // compiled object file path
     AstNode     *ast;           // parsed AST
     SymbolTable *symbols;       // module's symbol table
     bool         is_parsed;     // parsing complete
@@ -82,7 +82,6 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
 bool module_manager_get_link_objects(ModuleManager *manager, char ***object_files, int *count);
 
 // utility helpers
-char *module_sanitize_name(const char *module_name);
 char *module_make_object_path(const char *output_dir, const char *module_name);
 
 // error handling

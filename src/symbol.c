@@ -86,6 +86,11 @@ Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *de
     symbol->type   = type;
     symbol->decl   = decl;
     symbol->next   = NULL;
+    symbol->is_imported    = false;
+    symbol->is_public      = false;
+    symbol->has_const_i64 = false;
+    symbol->const_i64 = 0;
+    symbol->import_module = NULL;
 
     // initialize kind-specific data
     switch (kind)
@@ -99,6 +104,10 @@ Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *de
     case SYMBOL_FUNC:
         symbol->func.is_external = false;
         symbol->func.is_defined  = false;
+        symbol->func.uses_mach_varargs = false;
+        symbol->func.extern_name = NULL;
+        symbol->func.convention  = NULL;
+        symbol->func.mangled_name = NULL;
         break;
 
     case SYMBOL_TYPE:
@@ -134,6 +143,15 @@ void symbol_destroy(Symbol *symbol)
         free(symbol->module.path);
         symbol->module.path = NULL;
         // don't destroy module scope here - it's managed separately
+    }
+    else if (symbol->kind == SYMBOL_FUNC)
+    {
+        free(symbol->func.extern_name);
+        free(symbol->func.convention);
+        free(symbol->func.mangled_name);
+        symbol->func.extern_name = NULL;
+        symbol->func.convention  = NULL;
+        symbol->func.mangled_name = NULL;
     }
 
     free(symbol);
@@ -194,7 +212,12 @@ Symbol *symbol_lookup_module(SymbolTable *table, const char *module, const char 
     }
 
     // search in module scope
-    return symbol_lookup_scope(module_symbol->module.scope, name);
+    Symbol *symbol = symbol_lookup_scope(module_symbol->module.scope, name);
+    if (symbol && !symbol->is_public)
+    {
+        return NULL;
+    }
+    return symbol;
 }
 
 Symbol *symbol_add_field(Symbol *composite_symbol, const char *field_name, Type *field_type, AstNode *decl)

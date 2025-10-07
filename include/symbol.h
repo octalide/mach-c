@@ -3,6 +3,7 @@
 
 #include "type.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 // forward declarations
 typedef struct AstNode AstNode;
@@ -25,6 +26,11 @@ typedef struct Symbol
     Type          *type;
     AstNode       *decl; // declaration node
     struct Symbol *next; // for linked list in scope
+    bool           is_imported; // true if this symbol was imported from another module
+    bool           is_public;   // true if symbol should be exported from module
+    bool           has_const_i64; // semantic constant folding result (integer/bool)
+    int64_t        const_i64;
+    const char    *import_module; // source module for imported symbols
 
     union
     {
@@ -40,6 +46,10 @@ typedef struct Symbol
         {
             bool is_external;
             bool is_defined; // false for forward declarations
+            bool uses_mach_varargs; // true when Mach compiler handles variadics (vs C ABI)
+            char *extern_name;      // c-level symbol name for externs (defaults to mach name)
+            char *convention;       // calling convention hint (e.g. "C")
+            char *mangled_name;     // cached mangled name for codegen
         } func;
 
         // SYMBOL_TYPE

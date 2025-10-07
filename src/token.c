@@ -57,6 +57,8 @@ char *token_kind_to_string(TokenKind kind)
         return "ext";
     case TOKEN_KW_DEF:
         return "def";
+    case TOKEN_KW_PUB:
+        return "pub";
     case TOKEN_KW_STR:
         return "str";
     case TOKEN_KW_UNI:
@@ -197,6 +199,10 @@ TokenKind token_kind_from_identifier(const char *text, int len)
         if (strncmp(text, "def", 3) == 0)
         {
             return TOKEN_KW_DEF;
+        }
+        if (strncmp(text, "pub", 3) == 0)
+        {
+            return TOKEN_KW_PUB;
         }
         if (strncmp(text, "str", 3) == 0)
         {

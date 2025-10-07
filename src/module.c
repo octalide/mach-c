@@ -430,7 +430,6 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         source = read_file(file_path);
         if (!source)
         {
-            printf("failed\n");
             module_error_list_add(&manager->errors, canonical, file_path, "Could not read module file");
             manager->had_error = true;
             free(file_path);
@@ -455,8 +454,6 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     // check for parse errors
     if (!ast || parser.had_error)
     {
-        printf("failed\n");
-
         if (parser.had_error)
         {
             fprintf(stderr, "parsing failed with %d error(s):\n", parser.errors.count);
@@ -495,6 +492,8 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     module_init(module, canonical, file_path);
     module->ast         = ast;
     module->is_parsed   = true;
+    if (is_target_builtin)
+        module->needs_linking = true; // ensure builtin target object is emitted
     module->is_analyzed = false;
 
     // add to hash table
@@ -614,28 +613,28 @@ static char *generate_target_module_source(ModuleManager *manager)
     // build source buffer
     char buffer[2048];
     snprintf(buffer, sizeof(buffer),
-             "val OS_LINUX: u32 = 1;\n"
-             "val OS_DARWIN: u32 = 2;\n"
-             "val OS_WINDOWS: u32 = 3;\n"
-             "val OS_FREEBSD: u32 = 4;\n"
-             "val OS_NETBSD: u32 = 5;\n"
-             "val OS_OPENBSD: u32 = 6;\n"
-             "val OS_DRAGONFLY: u32 = 7;\n"
-             "val OS_WASM: u32 = 8;\n"
-             "val OS_UNKNOWN: u32 = 255;\n"
-             "val ARCH_X86_64: u32 = 1;\n"
-             "val ARCH_AARCH64: u32 = 2;\n"
-             "val ARCH_RISCV64: u32 = 3;\n"
-             "val ARCH_WASM32: u32 = 4;\n"
-             "val ARCH_WASM64: u32 = 5;\n"
-             "val ARCH_UNKNOWN: u32 = 255;\n"
-             "val OS: u32 = %u;\n"
-             "val ARCH: u32 = %u;\n"
-             "val PTR_WIDTH: u8 = %u;\n"
-             "val ENDIAN: u8 = %u;\n"
-             "val DEBUG: u8 = %u;\n"
-             "val OS_NAME: []u8 = \"%s\";\n"
-             "val ARCH_NAME: []u8 = \"%s\";\n",
+             "pub val OS_LINUX: u32 = 1;\n"
+             "pub val OS_DARWIN: u32 = 2;\n"
+             "pub val OS_WINDOWS: u32 = 3;\n"
+             "pub val OS_FREEBSD: u32 = 4;\n"
+             "pub val OS_NETBSD: u32 = 5;\n"
+             "pub val OS_OPENBSD: u32 = 6;\n"
+             "pub val OS_DRAGONFLY: u32 = 7;\n"
+             "pub val OS_WASM: u32 = 8;\n"
+             "pub val OS_UNKNOWN: u32 = 255;\n"
+             "pub val ARCH_X86_64: u32 = 1;\n"
+             "pub val ARCH_AARCH64: u32 = 2;\n"
+             "pub val ARCH_RISCV64: u32 = 3;\n"
+             "pub val ARCH_WASM32: u32 = 4;\n"
+             "pub val ARCH_WASM64: u32 = 5;\n"
+             "pub val ARCH_UNKNOWN: u32 = 255;\n"
+             "pub val OS: u32 = %u;\n"
+             "pub val ARCH: u32 = %u;\n"
+             "pub val PTR_WIDTH: u8 = %u;\n"
+             "pub val ENDIAN: u8 = %u;\n"
+             "pub val DEBUG: u8 = %u;\n"
+             "pub val OS_NAME: []u8 = \"%s\";\n"
+             "pub val ARCH_NAME: []u8 = \"%s\";\n",
              os_id, arch_id, ptr_width, endian, debug_flag,
              os_part ? os_part : "unknown", arch_part ? arch_part : "unknown");
 
@@ -825,24 +824,6 @@ char *module_make_object_path(const char *output_dir, const char *module_name)
     return path;
 }
 
-char *module_sanitize_name(const char *name)
-{
-    if (!name)
-        return NULL;
-
-    size_t len  = strlen(name);
-    char  *copy = malloc(len + 1);
-    if (!copy)
-        return NULL;
-    for (size_t i = 0; i < len; i++)
-    {
-        char c = name[i];
-        copy[i] = (c == '.' || c == '/' || c == ':') ? '_' : c;
-    }
-    copy[len] = '\0';
-    return copy;
-}
-
 bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie)
 {
     if (!manager)
@@ -871,6 +852,7 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
                 SemanticAnalyzer analyzer;
                 semantic_analyzer_init(&analyzer);
                 module_manager_set_config(&analyzer.module_manager, manager->config, manager->project_dir);
+                semantic_analyzer_set_module(&analyzer, module->name);
 
                 bool analyzed = semantic_analyze(&analyzer, module->ast);
                 if (!analyzed)
@@ -1001,18 +983,6 @@ static bool compile_module_to_object(ModuleManager *manager, Module *module, con
     CodegenContext ctx;
     codegen_context_init(&ctx, module->name, no_pie);
     ctx.opt_level = opt_level;
-
-    char *package_name = module_sanitize_name(module->name);
-    if (package_name)
-        ctx.package_name = package_name;
-
-    if (module->file_path)
-    {
-        const char *slash     = strrchr(module->file_path, '/');
-        const char *file_name = slash ? slash + 1 : module->file_path;
-        if (strcmp(file_name, "runtime.mach") == 0)
-            ctx.is_runtime = true;
-    }
 
     SemanticAnalyzer stub;
     memset(&stub, 0, sizeof(stub));

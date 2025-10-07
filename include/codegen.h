@@ -5,6 +5,7 @@
 #include "semantic.h"
 #include "lexer.h"
 #include <llvm-c/Core.h>
+#include <llvm-c/DebugInfo.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
 #include <stdbool.h>
@@ -27,6 +28,12 @@ struct CodegenContext
     LLVMBuilderRef       builder;
     LLVMTargetMachineRef target_machine;
     LLVMTargetDataRef    data_layout;
+    LLVMDIBuilderRef     di_builder;
+    LLVMMetadataRef      di_compile_unit;
+    LLVMMetadataRef      di_file;
+    LLVMMetadataRef      current_di_scope;
+    LLVMMetadataRef      current_di_subprogram;
+    LLVMMetadataRef      di_unknown_type;
 
     // symbol mapping
     struct
@@ -62,10 +69,14 @@ struct CodegenContext
     // options
     int   opt_level;
     bool  debug_info;
+    bool  debug_finalized;
     bool  no_pie;       // disable position independent executable
     bool  is_runtime;   // true when compiling the runtime module
     bool  use_runtime;  // true when linking runtime alongside the entry
     char *package_name; // selected package name for mangling (optional)
+    char *debug_full_path;
+    char *debug_dir;
+    char *debug_file;
 
     // source context for diagnostics
     const char *source_file; // current file being compiled

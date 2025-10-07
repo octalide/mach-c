@@ -758,7 +758,7 @@ bool module_has_circular_dependency(ModuleManager *manager, Module *module, cons
 }
 
 // helper declarations
-static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie);
+static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info);
 
 static bool ensure_dirs_recursive(const char *dir)
 {
@@ -824,7 +824,7 @@ char *module_make_object_path(const char *output_dir, const char *module_name)
     return path;
 }
 
-bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie)
+bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie, bool debug_info)
 {
     if (!manager)
         return false;
@@ -900,7 +900,7 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
 
             // no info output
 
-            if (!compile_module_to_object(manager, module, output_dir, opt_level, no_pie))
+            if (!compile_module_to_object(manager, module, output_dir, opt_level, no_pie, debug_info))
             {
                 return false;
             }
@@ -960,7 +960,7 @@ bool module_manager_get_link_objects(ModuleManager *manager, char ***object_file
     return true;
 }
 
-static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie)
+static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info)
 {
     if (!module || !module->ast)
         return false;
@@ -982,7 +982,24 @@ static bool compile_module_to_object(ModuleManager *manager, Module *module, con
 
     CodegenContext ctx;
     codegen_context_init(&ctx, module->name, no_pie);
-    ctx.opt_level = opt_level;
+    ctx.opt_level    = opt_level;
+    ctx.debug_info   = debug_info;
+    ctx.source_file  = module->file_path;
+    ctx.source_lexer = NULL;
+
+    Lexer *debug_lexer_ptr = NULL;
+    Lexer  debug_lexer;
+    char  *debug_source = NULL;
+    if (debug_info && module->file_path && module->file_path[0] != '<')
+    {
+        debug_source = read_file(module->file_path);
+        if (debug_source)
+        {
+            lexer_init(&debug_lexer, debug_source);
+            debug_lexer_ptr = &debug_lexer;
+            ctx.source_lexer = debug_lexer_ptr;
+        }
+    }
 
     SemanticAnalyzer stub;
     memset(&stub, 0, sizeof(stub));
@@ -1009,6 +1026,13 @@ static bool compile_module_to_object(ModuleManager *manager, Module *module, con
         module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", "code generation failed");
         manager->had_error = true;
     }
+
+    if (debug_lexer_ptr)
+    {
+        lexer_dnit(debug_lexer_ptr);
+        ctx.source_lexer = NULL;
+    }
+    free(debug_source);
 
     codegen_context_dnit(&ctx);
     return success;

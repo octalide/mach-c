@@ -4,12 +4,19 @@
 #include "symbol.h"
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Transforms/PassBuilder.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static LLVMValueRef codegen_load_rvalue(CodegenContext *ctx, LLVMValueRef value, Type *type);
+static void         codegen_debug_init(CodegenContext *ctx);
+static void         codegen_debug_finalize(CodegenContext *ctx);
+static void         codegen_set_debug_location(CodegenContext *ctx, AstNode *node);
+static LLVMMetadataRef codegen_get_current_scope(CodegenContext *ctx);
+static LLVMMetadataRef codegen_debug_get_unknown_type(CodegenContext *ctx);
+static LLVMMetadataRef codegen_debug_create_subprogram(CodegenContext *ctx, AstNode *stmt, LLVMValueRef func, const char *display_name, const char *link_name, size_t param_count);
 
 // simple constant folding for integers/booleans used in global initializers
 static bool codegen_eval_const_i64(CodegenContext *ctx, AstNode *expr, int64_t *out)
@@ -54,6 +61,219 @@ static bool codegen_eval_const_i64(CodegenContext *ctx, AstNode *expr, int64_t *
     default:
         return false;
     }
+}
+
+static void codegen_debug_split_path(const char *path, char **dir_out, char **file_out)
+{
+    if (!path)
+    {
+        *dir_out  = strdup(".");
+        *file_out = strdup("<unknown>");
+        return;
+    }
+
+    char *tmp = strdup(path);
+    if (!tmp)
+    {
+        *dir_out  = strdup(".");
+        *file_out = strdup(path);
+        return;
+    }
+
+    char *slash = strrchr(tmp, '/');
+    if (!slash)
+    {
+        *dir_out  = strdup(".");
+        *file_out = strdup(tmp);
+    }
+    else
+    {
+        *slash    = '\0';
+        *dir_out  = strdup(tmp);
+        *file_out = strdup(slash + 1);
+    }
+
+    free(tmp);
+}
+
+static void codegen_debug_init(CodegenContext *ctx)
+{
+    if (!ctx->debug_info || ctx->di_builder)
+        return;
+
+    const char *source_path = ctx->source_file;
+    if (!source_path || source_path[0] == '\0')
+    {
+        ctx->debug_info = false;
+        return;
+    }
+
+    char resolved[PATH_MAX];
+    char *full_path = NULL;
+    if (realpath(source_path, resolved))
+        full_path = strdup(resolved);
+    else
+        full_path = strdup(source_path);
+
+    if (!full_path)
+    {
+        ctx->debug_info = false;
+        return;
+    }
+
+    char *dir  = NULL;
+    char *file = NULL;
+    codegen_debug_split_path(full_path, &dir, &file);
+    if (!dir || !file)
+    {
+        free(full_path);
+        free(dir);
+        free(file);
+        ctx->debug_info = false;
+        return;
+    }
+
+    ctx->debug_full_path = full_path;
+    ctx->debug_dir       = dir;
+    ctx->debug_file      = file;
+
+    ctx->di_builder = LLVMCreateDIBuilder(ctx->module);
+    if (!ctx->di_builder)
+    {
+        ctx->debug_info = false;
+        return;
+    }
+
+    ctx->di_unknown_type = NULL;
+
+    LLVMValueRef debug_version_val = LLVMConstInt(LLVMInt32TypeInContext(ctx->context), LLVMDebugMetadataVersion(), false);
+    LLVMMetadataRef debug_version = LLVMValueAsMetadata(debug_version_val);
+    LLVMAddModuleFlag(ctx->module, LLVMModuleFlagBehaviorWarning, "Debug Info Version", strlen("Debug Info Version"), debug_version);
+    LLVMValueRef dwarf_version_val = LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 5, false);
+    LLVMMetadataRef dwarf_version = LLVMValueAsMetadata(dwarf_version_val);
+    LLVMAddModuleFlag(ctx->module, LLVMModuleFlagBehaviorWarning, "Dwarf Version", strlen("Dwarf Version"), dwarf_version);
+
+    ctx->di_file = LLVMDIBuilderCreateFile(ctx->di_builder, ctx->debug_file, strlen(ctx->debug_file), ctx->debug_dir, strlen(ctx->debug_dir));
+    ctx->di_compile_unit = LLVMDIBuilderCreateCompileUnit(
+        ctx->di_builder,
+        LLVMDWARFSourceLanguageC,
+        ctx->di_file,
+        "mach-c",
+        strlen("mach-c"),
+        ctx->opt_level > 0,
+        "",
+        0,
+        0,
+        "",
+        0,
+    LLVMDWARFEmissionFull,
+    0,
+    false,
+    false,
+    "",
+    0,
+    "",
+    0);
+
+    ctx->current_di_scope = ctx->di_compile_unit;
+    ctx->debug_finalized  = false;
+}
+
+static void codegen_debug_finalize(CodegenContext *ctx)
+{
+    if (!ctx->debug_info || !ctx->di_builder || ctx->debug_finalized)
+        return;
+    LLVMDIBuilderFinalize(ctx->di_builder);
+    ctx->debug_finalized = true;
+}
+
+static LLVMMetadataRef codegen_get_current_scope(CodegenContext *ctx)
+{
+    if (ctx->current_di_scope)
+        return ctx->current_di_scope;
+    return ctx->di_compile_unit;
+}
+
+static void codegen_set_debug_location(CodegenContext *ctx, AstNode *node)
+{
+    if (!ctx->debug_info || !ctx->di_builder)
+        return;
+    if (!node || !node->token || !ctx->source_lexer)
+        return;
+
+    int line = lexer_get_pos_line(ctx->source_lexer, node->token->pos);
+    int col  = lexer_get_pos_line_offset(ctx->source_lexer, node->token->pos);
+    LLVMMetadataRef scope = codegen_get_current_scope(ctx);
+    if (!scope)
+        return;
+    if (scope != ctx->di_compile_unit)
+    {
+        LLVMMetadataRef loc = LLVMDIBuilderCreateDebugLocation(ctx->context, (unsigned)(line + 1), (unsigned)(col + 1), scope, NULL);
+        LLVMSetCurrentDebugLocation2(ctx->builder, loc);
+    }
+}
+
+static LLVMMetadataRef codegen_debug_get_unknown_type(CodegenContext *ctx)
+{
+    if (!ctx->di_builder)
+        return NULL;
+    if (!ctx->di_unknown_type)
+    {
+        const char *name = "u64";
+        ctx->di_unknown_type = LLVMDIBuilderCreateBasicType(ctx->di_builder, name, strlen(name), 0, 64, 0);
+    }
+    return ctx->di_unknown_type;
+}
+
+static LLVMMetadataRef codegen_debug_create_subprogram(CodegenContext *ctx, AstNode *stmt, LLVMValueRef func, const char *display_name, const char *link_name, size_t param_count)
+{
+    if (!ctx->debug_info || !ctx->di_builder || !func)
+        return NULL;
+
+    LLVMMetadataRef scope = ctx->di_compile_unit ? ctx->di_compile_unit : ctx->di_file;
+    if (!scope || !ctx->di_file)
+        return NULL;
+
+    unsigned line = 1;
+    if (stmt && stmt->token && ctx->source_lexer)
+        line = (unsigned)(lexer_get_pos_line(ctx->source_lexer, stmt->token->pos) + 1);
+
+    size_t total_params = param_count + 1; // include return type slot
+    LLVMMetadataRef *param_types = malloc(sizeof(LLVMMetadataRef) * total_params);
+    if (!param_types)
+        return NULL;
+
+    LLVMMetadataRef fallback = codegen_debug_get_unknown_type(ctx);
+    for (size_t i = 0; i < total_params; i++)
+    {
+        param_types[i] = fallback;
+    }
+
+    LLVMMetadataRef subroutine_type = LLVMDIBuilderCreateSubroutineType(ctx->di_builder, ctx->di_file, param_types, (unsigned)total_params, 0);
+    free(param_types);
+    if (!subroutine_type)
+        return NULL;
+
+    const char *disp = display_name && display_name[0] ? display_name : (link_name && link_name[0] ? link_name : "<function>");
+    const char *link = link_name && link_name[0] ? link_name : disp;
+
+    LLVMMetadataRef subprogram = LLVMDIBuilderCreateFunction(ctx->di_builder,
+        scope,
+        disp,
+        strlen(disp),
+        link,
+        strlen(link),
+        ctx->di_file,
+        line,
+        subroutine_type,
+        false,
+        true,
+        line,
+        LLVMDIFlagZero,
+        ctx->opt_level > 0);
+
+    LLVMSetSubprogram(func, subprogram);
+    return subprogram;
 }
 
 static void codegen_declare_function_symbol(CodegenContext *ctx, Symbol *sym)
@@ -183,11 +403,21 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
     ctx->errors     = NULL;
     ctx->has_errors = false;
 
-    ctx->opt_level    = 2;
-    ctx->debug_info   = false;
-    ctx->is_runtime   = false;
-    ctx->use_runtime  = false;
-    ctx->package_name = NULL;
+    ctx->opt_level      = 2;
+    ctx->debug_info     = false;
+    ctx->debug_finalized = false;
+    ctx->is_runtime     = false;
+    ctx->use_runtime    = false;
+    ctx->package_name   = NULL;
+    ctx->di_builder            = NULL;
+    ctx->di_compile_unit       = NULL;
+    ctx->di_file               = NULL;
+    ctx->current_di_scope      = NULL;
+    ctx->current_di_subprogram = NULL;
+    ctx->debug_full_path  = NULL;
+    ctx->debug_dir        = NULL;
+    ctx->debug_file       = NULL;
+    ctx->di_unknown_type  = NULL;
 
     ctx->current_vararg_count_value = NULL;
     ctx->current_vararg_array       = NULL;
@@ -214,6 +444,15 @@ void codegen_context_dnit(CodegenContext *ctx)
     free(ctx->type_cache.types);
     free(ctx->type_cache.llvm_types);
 
+    if (ctx->di_builder)
+    {
+        codegen_debug_finalize(ctx);
+        LLVMDisposeDIBuilder(ctx->di_builder);
+    }
+    free(ctx->debug_full_path);
+    free(ctx->debug_dir);
+    free(ctx->debug_file);
+
     // clean up llvm
     LLVMDisposeBuilder(ctx->builder);
     LLVMDisposeModule(ctx->module);
@@ -232,6 +471,9 @@ bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *anal
         return false;
     }
 
+    if (ctx->debug_info)
+        codegen_debug_init(ctx);
+
     if (analyzer)
     {
         codegen_declare_functions_in_scope(ctx, analyzer->symbol_table.global_scope);
@@ -244,6 +486,9 @@ bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *anal
         AstNode *stmt = root->program.stmts->items[i];
         codegen_stmt(ctx, stmt);
     }
+
+    if (ctx->debug_info)
+        codegen_debug_finalize(ctx);
 
     // verify module (do not abort process; print diagnostics)
     char *error = NULL;
@@ -549,6 +794,8 @@ LLVMValueRef codegen_stmt(CodegenContext *ctx, AstNode *stmt)
 {
     if (!stmt)
         return NULL;
+
+    codegen_set_debug_location(ctx, stmt);
 
     switch (stmt->kind)
     {
@@ -931,18 +1178,32 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(ctx->context, func, "entry");
         LLVMPositionBuilderAtEnd(ctx->builder, entry);
 
-        // save current function
-    LLVMValueRef prev_function            = ctx->current_function;
-    Type        *prev_ftype               = ctx->current_function_type;
-    LLVMValueRef prev_vararg_count_value  = ctx->current_vararg_count_value;
-    LLVMValueRef prev_vararg_array        = ctx->current_vararg_array;
-    size_t       prev_fixed_param_count   = ctx->current_fixed_param_count;
-    ctx->current_function                 = func;
-    ctx->current_function_type            = stmt->type;
+        LLVMMetadataRef prev_scope      = ctx->current_di_scope;
+        LLVMMetadataRef prev_subprogram = ctx->current_di_subprogram;
+        LLVMMetadataRef subprogram      = NULL;
+        if (ctx->debug_info && ctx->di_builder)
+        {
+            const char *disp = stmt->fun_stmt.name ? stmt->fun_stmt.name : func_name;
+            const char *link = func_name ? func_name : disp;
+            subprogram       = codegen_debug_create_subprogram(ctx, stmt, func, disp, link, fixed_param_count);
+            if (subprogram)
+            {
+                ctx->current_di_scope      = subprogram;
+                ctx->current_di_subprogram = subprogram;
+                codegen_set_debug_location(ctx, stmt);
+            }
+        }
 
-        // set parameter names and create allocas for fixed params
-    size_t fixed_params            = fixed_param_count;
-    ctx->current_fixed_param_count = fixed_params;
+        LLVMValueRef prev_function           = ctx->current_function;
+        Type        *prev_ftype              = ctx->current_function_type;
+        LLVMValueRef prev_vararg_count_value = ctx->current_vararg_count_value;
+        LLVMValueRef prev_vararg_array       = ctx->current_vararg_array;
+        size_t       prev_fixed_param_count  = ctx->current_fixed_param_count;
+        ctx->current_function                = func;
+        ctx->current_function_type           = stmt->type;
+
+        size_t fixed_params            = fixed_param_count;
+        ctx->current_fixed_param_count = fixed_params;
         if (stmt->fun_stmt.params)
         {
             size_t fixed_index = 0;
@@ -950,7 +1211,7 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
             {
                 AstNode *param = stmt->fun_stmt.params->items[i];
                 if (param->param_stmt.is_variadic)
-                    continue; // skip sentinel
+                    continue;
                 LLVMValueRef param_value = LLVMGetParam(func, (unsigned)fixed_index);
                 LLVMSetValueName2(param_value, param->param_stmt.name, strlen(param->param_stmt.name));
                 LLVMTypeRef  param_type   = codegen_get_llvm_type(ctx, param->type);
@@ -962,7 +1223,6 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
             }
         }
 
-        // collect variadic arguments (allocate and store each to allow address access)
         if (uses_mach_varargs)
         {
             unsigned count_index = (unsigned)fixed_params;
@@ -977,10 +1237,8 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
             ctx->current_vararg_array       = NULL;
         }
 
-        // generate body
         codegen_stmt(ctx, stmt->fun_stmt.body);
 
-        // add implicit return if needed
         if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(ctx->builder)))
         {
             if (stmt->type->function.return_type == NULL)
@@ -989,23 +1247,27 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
             }
             else
             {
-                // emit a default zero to keep IR valid; semantic analysis reports real missing returns
                 LLVMTypeRef  ret_ty = codegen_get_llvm_type(ctx, stmt->type->function.return_type);
                 LLVMValueRef zero   = LLVMConstNull(ret_ty);
                 LLVMBuildRet(ctx->builder, zero);
             }
         }
 
-        // restore previous function & clear variadic tracking
         ctx->current_vararg_count_value = prev_vararg_count_value;
         ctx->current_vararg_array       = prev_vararg_array;
         ctx->current_fixed_param_count  = prev_fixed_param_count;
-    ctx->current_function          = prev_function;
-    ctx->current_function_type     = prev_ftype;
+        ctx->current_function           = prev_function;
+        ctx->current_function_type      = prev_ftype;
+        if (subprogram)
+        {
+            ctx->current_di_scope      = prev_scope;
+            ctx->current_di_subprogram = prev_subprogram;
+            LLVMSetCurrentDebugLocation2(ctx->builder, NULL);
+        }
     }
 
     return func;
-    }
+}
 
 LLVMValueRef codegen_stmt_ret(CodegenContext *ctx, AstNode *stmt)
 {
@@ -1222,6 +1484,8 @@ LLVMValueRef codegen_expr(CodegenContext *ctx, AstNode *expr)
 {
     if (!expr)
         return NULL;
+
+    codegen_set_debug_location(ctx, expr);
 
     switch (expr->kind)
     {

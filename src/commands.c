@@ -224,6 +224,8 @@ void mach_print_usage(const char *program_name)
     fprintf(stderr, "  --no-link     don't create executable (just compile)\n");
     fprintf(stderr, "  --no-pie      disable position independent executable\n");
     fprintf(stderr, "  --link <obj>  link with additional object file\n");
+    fprintf(stderr, "  -g, --debug   include debug info (default)\n");
+    fprintf(stderr, "  --no-debug    disable debug info\n");
     fprintf(stderr, "  -I <dir>      add module search directory\n");
     fprintf(stderr, "  -M n=dir      map module prefix 'n' to base directory 'dir'\n");
 }
@@ -233,7 +235,7 @@ int mach_cmd_build(int argc, char **argv)
     if (argc < 3) { mach_print_usage(argv[0]); return 1; }
 
     const char *filename = argv[2];
-    const char *output_file = NULL; int opt_level = 2; int link_exe = 1; int no_pie = 0;
+    const char *output_file = NULL; int opt_level = 2; int link_exe = 1; int no_pie = 0; int debug_info = 1;
     int emit_ast = 0; int emit_ir = 0; int emit_asm = 0;
     const char *emit_ast_path = NULL; const char *emit_ir_path = NULL; const char *emit_asm_path = NULL;
 
@@ -267,6 +269,8 @@ int mach_cmd_build(int argc, char **argv)
                 emit_asm_path = argv[i] + 11;
         }
         else if (strcmp(argv[i], "--no-pie") == 0) { no_pie = 1; }
+        else if (strcmp(argv[i], "-g") == 0 || strcmp(argv[i], "--debug") == 0) { debug_info = 1; }
+        else if (strcmp(argv[i], "--no-debug") == 0) { debug_info = 0; }
         else if (strcmp(argv[i], "--link") == 0) {
             if (i + 1 < argc) { VPUSH(link_objs, argv[++i]); }
             else { fprintf(stderr, "error: --link requires an object file\n"); return 1; }
@@ -343,7 +347,7 @@ int mach_cmd_build(int argc, char **argv)
         }
     }
 
-    CodegenContext cg; codegen_context_init(&cg, semantic_module_name, no_pie); cg.opt_level = opt_level; cg.use_runtime = (cfg && config_has_runtime_module(cfg)); cg.source_file = filename; cg.source_lexer = &lx;
+    CodegenContext cg; codegen_context_init(&cg, semantic_module_name, no_pie); cg.opt_level = opt_level; cg.use_runtime = (cfg && config_has_runtime_module(cfg)); cg.debug_info = debug_info; cg.source_file = filename; cg.source_lexer = &lx;
 
     if (!codegen_generate(&cg, prog, &an)) { fprintf(stderr, "code generation failed:\n"); codegen_print_errors(&cg); codegen_context_dnit(&cg); if (cfg) { config_dnit(cfg); free(cfg); } free(module_name_override); semantic_analyzer_dnit(&an); ast_node_dnit(prog); free(prog); parser_dnit(&ps); lexer_dnit(&lx); free(source); free(auto_ast); return 1; }
 
@@ -385,7 +389,7 @@ int mach_cmd_build(int argc, char **argv)
     {
         snprintf(dep_out_dir, sizeof(dep_out_dir), "%s/out/obj", project_dir_root);
         ensure_dir(dep_out_dir);
-        if (!module_manager_compile_dependencies(&an.module_manager, dep_out_dir, opt_level, no_pie))
+    if (!module_manager_compile_dependencies(&an.module_manager, dep_out_dir, opt_level, no_pie, debug_info))
         {
             fprintf(stderr, "error: failed to compile dependencies\n");
             if (cfg) { config_dnit(cfg); free(cfg); }
@@ -414,7 +418,12 @@ int mach_cmd_build(int argc, char **argv)
     if (link_exe) {
     char *exe = NULL; if (!output_file) exe = get_base_filename_only(filename); else exe = strdup(output_file);
         size_t sz = 4096 + (link_objs.count * 256) + (dep_count * 256); char *cmd = malloc(sz);
-        snprintf(cmd, sz, no_pie ? "cc -no-pie -o %s %s" : "cc -pie -o %s %s", exe, obj_file);
+        const char *link_fmt = NULL;
+        if (no_pie)
+            link_fmt = debug_info ? "cc -g -no-pie -o %s %s" : "cc -no-pie -o %s %s";
+        else
+            link_fmt = debug_info ? "cc -g -pie -o %s %s" : "cc -pie -o %s %s";
+        snprintf(cmd, sz, link_fmt, exe, obj_file);
         for (int i = 0; i < dep_count; i++) { strcat(cmd, " "); strcat(cmd, dep_objs[i]); }
         for (int i = 0; i < link_objs.count; i++) { strcat(cmd, " "); strcat(cmd, link_objs.items[i]); }
         if (system(cmd) != 0) { fprintf(stderr, "error: failed to link executable '%s'\n", exe); }

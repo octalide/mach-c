@@ -14,10 +14,10 @@ Concise reference for the Mach language as implemented by `cmach`.
 Quick start:
 
 ```
-use console: std.io.console;
+use std.io.console;
 
-fun main() u32 {
-    console.print("Hello, world!\n");
+pub fun main() u32 {
+    print("Hello, world!\n");
     ret 0;
 }
 ```

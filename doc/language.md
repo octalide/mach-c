@@ -3,7 +3,7 @@
 This document summarizes core syntax and semantics recognized by the compiler.
 
 ## Lexical
-- Comments: line comments are supported and skipped by the lexer.
+- Comments: line comments start with `#` and run until the end of the line.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Literals:
   - Integers: decimal, binary `0b...`, octal `0o...`, hex `0x...`; underscores allowed; type inferred.
@@ -11,9 +11,11 @@ This document summarizes core syntax and semantics recognized by the compiler.
   - Char: `'a'` with escapes `\n`, `\t`, `\r`, `\0`, `\'`, `\"`, `\\`.
   - String: `"..."` UTF-8; type is `[]u8` (aliasable as `string`).
 
-## Keywords
-- Declarations: `use`, `ext`, `def`, `val`, `var`, `fun`, `str`, `uni`.
-- Control flow: `if`, `or` (else-if chain), `for`, `brk`, `cnt`, `ret`.
+- Keywords
+  - Visibility: `pub` (may precede declarations except `use` and `asm`).
+  - Declarations: `use`, `ext`, `def`, `val`, `var`, `fun`, `str`, `uni`.
+  - Control flow: `if`, `or` (else-if chain), `for`, `brk`, `cnt`, `ret`.
+  - Miscellaneous: `asm` (inline assembly), `nil` (null literal sugar).
 
 ## Types (surface syntax)
 - Named: identifiers (builtins include `u8,u16,u32,u64,i8,i16,i32,i64,f16,f32,f64`, `ptr`).
@@ -29,7 +31,8 @@ This document summarizes core syntax and semantics recognized by the compiler.
   - Anonymous in types: `str { field: T; ... }`, `uni { field: T; ... }`.
 
 ## Declarations
-- Module import: `use alias: pkg.path;` or `use pkg.path;`.
+- Module import: `use pkg.path;`. Import aliases are not yet supported.
+- Visibility: prefix a declaration with `pub` to export it from the current module. `pub` is rejected on `use` statements and inline `asm` blocks.
 - External symbol: `ext "C:puts" puts: fun(*u8) i64;` (format `"CONV:SYMBOL"`; default convention `C`, symbol defaults to name).
 - Type alias: `def name: T;`.
 - Constant and variable:
@@ -38,8 +41,10 @@ This document summarizes core syntax and semantics recognized by the compiler.
 - Function:
   - `fun name(p1: T1, p2: T2) R { ... }`
   - Return with `ret expr;` or `ret;` when `R` omitted.
+  - Top-level `ext` declarations use the same function type syntax and accept an optional convention string literal: `pub ext "C:puts" puts: fun(*u8) i64;`.
 
-## Statements
+- Inline assembly:
+  - `asm <rest of line>` copies the trimmed text after `asm` directly into the generated assembly stream. No `pub` prefix is allowed.
 - Block: `{ ... }` (lexical scope).
 - If/else-if chain:
   ```
@@ -60,10 +65,12 @@ This document summarizes core syntax and semantics recognized by the compiler.
 - Cast: `expr :: T`.
 - Unary: `+ - ! ~ ? @`.
   - `?x` address-of; `@p` dereference; `!x` logical not (returns `u8`).
+- Assignment: `a = b` evaluates the right-hand side first, then stores into the left-hand side. The expression result is the assigned value.
 - Binary precedence (low → high): `=`; `||`; `&&`; `|`; `^`; `&`; `== !=`; `< <= > >=`; `<< >>`; `+ -`; `* / %`.
 - Typed literals:
   - Arrays: `[N]T{ a, b, c }` or `[]T{ a, b }`.
   - Structs: `TypeName{ field: expr, ... }` or `str { ... }{ ... }`.
+- Nil literal: `nil` desugars to the pointer literal `?0`.
 
 ## Type semantics
 - Integer widening and float promotion follow usual rules; binary ops promote to a common type.

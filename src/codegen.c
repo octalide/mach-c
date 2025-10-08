@@ -22,42 +22,315 @@ static LLVMMetadataRef codegen_debug_create_subprogram(CodegenContext *ctx, AstN
 static bool codegen_eval_const_i64(CodegenContext *ctx, AstNode *expr, int64_t *out)
 {
     (void)ctx;
-    if (!expr || !out) return false;
+    if (!expr || !out)
+    {
+        return false;
+    }
+
     switch (expr->kind)
     {
     case AST_EXPR_LIT:
-        if (expr->lit_expr.kind == TOKEN_LIT_INT) { *out = (int64_t)expr->lit_expr.int_val; return true; }
-        if (expr->lit_expr.kind == TOKEN_LIT_CHAR) { *out = (int64_t)expr->lit_expr.char_val; return true; }
-        return false;
+        switch (expr->lit_expr.kind)
+        {
+        case TOKEN_LIT_INT:
+            *out = (int64_t)expr->lit_expr.int_val;
+            return true;
+        case TOKEN_LIT_CHAR:
+            *out = (int64_t)expr->lit_expr.char_val;
+            return true;
+        default:
+            return false;
+        }
+
+    case AST_EXPR_NULL:
+        *out = 0;
+        return true;
+
     case AST_EXPR_IDENT:
-        if (expr->symbol && (expr->symbol->kind == SYMBOL_VAL || expr->symbol->kind == SYMBOL_VAR) && expr->symbol->decl)
+        if (!expr->symbol)
+        {
+            return false;
+        }
+
+        if (expr->symbol->has_const_i64)
+        {
+            *out = expr->symbol->const_i64;
+            return true;
+        }
+
+        if ((expr->symbol->kind == SYMBOL_VAL || expr->symbol->kind == SYMBOL_VAR) && expr->symbol->decl)
         {
             AstNode *decl = expr->symbol->decl;
             AstNode *init = NULL;
             if (decl->kind == AST_STMT_VAL || decl->kind == AST_STMT_VAR)
+            {
                 init = decl->var_stmt.init;
-            if (init)
-                return codegen_eval_const_i64(ctx, init, out);
+            }
+
+            if (init && codegen_eval_const_i64(ctx, init, out))
+            {
+                if (expr->symbol->kind == SYMBOL_VAL)
+                {
+                    expr->symbol->has_const_i64 = true;
+                    expr->symbol->const_i64     = *out;
+                }
+                return true;
+            }
         }
         return false;
-    case AST_EXPR_BINARY:
+
+    case AST_EXPR_UNARY:
     {
-        int64_t l = 0, r = 0;
-        switch (expr->binary_expr.op)
+        int64_t value = 0;
+        if (!codegen_eval_const_i64(ctx, expr->unary_expr.expr, &value))
         {
-        case TOKEN_EQUAL_EQUAL:
-            if (!codegen_eval_const_i64(ctx, expr->binary_expr.left, &l) || !codegen_eval_const_i64(ctx, expr->binary_expr.right, &r)) return false;
-            *out = (l == r) ? 1 : 0; return true;
-        case TOKEN_PIPE_PIPE:
-            if (!codegen_eval_const_i64(ctx, expr->binary_expr.left, &l) || !codegen_eval_const_i64(ctx, expr->binary_expr.right, &r)) return false;
-            *out = ((l != 0) || (r != 0)) ? 1 : 0; return true;
-        case TOKEN_AMPERSAND_AMPERSAND:
-            if (!codegen_eval_const_i64(ctx, expr->binary_expr.left, &l) || !codegen_eval_const_i64(ctx, expr->binary_expr.right, &r)) return false;
-            *out = ((l != 0) && (r != 0)) ? 1 : 0; return true;
+            return false;
+        }
+
+        switch (expr->unary_expr.op)
+        {
+        case TOKEN_MINUS:
+            *out = -value;
+            return true;
+        case TOKEN_PLUS:
+            *out = value;
+            return true;
+        case TOKEN_BANG:
+            *out = (value == 0) ? 1 : 0;
+            return true;
+        case TOKEN_TILDE:
+            *out = ~value;
+            return true;
         default:
             return false;
         }
     }
+
+    case AST_EXPR_BINARY:
+    {
+        int64_t lhs = 0;
+        int64_t rhs = 0;
+        if (!codegen_eval_const_i64(ctx, expr->binary_expr.left, &lhs) || !codegen_eval_const_i64(ctx, expr->binary_expr.right, &rhs))
+        {
+            return false;
+        }
+
+        switch (expr->binary_expr.op)
+        {
+        case TOKEN_PLUS:
+            *out = lhs + rhs;
+            return true;
+        case TOKEN_MINUS:
+            *out = lhs - rhs;
+            return true;
+        case TOKEN_STAR:
+            *out = lhs * rhs;
+            return true;
+        case TOKEN_SLASH:
+            if (rhs == 0)
+            {
+                return false;
+            }
+            *out = lhs / rhs;
+            return true;
+        case TOKEN_PERCENT:
+            if (rhs == 0)
+            {
+                return false;
+            }
+            *out = lhs % rhs;
+            return true;
+        case TOKEN_LESS_LESS:
+            if (rhs < 0 || rhs >= 64)
+            {
+                return false;
+            }
+            *out = lhs << rhs;
+            return true;
+        case TOKEN_GREATER_GREATER:
+            if (rhs < 0 || rhs >= 64)
+            {
+                return false;
+            }
+            *out = lhs >> rhs;
+            return true;
+        case TOKEN_PIPE:
+            *out = lhs | rhs;
+            return true;
+        case TOKEN_AMPERSAND:
+            *out = lhs & rhs;
+            return true;
+        case TOKEN_CARET:
+            *out = lhs ^ rhs;
+            return true;
+        case TOKEN_EQUAL_EQUAL:
+            *out = (lhs == rhs) ? 1 : 0;
+            return true;
+        case TOKEN_BANG_EQUAL:
+            *out = (lhs != rhs) ? 1 : 0;
+            return true;
+        case TOKEN_LESS:
+            *out = (lhs < rhs) ? 1 : 0;
+            return true;
+        case TOKEN_LESS_EQUAL:
+            *out = (lhs <= rhs) ? 1 : 0;
+            return true;
+        case TOKEN_GREATER:
+            *out = (lhs > rhs) ? 1 : 0;
+            return true;
+        case TOKEN_GREATER_EQUAL:
+            *out = (lhs >= rhs) ? 1 : 0;
+            return true;
+        case TOKEN_PIPE_PIPE:
+            *out = ((lhs != 0) || (rhs != 0)) ? 1 : 0;
+            return true;
+        case TOKEN_AMPERSAND_AMPERSAND:
+            *out = ((lhs != 0) && (rhs != 0)) ? 1 : 0;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    case AST_EXPR_CAST:
+    {
+        int64_t value = 0;
+        if (!codegen_eval_const_i64(ctx, expr->cast_expr.expr, &value))
+        {
+            return false;
+        }
+
+        Type *target = type_resolve_alias(expr->type);
+        if (!target)
+        {
+            return false;
+        }
+
+        if (type_is_integer(target))
+        {
+            size_t bits = target->size * 8;
+            if (bits == 0 || bits > 64)
+            {
+                return false;
+            }
+
+            if (type_is_signed(target))
+            {
+                if (bits < 64)
+                {
+                    int shift = (int)(64 - bits);
+                    value     = (value << shift) >> shift;
+                }
+                *out = value;
+                return true;
+            }
+
+            uint64_t uvalue = (uint64_t)value;
+            if (bits < 64)
+            {
+                uint64_t mask = (1ULL << bits) - 1ULL;
+                uvalue &= mask;
+            }
+            *out = (int64_t)uvalue;
+            return true;
+        }
+
+        if (type_is_pointer_like(target))
+        {
+            *out = value;
+            return true;
+        }
+
+        return false;
+    }
+
+    case AST_EXPR_CALL:
+        if (expr->call_expr.func && expr->call_expr.func->kind == AST_EXPR_IDENT && expr->call_expr.args)
+        {
+            const char *name = expr->call_expr.func->ident_expr.name;
+
+            if (strcmp(name, "size_of") == 0)
+            {
+                if (expr->call_expr.args->count != 1)
+                {
+                    return false;
+                }
+
+                AstNode *arg = expr->call_expr.args->items[0];
+                if (!arg || !arg->type)
+                {
+                    return false;
+                }
+
+                Type *arg_type = type_resolve_alias(arg->type);
+                if (!arg_type)
+                {
+                    return false;
+                }
+
+                *out = (int64_t)type_sizeof(arg_type);
+                return true;
+            }
+
+            if (strcmp(name, "align_of") == 0)
+            {
+                if (expr->call_expr.args->count != 1)
+                {
+                    return false;
+                }
+
+                AstNode *arg = expr->call_expr.args->items[0];
+                if (!arg || !arg->type)
+                {
+                    return false;
+                }
+
+                Type *arg_type = type_resolve_alias(arg->type);
+                if (!arg_type)
+                {
+                    return false;
+                }
+
+                *out = (int64_t)type_alignof(arg_type);
+                return true;
+            }
+
+            if (strcmp(name, "offset_of") == 0)
+            {
+                if (expr->call_expr.args->count != 2)
+                {
+                    return false;
+                }
+
+                AstNode *type_arg  = expr->call_expr.args->items[0];
+                AstNode *field_arg = expr->call_expr.args->items[1];
+                if (!type_arg || !field_arg || field_arg->kind != AST_EXPR_IDENT || !type_arg->type)
+                {
+                    return false;
+                }
+
+                Type *struct_type = type_resolve_alias(type_arg->type);
+                if (!struct_type || struct_type->kind != TYPE_STRUCT || !struct_type->composite.fields)
+                {
+                    return false;
+                }
+
+                const char *field_name = field_arg->ident_expr.name;
+                for (size_t i = 0; i < struct_type->composite.field_count; i++)
+                {
+                    Symbol *field = &struct_type->composite.fields[i];
+                    if (strcmp(field->name, field_name) == 0)
+                    {
+                        *out = (int64_t)field->field.offset;
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
+        return false;
+
     default:
         return false;
     }
@@ -1026,6 +1299,10 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
         if (stmt->var_stmt.is_val)
         {
             LLVMSetGlobalConstant(global, true);
+        }
+        else
+        {
+            LLVMSetGlobalConstant(global, false);
         }
         // initializer
         if (stmt->var_stmt.init)

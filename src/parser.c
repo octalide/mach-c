@@ -232,6 +232,7 @@ void parser_synchronize(Parser *parser)
         case TOKEN_KW_VAL:
         case TOKEN_KW_VAR:
         case TOKEN_KW_FUN:
+        case TOKEN_KW_ASM:
             return;
         default:
             parser_advance(parser);
@@ -461,6 +462,8 @@ AstNode *parser_parse_stmt(Parser *parser)
         return parser_parse_stmt_ret(parser);
     case TOKEN_L_BRACE:
         return parser_parse_stmt_block(parser);
+    case TOKEN_KW_ASM:
+        return parser_parse_stmt_asm(parser);
     default:
         return parser_parse_stmt_expr(parser);
     }
@@ -1365,35 +1368,96 @@ static AstNode *parser_parse_stmt_asm(Parser *parser)
 
     Token *tok = parser->previous;
 
-    // collect rest of source line (raw) directly from lexer position
-    int start_pos = parser->lexer->pos;
-    while (!lexer_at_end(parser->lexer) && lexer_current(parser->lexer) != '\n')
+    if (!parser_check(parser, TOKEN_L_BRACE))
     {
-        lexer_advance(parser->lexer);
+        parser_error_at_current(parser, "expected '{' after 'asm'");
+        return NULL;
     }
-    int len = parser->lexer->pos - start_pos;
-    char *code = calloc((size_t)len + 1, 1);
-    if (len > 0)
+
+    Token       *open_token = parser->current;
+    const char  *source     = parser->lexer->source;
+    int          source_len = (int)strlen(source);
+    int          start_pos  = open_token->pos + open_token->len;
+    int          pos        = start_pos;
+    int          depth      = 1;
+
+    while (pos < source_len && depth > 0)
     {
-        memcpy(code, parser->lexer->source + start_pos, len);
-        // trim leading whitespace
-        int leading = 0;
-        while (code[leading] == ' ' || code[leading] == '\t') leading++;
-        if (leading > 0)
+        char c = source[pos];
+        if (c == '{')
         {
-            memmove(code, code + leading, len - leading + 1);
+            depth++;
         }
-        // trim trailing whitespace
-        size_t newlen = strlen(code);
-        while (newlen > 0 && (code[newlen - 1] == ' ' || code[newlen - 1] == '\t' || code[newlen - 1] == '\r'))
+        else if (c == '}')
         {
-            code[--newlen] = '\0';
+            depth--;
+        }
+        pos++;
+    }
+
+    if (depth != 0)
+    {
+        parser_error(parser, open_token, "unterminated asm block");
+        return NULL;
+    }
+
+    int close_pos = pos - 1;
+    if (close_pos < start_pos)
+    {
+        close_pos = start_pos;
+    }
+
+    int   code_len = close_pos - start_pos;
+    char *code     = calloc((size_t)code_len + 1, 1);
+    if (!code)
+    {
+        parser_error(parser, tok, "memory allocation failed for asm block");
+        return NULL;
+    }
+
+    if (code_len > 0)
+    {
+        memcpy(code, source + start_pos, (size_t)code_len);
+    }
+    code[code_len] = '\0';
+
+    while (code_len > 0 && (code[0] == '\n' || code[0] == '\r'))
+    {
+        memmove(code, code + 1, (size_t)code_len);
+        code_len--;
+        code[code_len] = '\0';
+    }
+
+    while (code_len > 0)
+    {
+        char tail = code[code_len - 1];
+        if (tail == ' ' || tail == '\t' || tail == '\n' || tail == '\r')
+        {
+            code[code_len - 1] = '\0';
+            code_len--;
+        }
+        else
+        {
+            break;
         }
     }
-    if (!lexer_at_end(parser->lexer) && lexer_current(parser->lexer) == '\n')
+
+    int sem_pos = pos;
+    while (sem_pos < source_len && (source[sem_pos] == ' ' || source[sem_pos] == '\t' || source[sem_pos] == '\n' || source[sem_pos] == '\r'))
     {
-        lexer_advance(parser->lexer);
+        sem_pos++;
     }
+
+    if (sem_pos >= source_len || source[sem_pos] != ';')
+    {
+        free(code);
+        parser_error(parser, open_token, "expected ';' after asm block");
+        return NULL;
+    }
+
+    int after_sem = sem_pos + 1;
+    parser->lexer->pos = after_sem;
+    parser_advance(parser);
 
     AstNode *node = parser_alloc_node(parser, AST_STMT_ASM, tok);
     if (!node)
@@ -1401,7 +1465,9 @@ static AstNode *parser_parse_stmt_asm(Parser *parser)
         free(code);
         return NULL;
     }
-    node->asm_stmt.code = code;
+
+    node->asm_stmt.code        = code;
+    node->asm_stmt.constraints = NULL;
     return node;
 }
 

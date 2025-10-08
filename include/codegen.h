@@ -62,6 +62,10 @@ struct CodegenContext
     // initialization context
     bool generating_mutable_init; // true when generating initializer for var (not val)
 
+    // module-level assembly aggregation
+    char  *module_inline_asm;
+    size_t module_inline_asm_len;
+
     // error tracking
     CodegenError *errors;
     bool          has_errors;

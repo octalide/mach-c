@@ -399,6 +399,8 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
     ctx->break_block             = NULL;
     ctx->continue_block          = NULL;
     ctx->generating_mutable_init = false;
+    ctx->module_inline_asm       = NULL;
+    ctx->module_inline_asm_len   = 0;
 
     ctx->errors     = NULL;
     ctx->has_errors = false;
@@ -459,6 +461,7 @@ void codegen_context_dnit(CodegenContext *ctx)
     LLVMDisposeTargetMachine(ctx->target_machine);
     LLVMContextDispose(ctx->context);
     free(ctx->package_name);
+    free(ctx->module_inline_asm);
 
     // no heap state for varargs
 }
@@ -864,8 +867,49 @@ LLVMValueRef codegen_stmt(CodegenContext *ctx, AstNode *stmt)
             }
             else
             {
-                // module-level inline asm (e.g., directives)
-                LLVMSetModuleInlineAsm2(ctx->module, stmt->asm_stmt.code, strlen(stmt->asm_stmt.code));
+                size_t code_len = strlen(stmt->asm_stmt.code);
+                if (code_len > 0)
+                {
+                    size_t existing_len = ctx->module_inline_asm_len;
+                    size_t need_leading_newline = (existing_len > 0 && ctx->module_inline_asm[existing_len - 1] != '\n') ? 1 : 0;
+                    size_t need_trailing_newline = (stmt->asm_stmt.code[code_len - 1] != '\n') ? 1 : 0;
+                    size_t new_len = existing_len + need_leading_newline + code_len + need_trailing_newline;
+
+                    char *combined = malloc(new_len + 1);
+                    if (!combined)
+                    {
+                        codegen_error(ctx, stmt, "failed to allocate module inline asm buffer");
+                        return NULL;
+                    }
+
+                    size_t offset = 0;
+                    if (existing_len > 0)
+                    {
+                        memcpy(combined, ctx->module_inline_asm, existing_len);
+                        offset = existing_len;
+                    }
+
+                    if (need_leading_newline)
+                    {
+                        combined[offset++] = '\n';
+                    }
+
+                    memcpy(combined + offset, stmt->asm_stmt.code, code_len);
+                    offset += code_len;
+
+                    if (need_trailing_newline)
+                    {
+                        combined[offset++] = '\n';
+                    }
+
+                    combined[offset] = '\0';
+
+                    free(ctx->module_inline_asm);
+                    ctx->module_inline_asm     = combined;
+                    ctx->module_inline_asm_len = offset;
+
+                    LLVMSetModuleInlineAsm2(ctx->module, ctx->module_inline_asm, ctx->module_inline_asm_len);
+                }
             }
         }
         return NULL;

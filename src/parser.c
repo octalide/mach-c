@@ -378,19 +378,13 @@ AstNode *parser_parse_stmt_top(Parser *parser)
             parser_synchronize(parser);
             return NULL;
         }
-        // parse 'nil' as the unary expression '?0' for exact equivalence
-        AstNode *zero = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
-        if (!zero) { return NULL; }
-        zero->lit_expr.kind    = TOKEN_LIT_INT;
-        zero->lit_expr.int_val = 0;
-
-        AstNode *un = parser_alloc_node(parser, AST_EXPR_UNARY, parser->current);
-        if (!un) { ast_node_dnit(zero); free(zero); return NULL; }
-        un->unary_expr.op   = TOKEN_QUESTION;
-        un->unary_expr.expr = zero;
-
+        AstNode *nil_node = parser_alloc_node(parser, AST_EXPR_NULL, parser->current);
+        if (!nil_node)
+        {
+            return NULL;
+        }
         parser_advance(parser);
-        return un;
+        return nil_node;
     }
     case TOKEN_KW_USE:
         if (is_public)
@@ -1604,6 +1598,42 @@ AstNode *parser_parse_expr_postfix(Parser *parser)
             field_expr->field_expr.field  = field;
             expr                          = field_expr;
         }
+        else if (parser_match(parser, TOKEN_ARROW))
+        {
+            Token  *arrow_token = parser->previous;
+            char   *field       = parser_parse_identifier(parser);
+            if (!field)
+            {
+                ast_node_dnit(expr);
+                free(expr);
+                return NULL;
+            }
+
+            AstNode *deref = parser_alloc_node(parser, AST_EXPR_UNARY, arrow_token);
+            if (!deref)
+            {
+                free(field);
+                ast_node_dnit(expr);
+                free(expr);
+                return NULL;
+            }
+
+            deref->unary_expr.op   = TOKEN_AT;
+            deref->unary_expr.expr = expr;
+
+            AstNode *field_expr = parser_alloc_node(parser, AST_EXPR_FIELD, parser->previous);
+            if (!field_expr)
+            {
+                free(field);
+                ast_node_dnit(deref);
+                free(deref);
+                return NULL;
+            }
+
+            field_expr->field_expr.object = deref;
+            field_expr->field_expr.field  = field;
+            expr                          = field_expr;
+        }
         else if (parser_match(parser, TOKEN_COLON_COLON))
         {
             // type cast
@@ -1723,13 +1753,11 @@ AstNode *parser_parse_expr_atom(Parser *parser)
 
     case TOKEN_KW_NIL:
     {
-        AstNode *lit = parser_alloc_node(parser, AST_EXPR_LIT, parser->current);
+        AstNode *lit = parser_alloc_node(parser, AST_EXPR_NULL, parser->current);
         if (!lit)
         {
             return NULL;
         }
-        lit->lit_expr.kind    = TOKEN_LIT_INT;
-        lit->lit_expr.int_val = 0;
         parser_advance(parser);
         return lit;
     }

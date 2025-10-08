@@ -61,7 +61,7 @@ This document summarizes core syntax and semantics recognized by the compiler.
 ## Expressions
 - Primary: identifiers, literals, parenthesized `(...)`.
 - Calls: `f(a, b)`; arguments must match parameter types.
-- Index/field: `a[i]`, `s.field`. Module member access uses the same `.` syntax.
+- Index/field: `a[i]`, `s.field`. Pointers use `p->field` as shorthand for `(@p).field`. Module member access uses the same `.` syntax.
 - Cast: `expr :: T`.
 - Unary: `+ - ! ~ ? @`.
   - `?x` address-of; `@p` dereference; `!x` logical not (returns `u8`).
@@ -70,7 +70,7 @@ This document summarizes core syntax and semantics recognized by the compiler.
 - Typed literals:
   - Arrays: `[N]T{ a, b, c }` or `[]T{ a, b }`.
   - Structs: `TypeName{ field: expr, ... }` or `str { ... }{ ... }`.
-- Nil literal: `nil` desugars to the pointer literal `?0`.
+- Nil literal: `nil` produces a null pointer; its type is inferred from context or defaults to `ptr`.
 
 ## Type semantics
 - Integer widening and float promotion follow usual rules; binary ops promote to a common type.

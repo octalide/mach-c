@@ -13,7 +13,7 @@ Primitives and composites exposed by the implementation.
 - Untyped pointer: `ptr` (generic) exists internally; use `*T` for typed pointers.
 - Address-of `?expr` yields `*T` when `expr: T`.
 - Dereference `@p` yields `T` when `p: *T`.
-- The literal `nil` is sugar for the null pointer `?0` and type-checks against pointer-like types.
+- The literal `nil` evaluates to a null pointer; it type-checks against pointer-like types and defaults to `ptr` when no context is available.
 
 ## Arrays
 - Syntax: `[]T` (unbounded) or `[N]T`.

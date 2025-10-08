@@ -12,6 +12,7 @@
 
 // forward declarations
 static Type *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNode *expr, Type *specified_type, Type *resolved_type);
+static Type *semantic_analyze_null_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
 
 void semantic_analyzer_init(SemanticAnalyzer *analyzer)
 {
@@ -173,6 +174,8 @@ Type *semantic_analyze_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr,
     {
     case AST_EXPR_LIT:
         return semantic_analyze_lit_expr_with_hint(analyzer, expr, expected_type);
+    case AST_EXPR_NULL:
+        return semantic_analyze_null_expr(analyzer, expr, expected_type);
     case AST_EXPR_BINARY:
         return semantic_analyze_binary_expr(analyzer, expr);
     case AST_EXPR_UNARY:
@@ -1052,6 +1055,8 @@ bool semantic_analyze_if_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 
 bool semantic_analyze_or_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
+    bool success = true;
+
     // else-branch: 'or { ... }' has no condition
     if (stmt->cond_stmt.cond)
     {
@@ -1059,17 +1064,35 @@ bool semantic_analyze_or_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         if (!cond_type)
         {
             semantic_error(analyzer, stmt, "invalid condition in or statement");
-            return false;
+            success = false;
         }
-        if (!type_is_truthy(cond_type))
+        else if (!type_is_truthy(cond_type))
         {
             semantic_error(analyzer, stmt, "condition must be numeric or pointer-like");
-            return false;
+            success = false;
         }
     }
 
     // analyze body
-    return semantic_analyze_stmt(analyzer, stmt->cond_stmt.body);
+    if (success)
+    {
+        success &= semantic_analyze_stmt(analyzer, stmt->cond_stmt.body);
+    }
+    else
+    {
+        // even if condition failed, attempt to analyze body to surface nested errors
+        semantic_analyze_stmt(analyzer, stmt->cond_stmt.body);
+    }
+
+    if (stmt->cond_stmt.stmt_or)
+    {
+        if (!semantic_analyze_stmt(analyzer, stmt->cond_stmt.stmt_or))
+        {
+            success = false;
+        }
+    }
+
+    return success;
 }
 
 bool semantic_analyze_for_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
@@ -1372,13 +1395,6 @@ Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     switch (expr->unary_expr.op)
     {
     case TOKEN_QUESTION:
-            // treat '?0' as null pointer literal request
-        if (expr->unary_expr.expr->kind == AST_EXPR_LIT && expr->unary_expr.expr->lit_expr.kind == TOKEN_LIT_INT && expr->unary_expr.expr->lit_expr.int_val == 0)
-        {
-            expr->type = type_ptr();
-            return expr->type;
-        }
-        // otherwise address-of
         if (!is_lvalue(expr->unary_expr.expr))
         {
             semantic_error(analyzer, expr, "address-of requires lvalue");
@@ -1869,6 +1885,28 @@ Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *e
     }
 }
 
+static Type *semantic_analyze_null_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type)
+{
+    Type *resolved = NULL;
+
+    if (expected_type)
+    {
+        if (!type_is_pointer_like(expected_type))
+        {
+            semantic_error(analyzer, expr, "'nil' expects a pointer-like context");
+            return NULL;
+        }
+        resolved = expected_type;
+    }
+    else
+    {
+        resolved = type_ptr();
+    }
+
+    expr->type = resolved;
+    return resolved;
+}
+
 Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
     Type *specified_type = resolve_type(analyzer, expr->array_expr.type);
@@ -2214,12 +2252,6 @@ bool semantic_check_unary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *ope
         return true;
 
     case TOKEN_QUESTION:
-        // allow null literal '?0'
-        if (node->unary_expr.expr && node->unary_expr.expr->kind == AST_EXPR_LIT && node->unary_expr.expr->lit_expr.kind == TOKEN_LIT_INT && node->unary_expr.expr->lit_expr.int_val == 0)
-        {
-            return true;
-        }
-        // otherwise address-of requires an lvalue
         if (!is_lvalue(node->unary_expr.expr))
         {
             semantic_error(analyzer, node, "address-of operator requires an lvalue");

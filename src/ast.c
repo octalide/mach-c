@@ -293,6 +293,9 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
+    case AST_EXPR_NULL:
+        break;
+
     case AST_EXPR_ARRAY:
         if (node->array_expr.type)
         {
@@ -679,6 +682,10 @@ void ast_print(AstNode *node, int indent)
         }
         break;
 
+    case AST_EXPR_NULL:
+        printf("NULL\n");
+        break;
+
     case AST_EXPR_ARRAY:
         printf("ARRAY\n");
         ast_print(node->array_expr.type, indent + 1);
@@ -831,6 +838,8 @@ const char *ast_node_kind_to_string(AstKind kind)
         return "IDENT_EXPR";
     case AST_EXPR_LIT:
         return "LIT_EXPR";
+    case AST_EXPR_NULL:
+        return "NULL_EXPR";
     case AST_EXPR_ARRAY:
         return "ARRAY_EXPR";
     case AST_EXPR_STRUCT:
@@ -1096,6 +1105,10 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         default:
             fprintf(file, "???\n");
         }
+        break;
+
+    case AST_EXPR_NULL:
+        fprintf(file, "NULL\n");
         break;
     case AST_EXPR_ARRAY:
         fprintf(file, "ARRAY\n");

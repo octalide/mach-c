@@ -608,6 +608,10 @@ Token *lexer_next(Lexer *lexer)
     case '+':
         return lexer_emit(lexer, TOKEN_PLUS, 1);
     case '-':
+        if (lexer_peek(lexer, 1) == '>')
+        {
+            return lexer_emit(lexer, TOKEN_ARROW, 2);
+        }
         return lexer_emit(lexer, TOKEN_MINUS, 1);
     case '*':
         return lexer_emit(lexer, TOKEN_STAR, 1);

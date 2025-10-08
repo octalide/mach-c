@@ -19,7 +19,7 @@ val false: bool = 0;
 var x: i32 = 42;
 var p: *i32 = ?x;
 var y: i32 = @p;
-var dangling: *i32 = nil; // sugar for ?0
+var dangling: *i32 = nil; // null pointer literal
 ```
 
 ## Arrays and strings

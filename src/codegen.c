@@ -1491,6 +1491,8 @@ LLVMValueRef codegen_expr(CodegenContext *ctx, AstNode *expr)
     {
     case AST_EXPR_LIT:
         return codegen_expr_lit(ctx, expr);
+    case AST_EXPR_NULL:
+        return codegen_expr_null(ctx, expr);
     case AST_EXPR_IDENT:
         return codegen_expr_ident(ctx, expr);
     case AST_EXPR_BINARY:
@@ -1598,6 +1600,14 @@ LLVMValueRef codegen_expr_lit(CodegenContext *ctx, AstNode *expr)
         codegen_error(ctx, expr, "unknown literal kind");
         return NULL;
     }
+}
+
+LLVMValueRef codegen_expr_null(CodegenContext *ctx, AstNode *expr)
+{
+    LLVMTypeRef ptr_ty = codegen_get_llvm_type(ctx, expr->type);
+    if (!ptr_ty)
+        ptr_ty = LLVMPointerTypeInContext(ctx->context, 0);
+    return LLVMConstNull(ptr_ty);
 }
 
 LLVMValueRef codegen_expr_ident(CodegenContext *ctx, AstNode *expr)
@@ -1845,19 +1855,6 @@ LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr)
 
 LLVMValueRef codegen_expr_unary(CodegenContext *ctx, AstNode *expr)
 {
-    // special-case '?0' early to avoid evaluating the 0 literal with no type hint
-    if (expr->unary_expr.op == TOKEN_QUESTION &&
-        expr->unary_expr.expr &&
-        expr->unary_expr.expr->kind == AST_EXPR_LIT &&
-        expr->unary_expr.expr->lit_expr.kind == TOKEN_LIT_INT &&
-        expr->unary_expr.expr->lit_expr.int_val == 0)
-    {
-        LLVMTypeRef ptr_ty = codegen_get_llvm_type(ctx, expr->type);
-        if (!ptr_ty)
-            ptr_ty = LLVMPointerTypeInContext(ctx->context, 0);
-        return LLVMConstNull(ptr_ty);
-    }
-
     LLVMValueRef operand = codegen_expr(ctx, expr->unary_expr.expr);
     if (!operand)
     {
@@ -1877,14 +1874,7 @@ LLVMValueRef codegen_expr_unary(CodegenContext *ctx, AstNode *expr)
         {
             return LLVMBuildNeg(ctx->builder, operand, "neg");
         }
-    case TOKEN_QUESTION: // address-of or null literal '?0'
-        // special-case '?0' -> null pointer of the unary expression's type
-        if (expr->unary_expr.expr->kind == AST_EXPR_LIT && expr->unary_expr.expr->lit_expr.kind == TOKEN_LIT_INT && expr->unary_expr.expr->lit_expr.int_val == 0)
-        {
-            LLVMTypeRef ptr_ty = codegen_get_llvm_type(ctx, expr->type);
-            return LLVMConstNull(ptr_ty);
-        }
-        // for general address-of, return the address (ident/index/field generate addresses already)
+    case TOKEN_QUESTION: // address-of
         return operand;
     case TOKEN_AT: // dereference
         // for dereference, we always need to load the pointer value first if it's in an alloca/global

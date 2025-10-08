@@ -43,6 +43,7 @@ typedef enum AstKind
     AST_EXPR_CAST,
     AST_EXPR_IDENT,
     AST_EXPR_LIT,
+    AST_EXPR_NULL,
     AST_EXPR_ARRAY,
     AST_EXPR_STRUCT,
 
@@ -266,6 +267,12 @@ struct AstNode
                 char              *string_val;
             };
         } lit_expr;
+
+        // null literal (nil)
+        struct
+        {
+            bool unused;
+        } null_expr;
 
         // array literal
         struct

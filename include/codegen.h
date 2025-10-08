@@ -126,6 +126,7 @@ LLVMValueRef codegen_stmt_expr(CodegenContext *ctx, AstNode *stmt);
 // expression generation
 LLVMValueRef codegen_expr(CodegenContext *ctx, AstNode *expr);
 LLVMValueRef codegen_expr_lit(CodegenContext *ctx, AstNode *expr);
+LLVMValueRef codegen_expr_null(CodegenContext *ctx, AstNode *expr);
 LLVMValueRef codegen_expr_ident(CodegenContext *ctx, AstNode *expr);
 LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr);
 LLVMValueRef codegen_expr_unary(CodegenContext *ctx, AstNode *expr);

@@ -60,6 +60,7 @@ typedef enum TokenKind
     TOKEN_QUESTION,   // ?
     TOKEN_AT,         // @
     TOKEN_DOT,        // .
+    TOKEN_ARROW,      // ->
     TOKEN_COMMA,      // ,
     TOKEN_UNDERSCORE, // _
     TOKEN_ELLIPSIS,   // ...

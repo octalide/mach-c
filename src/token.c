@@ -108,6 +108,8 @@ char *token_kind_to_string(TokenKind kind)
         return "@";
     case TOKEN_DOT:
         return ".";
+    case TOKEN_ARROW:
+        return "->";
     case TOKEN_COMMA:
         return ",";
     case TOKEN_UNDERSCORE:

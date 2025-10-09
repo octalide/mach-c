@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static LLVMValueRef codegen_load_rvalue(CodegenContext *ctx, LLVMValueRef value, Type *type);
+static LLVMValueRef codegen_load_rvalue(CodegenContext *ctx, LLVMValueRef value, Type *type, AstNode *source_expr);
 static void         codegen_debug_init(CodegenContext *ctx);
 static void         codegen_debug_finalize(CodegenContext *ctx);
 static void         codegen_set_debug_location(CodegenContext *ctx, AstNode *node);
@@ -1400,7 +1400,7 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
             }
             else
             {
-                init_value = codegen_load_rvalue(ctx, init_value, stmt->var_stmt.init->type);
+                init_value = codegen_load_rvalue(ctx, init_value, stmt->var_stmt.init->type, stmt->var_stmt.init);
                 LLVMBuildStore(ctx->builder, init_value, alloca);
             }
         }
@@ -1600,7 +1600,7 @@ LLVMValueRef codegen_stmt_ret(CodegenContext *ctx, AstNode *stmt)
             codegen_error(ctx, stmt, "failed to generate return value");
             return NULL;
         }
-    value = codegen_load_rvalue(ctx, value, stmt->ret_stmt.expr->type);
+    value = codegen_load_rvalue(ctx, value, stmt->ret_stmt.expr->type, stmt->ret_stmt.expr);
         // cast to declared return type if available (prefer Mach function type)
         LLVMTypeRef rty = NULL;
         if (ctx->current_function_type && ctx->current_function_type->kind == TYPE_FUNCTION && ctx->current_function_type->function.return_type)
@@ -2408,11 +2408,37 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
         return NULL;
     }
 
-    Symbol *callee_symbol         = expr->call_expr.func->symbol;
-    bool    uses_mach_varargs     = callee_symbol && callee_symbol->kind == SYMBOL_FUNC && callee_symbol->func.uses_mach_varargs;
-    int     arg_expr_count        = expr->call_expr.args ? expr->call_expr.args->count : 0;
-    size_t  fixed_param_count     = func_type->function.param_count;
-    int     extra_arg_count       = arg_expr_count > (int)fixed_param_count ? arg_expr_count - (int)fixed_param_count : 0;
+    Symbol *callee_symbol     = expr->call_expr.func->symbol;
+    bool    uses_mach_varargs = callee_symbol && callee_symbol->kind == SYMBOL_FUNC && callee_symbol->func.uses_mach_varargs;
+    int     arg_expr_count    = expr->call_expr.args ? expr->call_expr.args->count : 0;
+    size_t  fixed_param_count = func_type->function.param_count;
+
+    bool forwards_varargs = false;
+    if (expr->call_expr.args)
+    {
+        for (int i = 0; i < arg_expr_count; i++)
+        {
+            AstNode *arg_node = expr->call_expr.args->items[i];
+            if (arg_node && arg_node->kind == AST_EXPR_VARARGS)
+            {
+                forwards_varargs = true;
+                break;
+            }
+        }
+    }
+
+    int extra_arg_count = 0;
+    if (expr->call_expr.args && arg_expr_count > (int)fixed_param_count)
+    {
+        for (int i = (int)fixed_param_count; i < arg_expr_count; i++)
+        {
+            AstNode *arg_node = expr->call_expr.args->items[i];
+            if (arg_node->kind != AST_EXPR_VARARGS)
+            {
+                extra_arg_count++;
+            }
+        }
+    }
 
     if (uses_mach_varargs && arg_expr_count < (int)fixed_param_count)
     {
@@ -2437,7 +2463,7 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
             codegen_error(ctx, expr, "failed to generate call argument %d", i);
             return NULL;
         }
-    value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
+        value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
         args[i] = value;
 
         Type *param_type = func_type->function.param_types[i];
@@ -2522,42 +2548,59 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
         LLVMTypeRef i8_ptr_ty    = LLVMPointerType(i8_ty, 0);
         LLVMTypeRef i8_ptr_ptr   = LLVMPointerType(i8_ptr_ty, 0);
 
-        args[fixed_param_count] = LLVMConstInt(i64_ty, (unsigned long long)extra_arg_count, false);
-
-        if (extra_arg_count > 0)
+        if (forwards_varargs)
         {
-            LLVMValueRef count_val   = LLVMConstInt(i64_ty, (unsigned long long)extra_arg_count, false);
-            LLVMValueRef array_alloc = LLVMBuildArrayAlloca(ctx->builder, i8_ptr_ty, count_val, "mach_vararg_array");
+            LLVMValueRef count_val = ctx->current_vararg_count_value ? ctx->current_vararg_count_value : LLVMConstInt(i64_ty, 0, false);
+            args[fixed_param_count] = count_val;
 
-            for (int j = 0; j < extra_arg_count; j++)
+            if (ctx->current_vararg_array)
             {
-                AstNode     *arg_node = expr->call_expr.args->items[fixed_param_count + j];
-                LLVMValueRef value    = codegen_expr(ctx, arg_node);
-                if (!value)
-                {
-                    free(args);
-                    codegen_error(ctx, expr, "failed to generate variadic argument %d", fixed_param_count + j);
-                    return NULL;
-                }
-                value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
-
-                LLVMTypeRef value_ty = LLVMTypeOf(value);
-                char        slot_name[32];
-                snprintf(slot_name, sizeof(slot_name), "mach_vararg_val_%d", j);
-                LLVMValueRef value_alloca = codegen_create_alloca(ctx, value_ty, slot_name);
-                LLVMBuildStore(ctx->builder, value, value_alloca);
-                LLVMValueRef data_ptr = LLVMBuildBitCast(ctx->builder, value_alloca, i8_ptr_ty, "mach_vararg_cast");
-
-                LLVMValueRef idx_val   = LLVMConstInt(i64_ty, (unsigned long long)j, false);
-                LLVMValueRef slot      = LLVMBuildInBoundsGEP2(ctx->builder, i8_ptr_ty, array_alloc, &idx_val, 1, "mach_vararg_slot");
-                LLVMBuildStore(ctx->builder, data_ptr, slot);
+                args[fixed_param_count + 1] = ctx->current_vararg_array;
             }
-
-            args[fixed_param_count + 1] = array_alloc;
+            else
+            {
+                args[fixed_param_count + 1] = LLVMConstNull(i8_ptr_ptr);
+            }
         }
         else
         {
-            args[fixed_param_count + 1] = LLVMConstNull(i8_ptr_ptr);
+            args[fixed_param_count] = LLVMConstInt(i64_ty, (unsigned long long)extra_arg_count, false);
+
+            if (extra_arg_count > 0)
+            {
+                LLVMValueRef count_val   = LLVMConstInt(i64_ty, (unsigned long long)extra_arg_count, false);
+                LLVMValueRef array_alloc = LLVMBuildArrayAlloca(ctx->builder, i8_ptr_ty, count_val, "mach_vararg_array");
+
+                for (int j = 0; j < extra_arg_count; j++)
+                {
+                    AstNode     *arg_node = expr->call_expr.args->items[fixed_param_count + j];
+                    LLVMValueRef value    = codegen_expr(ctx, arg_node);
+                    if (!value)
+                    {
+                        free(args);
+                        codegen_error(ctx, expr, "failed to generate variadic argument %d", fixed_param_count + j);
+                        return NULL;
+                    }
+                    value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
+
+                    LLVMTypeRef value_ty = LLVMTypeOf(value);
+                    char        slot_name[32];
+                    snprintf(slot_name, sizeof(slot_name), "mach_vararg_val_%d", j);
+                    LLVMValueRef value_alloca = codegen_create_alloca(ctx, value_ty, slot_name);
+                    LLVMBuildStore(ctx->builder, value, value_alloca);
+                    LLVMValueRef data_ptr = LLVMBuildBitCast(ctx->builder, value_alloca, i8_ptr_ty, "mach_vararg_cast");
+
+                    LLVMValueRef idx_val   = LLVMConstInt(i64_ty, (unsigned long long)j, false);
+                    LLVMValueRef slot      = LLVMBuildInBoundsGEP2(ctx->builder, i8_ptr_ty, array_alloc, &idx_val, 1, "mach_vararg_slot");
+                    LLVMBuildStore(ctx->builder, data_ptr, slot);
+                }
+
+                args[fixed_param_count + 1] = array_alloc;
+            }
+            else
+            {
+                args[fixed_param_count + 1] = LLVMConstNull(i8_ptr_ptr);
+            }
         }
     }
     else
@@ -2565,6 +2608,10 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
         for (int i = (int)fixed_param_count; i < arg_expr_count; i++)
         {
             AstNode     *arg_node = expr->call_expr.args->items[i];
+            if (arg_node->kind == AST_EXPR_VARARGS)
+            {
+                continue;
+            }
             LLVMValueRef value    = codegen_expr(ctx, arg_node);
             if (!value)
             {
@@ -2835,7 +2882,7 @@ LLVMValueRef codegen_load_if_needed(CodegenContext *ctx, LLVMValueRef value, Typ
     return LLVMBuildLoad2(ctx->builder, llvm_type, value, "");
 }
 
-static LLVMValueRef codegen_load_rvalue(CodegenContext *ctx, LLVMValueRef value, Type *type)
+static LLVMValueRef codegen_load_rvalue(CodegenContext *ctx, LLVMValueRef value, Type *type, AstNode *source_expr)
 {
     if (!type)
     {
@@ -2845,10 +2892,10 @@ static LLVMValueRef codegen_load_rvalue(CodegenContext *ctx, LLVMValueRef value,
     Type *resolved = type_resolve_alias(type);
     if (resolved && (resolved->kind == TYPE_PTR || resolved->kind == TYPE_POINTER))
     {
-        return codegen_load_if_needed(ctx, value, resolved, NULL);
+        return codegen_load_if_needed(ctx, value, resolved, source_expr);
     }
 
-    return codegen_load_if_needed(ctx, value, type, NULL);
+    return codegen_load_if_needed(ctx, value, type, source_expr);
 }
 bool codegen_is_lvalue(AstNode *expr)
 {

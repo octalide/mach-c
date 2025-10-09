@@ -1828,6 +1828,17 @@ AstNode *parser_parse_expr_atom(Parser *parser)
         return lit;
     }
 
+    case TOKEN_ELLIPSIS:
+    {
+        AstNode *pack = parser_alloc_node(parser, AST_EXPR_VARARGS, parser->current);
+        if (!pack)
+        {
+            return NULL;
+        }
+        parser_advance(parser);
+        return pack;
+    }
+
     case TOKEN_IDENTIFIER:
     {
         AstNode *ident = parser_alloc_node(parser, AST_EXPR_IDENT, parser->current);

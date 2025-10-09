@@ -4,6 +4,7 @@
 #include "ioutil.h"
 #include "lexer.h"
 #include "symbol.h"
+#include "preprocessor.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,9 +13,18 @@
 #include "semantic.h"
 #include <stdint.h>
 #include <llvm-c/Target.h>
+#include <llvm-c/Core.h>
 
-// forward declaration
+// forward declarations
 static char *generate_target_module_source(ModuleManager *manager);
+static void module_manager_update_target_info(ModuleManager *manager);
+static char *append_os_suffix(const char *path, const char *os_name);
+static int   module_file_exists(const char *path);
+static const char *normalize_os_name(const char *os_part);
+static bool path_has_platform_suffix(const char *path, const char *os_name);
+static void split_triple(const char *triple, char **arch_out, char **os_out);
+static const char *detect_module_platform(ModuleManager *manager, const char *module_name, const char *file_path);
+static bool        module_name_has_component(const char *module_name, const char *component);
 
 // error handling functions
 void module_error_list_init(ModuleErrorList *list)
@@ -192,9 +202,13 @@ void module_manager_init(ModuleManager *manager)
     manager->alias_count  = 0;
     manager->config       = NULL;
     manager->project_dir  = NULL;
+    manager->target_triple = NULL;
+    manager->target_os     = NULL;
 
     module_error_list_init(&manager->errors);
     manager->had_error = false;
+
+    module_manager_update_target_info(manager);
 }
 
 void module_manager_dnit(ModuleManager *manager)
@@ -229,8 +243,184 @@ void module_manager_dnit(ModuleManager *manager)
     free(manager->alias_names);
     free(manager->alias_paths);
 
+    free(manager->target_triple);
+    free(manager->target_os);
+
     // clean up errors
     module_error_list_dnit(&manager->errors);
+}
+
+static int module_file_exists(const char *path)
+{
+    if (!path)
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
+static const char *normalize_os_name(const char *os_part)
+{
+    if (!os_part)
+        return "unknown";
+    if (strstr(os_part, "linux"))
+        return "linux";
+    if (strstr(os_part, "darwin") || strstr(os_part, "apple"))
+        return "darwin";
+    if (strstr(os_part, "windows") || strstr(os_part, "mingw") || strstr(os_part, "win32"))
+        return "windows";
+    if (strstr(os_part, "freebsd"))
+        return "freebsd";
+    if (strstr(os_part, "netbsd"))
+        return "netbsd";
+    if (strstr(os_part, "openbsd"))
+        return "openbsd";
+    if (strstr(os_part, "dragonfly"))
+        return "dragonfly";
+    if (strstr(os_part, "wasm"))
+        return "wasm";
+    return "unknown";
+}
+
+static bool path_has_platform_suffix(const char *path, const char *os_name)
+{
+    if (!path || !os_name || !*os_name)
+        return false;
+
+    const char *ext = strrchr(path, '.');
+    if (!ext || ext == path)
+        return false;
+
+    size_t os_len  = strlen(os_name);
+    if ((size_t)(ext - path) < os_len + 1)
+        return false;
+
+    const char *suffix = ext - (os_len + 1);
+    if (*suffix != '.')
+        return false;
+
+    return strncmp(suffix + 1, os_name, os_len) == 0;
+}
+
+static char *append_os_suffix(const char *path, const char *os_name)
+{
+    if (!path || !os_name || !*os_name)
+        return NULL;
+
+    const char *ext = strrchr(path, '.');
+    if (!ext)
+        return NULL;
+
+    size_t base_len = (size_t)(ext - path);
+    size_t os_len   = strlen(os_name);
+    size_t ext_len  = strlen(ext);
+
+    char *out = malloc(base_len + 1 + os_len + ext_len + 1);
+    if (!out)
+        return NULL;
+
+    memcpy(out, path, base_len);
+    out[base_len] = '.';
+    memcpy(out + base_len + 1, os_name, os_len);
+    memcpy(out + base_len + 1 + os_len, ext, ext_len + 1);
+
+    return out;
+}
+
+static bool module_name_has_component(const char *module_name, const char *component)
+{
+    if (!module_name || !component || !*component)
+        return false;
+
+    size_t comp_len = strlen(component);
+    const char *cursor = module_name;
+
+    while (cursor && *cursor)
+    {
+        const char *next = strchr(cursor, '.');
+        size_t       len = next ? (size_t)(next - cursor) : strlen(cursor);
+        if (len == comp_len && strncmp(cursor, component, len) == 0)
+            return true;
+        if (!next)
+            break;
+        cursor = next + 1;
+    }
+
+    return false;
+}
+
+static const char *detect_module_platform(ModuleManager *manager, const char *module_name, const char *file_path)
+{
+    (void)manager;
+    (void)file_path;
+    static const char *known_platforms[] = {
+        "linux", "darwin", "windows",
+        "freebsd", "netbsd", "openbsd",
+        "dragonfly", "wasm"
+    };
+
+    for (size_t i = 0; i < sizeof(known_platforms) / sizeof(known_platforms[0]); i++)
+    {
+        const char *tag = known_platforms[i];
+        if (module_name_has_component(module_name, tag))
+            return tag;
+    }
+
+    return NULL;
+}
+
+static void module_manager_update_target_info(ModuleManager *manager)
+{
+    if (!manager)
+        return;
+
+    const char *triple = NULL;
+    char       *owned_triple = NULL;
+
+    if (manager->config)
+    {
+        ProjectConfig *pc = (ProjectConfig *)manager->config;
+        TargetConfig  *tc = config_get_default_target(pc);
+        if (tc && tc->target_triple)
+            triple = tc->target_triple;
+    }
+
+    if (!triple)
+    {
+        owned_triple = LLVMGetDefaultTargetTriple();
+        triple       = owned_triple;
+    }
+
+    if (manager->target_triple)
+    {
+        free(manager->target_triple);
+        manager->target_triple = NULL;
+    }
+    if (triple)
+        manager->target_triple = strdup(triple);
+
+    if (manager->target_os)
+    {
+        free(manager->target_os);
+        manager->target_os = NULL;
+    }
+
+    if (triple)
+    {
+        char *arch_part = NULL;
+        char *os_part   = NULL;
+        split_triple(triple, &arch_part, &os_part);
+        const char *norm = normalize_os_name(os_part);
+        if (norm)
+            manager->target_os = strdup(norm);
+        free(arch_part);
+        free(os_part);
+    }
+
+    if (owned_triple)
+        LLVMDisposeMessage(owned_triple);
 }
 
 void module_manager_add_search_path(ModuleManager *manager, const char *path)
@@ -255,6 +445,7 @@ void module_manager_set_config(ModuleManager *manager, void *config, const char 
 {
     manager->config      = config;
     manager->project_dir = project_dir;
+    module_manager_update_target_info(manager);
 }
 
 char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
@@ -262,9 +453,35 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
     if (!module_fqn)
         return NULL;
 
-    // prefer config resolution if available
+    const char *platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0)
+                               ? manager->target_os
+                               : NULL;
+
+    // prefer config resolution if available, but still honor platform variants
     if (manager->config && manager->project_dir)
-        return config_resolve_module_fqn((ProjectConfig *)manager->config, manager->project_dir, module_fqn);
+    {
+        char *resolved = config_resolve_module_fqn((ProjectConfig *)manager->config, manager->project_dir, module_fqn);
+        if (resolved)
+        {
+            if (module_file_exists(resolved))
+            {
+                return resolved;
+            }
+
+            if (platform)
+            {
+                char *plat_path = append_os_suffix(resolved, platform);
+                if (plat_path && module_file_exists(plat_path))
+                {
+                    free(resolved);
+                    return plat_path;
+                }
+                free(plat_path);
+            }
+
+            return resolved;
+        }
+    }
 
     const char *dot      = strchr(module_fqn, '.');
     size_t      head_len = dot ? (size_t)(dot - module_fqn) : strlen(module_fqn);
@@ -289,8 +506,22 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
                 if (!path) { free(tail_buf); return NULL; }
                 snprintf(path, path_len, "%s/%s.mach", base, tail_buf);
                 free(tail_buf);
-                FILE *f = fopen(path, "r");
-                if (f) { fclose(f); return path; }
+                if (module_file_exists(path))
+                {
+                    return path;
+                }
+
+                if (platform)
+                {
+                    char *plat_path = append_os_suffix(path, platform);
+                    if (plat_path && module_file_exists(plat_path))
+                    {
+                        free(path);
+                        return plat_path;
+                    }
+                    free(plat_path);
+                }
+
                 free(path);
                 return NULL;
             }
@@ -300,8 +531,22 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
                 char  *path = malloc(path_len);
                 if (!path) return NULL;
                 snprintf(path, path_len, "%s/main.mach", base);
-                FILE *f = fopen(path, "r");
-                if (f) { fclose(f); return path; }
+                if (module_file_exists(path))
+                {
+                    return path;
+                }
+
+                if (platform)
+                {
+                    char *plat_path = append_os_suffix(path, platform);
+                    if (plat_path && module_file_exists(plat_path))
+                    {
+                        free(path);
+                        return plat_path;
+                    }
+                    free(plat_path);
+                }
+
                 free(path);
                 return NULL;
             }
@@ -325,8 +570,22 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
             if (!path) { free(tail_buf); continue; }
             snprintf(path, path_len, "%s/%.*s/%s.mach", base, (int)head_len, module_fqn, tail_buf);
             free(tail_buf);
-            FILE *f = fopen(path, "r");
-            if (f) { fclose(f); return path; }
+            if (module_file_exists(path))
+            {
+                return path;
+            }
+
+            if (platform)
+            {
+                char *plat_path = append_os_suffix(path, platform);
+                if (plat_path && module_file_exists(plat_path))
+                {
+                    free(path);
+                    return plat_path;
+                }
+                free(plat_path);
+            }
+
             free(path);
         }
         else
@@ -335,8 +594,22 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
             char  *path = malloc(path_len);
             if (!path) continue;
             snprintf(path, path_len, "%s/%.*s/main.mach", base, (int)head_len, module_fqn);
-            FILE *f = fopen(path, "r");
-            if (f) { fclose(f); return path; }
+            if (module_file_exists(path))
+            {
+                return path;
+            }
+
+            if (platform)
+            {
+                char *plat_path = append_os_suffix(path, platform);
+                if (plat_path && module_file_exists(plat_path))
+                {
+                    free(path);
+                    return plat_path;
+                }
+                free(plat_path);
+            }
+
             free(path);
         }
     }
@@ -436,6 +709,78 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
             free(canonical);
             return NULL;
         }
+
+    const char *platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0)
+                   ? manager->target_os
+                   : NULL;
+
+        if (platform && !path_has_platform_suffix(file_path, platform))
+        {
+            char *platform_path = append_os_suffix(file_path, platform);
+            if (platform_path && module_file_exists(platform_path))
+            {
+                char *platform_source = read_file(platform_path);
+                if (!platform_source)
+                {
+                    module_error_list_add(&manager->errors, canonical, platform_path, "Could not read platform-specific module file");
+                    manager->had_error = true;
+                    free(platform_path);
+                    free(source);
+                    free(file_path);
+                    free(canonical);
+                    return NULL;
+                }
+
+                size_t base_len = strlen(source);
+                size_t plat_len = strlen(platform_source);
+                char  *combined = malloc(base_len + plat_len + 2);
+                if (!combined)
+                {
+                    module_error_list_add(&manager->errors, canonical, platform_path, "Out of memory while combining platform module");
+                    manager->had_error = true;
+                    free(platform_source);
+                    free(platform_path);
+                    free(source);
+                    free(file_path);
+                    free(canonical);
+                    return NULL;
+                }
+
+                memcpy(combined, source, base_len);
+                combined[base_len] = '\n';
+                memcpy(combined + base_len + 1, platform_source, plat_len + 1);
+
+                free(source);
+                free(platform_source);
+                source = combined;
+            }
+            free(platform_path);
+        }
+
+    PreprocessorConstant constants[32];
+    size_t constant_count = module_manager_collect_constants(manager, constants, sizeof(constants) / sizeof(constants[0]));
+
+        PreprocessorOutput pp_output;
+        preprocessor_output_init(&pp_output);
+
+        if (!preprocessor_run(source, constants, constant_count, &pp_output))
+        {
+            const char *msg = pp_output.message ? pp_output.message : "conditional directive failure";
+            char        error_msg[256];
+            snprintf(error_msg, sizeof(error_msg), "#! directive error on line %d: %s", pp_output.line, msg);
+            module_error_list_add(&manager->errors, canonical, file_path, error_msg);
+            manager->had_error = true;
+            preprocessor_output_dnit(&pp_output);
+            free(source);
+            free(file_path);
+            free(canonical);
+            return NULL;
+        }
+
+        free(source);
+        source           = pp_output.source;
+        pp_output.source = NULL;
+        preprocessor_output_dnit(&pp_output);
     }
 
     if (is_target_builtin)
@@ -535,6 +880,82 @@ static unsigned int map_arch_id(const char *arch_part)
     if (strncmp(arch_part, "wasm32", 6) == 0) return 4u;
     if (strncmp(arch_part, "wasm64", 6) == 0) return 5u;
     return 255u; // unknown
+}
+
+size_t module_manager_collect_constants(ModuleManager *manager,
+                                        PreprocessorConstant  *out,
+                                        size_t                 max_count)
+{
+    if (!out || max_count == 0)
+    {
+        return 0;
+    }
+
+    size_t count = 0;
+
+    const char *triple = manager ? manager->target_triple : NULL;
+    char       *arch_part = NULL;
+    char       *os_part   = NULL;
+
+    if (triple && *triple)
+    {
+        split_triple(triple, &arch_part, &os_part);
+    }
+
+    unsigned int os_id   = map_os_id(os_part);
+    unsigned int arch_id = map_arch_id(arch_part);
+
+    unsigned int ptr_width = (unsigned int)(sizeof(void *) * 8);
+    union
+    {
+        uint16_t v;
+        unsigned char b[2];
+    } u;
+    u.v = 0x0102;
+    unsigned int endian = (u.b[0] == 0x02) ? 0u : 1u;
+
+    unsigned int debug_flag = 0u;
+
+#define ADD_CONST(NAME, VALUE)                                                                  \
+    do                                                                                          \
+    {                                                                                           \
+        if (count < max_count)                                                                  \
+        {                                                                                       \
+            out[count].name  = (NAME);                                                          \
+            out[count].value = (long long)(VALUE);                                              \
+            count++;                                                                             \
+        }                                                                                       \
+    } while (0)
+
+    ADD_CONST("OS_LINUX", 1u);
+    ADD_CONST("OS_DARWIN", 2u);
+    ADD_CONST("OS_WINDOWS", 3u);
+    ADD_CONST("OS_FREEBSD", 4u);
+    ADD_CONST("OS_NETBSD", 5u);
+    ADD_CONST("OS_OPENBSD", 6u);
+    ADD_CONST("OS_DRAGONFLY", 7u);
+    ADD_CONST("OS_WASM", 8u);
+    ADD_CONST("OS_UNKNOWN", 255u);
+
+    ADD_CONST("ARCH_X86_64", 1u);
+    ADD_CONST("ARCH_AARCH64", 2u);
+    ADD_CONST("ARCH_RISCV64", 3u);
+    ADD_CONST("ARCH_WASM32", 4u);
+    ADD_CONST("ARCH_WASM64", 5u);
+    ADD_CONST("ARCH_UNKNOWN", 255u);
+
+    ADD_CONST("OS", os_id);
+    ADD_CONST("ARCH", arch_id);
+    ADD_CONST("PTR_WIDTH", ptr_width);
+    ADD_CONST("ENDIAN", endian);
+    ADD_CONST("DEBUG", debug_flag);
+
+#undef ADD_CONST
+
+    free(arch_part);
+    free(os_part);
+
+    return count;
 }
 
 static char *dup_fragment(const char *start, size_t len)
@@ -678,8 +1099,19 @@ bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *progra
                 return false;
             }
 
-            // mark module as needing linking since it's imported
-            module->needs_linking = true;
+            const char *module_platform = detect_module_platform(manager, module->name, module->file_path);
+            const char *target_platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0)
+                                              ? manager->target_os
+                                              : NULL;
+
+            if (module_platform && target_platform && strcmp(module_platform, target_platform) != 0)
+            {
+                module->needs_linking = false;
+            }
+            else
+            {
+                module->needs_linking = true;
+            }
 
             // recursively resolve dependencies of the loaded module
             if (!module_manager_resolve_dependencies(manager, module->ast, base_dir))

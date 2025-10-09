@@ -296,6 +296,9 @@ void ast_node_dnit(AstNode *node)
     case AST_EXPR_NULL:
         break;
 
+    case AST_EXPR_VARARGS:
+        break;
+
     case AST_EXPR_ARRAY:
         if (node->array_expr.type)
         {
@@ -695,6 +698,10 @@ void ast_print(AstNode *node, int indent)
         }
         break;
 
+    case AST_EXPR_VARARGS:
+        printf("VARARGS_PACK\n");
+        break;
+
     case AST_EXPR_STRUCT:
         printf("STRUCT_LIT\n");
         ast_print(node->struct_expr.type, indent + 1);
@@ -842,6 +849,8 @@ const char *ast_node_kind_to_string(AstKind kind)
         return "NULL_EXPR";
     case AST_EXPR_ARRAY:
         return "ARRAY_EXPR";
+    case AST_EXPR_VARARGS:
+        return "VARARGS_PACK";
     case AST_EXPR_STRUCT:
         return "STRUCT_LIT";
 
@@ -1117,6 +1126,9 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         {
             ast_print_to_file(node->array_expr.elems->items[i], file, indent + 1);
         }
+        break;
+    case AST_EXPR_VARARGS:
+        fprintf(file, "VARARGS_PACK\n");
         break;
     case AST_EXPR_STRUCT:
         fprintf(file, "STRUCT_LIT\n");

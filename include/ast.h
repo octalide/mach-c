@@ -45,6 +45,7 @@ typedef enum AstKind
     AST_EXPR_LIT,
     AST_EXPR_NULL,
     AST_EXPR_ARRAY,
+    AST_EXPR_VARARGS,
     AST_EXPR_STRUCT,
 
     // types

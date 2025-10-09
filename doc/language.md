@@ -159,3 +159,30 @@ val SIGINT: i32 = if (OS == OS_WINDOWS) { 15 } or { 2 };
 
 No macro system or file suffix variants are required; normal `if` chains are
 used and can later be optimized by constant folding.
+
+## Conditional source selection
+
+When you need to elide entire declarations for a specific target, use the
+line-directive form:
+
+```
+#! if (OS == OS_LINUX)
+fun linux_only() {
+    ret;
+}
+#! or (OS == OS_WINDOWS)
+fun windows_only() {
+    ret;
+}
+#! end
+```
+
+- Directives must be at the start of the line (whitespace allowed) and begin
+  with `#!` followed by `if`, `or`, or `end`.
+- Conditions are evaluated using compile-time constants (numeric literals and
+  the values exported by the builtin `target` module). Logical operators `&&`
+  and `||` plus equality checks `==`/`!=` are available.
+- Branch bodies are parsed normally, so type errors are still reported in code
+  that will be emitted; skipped branches are simply replaced with blank lines.
+- There is no text substitution or macro expansion—these directives only
+  decide which lines reach the parser.

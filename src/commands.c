@@ -7,6 +7,7 @@
 #include "module.h"
 #include "parser.h"
 #include "semantic.h"
+#include "preprocessor.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -282,18 +283,11 @@ int mach_cmd_build(int argc, char **argv)
 
     char *source = read_file_simple(filename); if (!source) { fprintf(stderr, "error: could not read '%s'\n", filename); return 1; }
 
-    Lexer lx; lexer_init(&lx, source); Parser ps; parser_init(&ps, &lx); AstNode *prog = parser_parse_program(&ps);
-    if (ps.had_error) { fprintf(stderr, "parsing failed with %d error(s):\n", ps.errors.count); parser_error_list_print(&ps.errors, &lx, filename); parser_dnit(&ps); lexer_dnit(&lx); free(source); return 1; }
-
-    char *module_name_override = derive_module_name_from_aliases(filename, &al);
+    SemanticAnalyzer an; semantic_analyzer_init(&an);
 
     // find project root for config-based dependency resolution
     char *project_dir_root = find_project_root(filename);
 
-    const char *semantic_module_name = module_name_override ? module_name_override : filename;
-
-    SemanticAnalyzer an; semantic_analyzer_init(&an);
-    semantic_analyzer_set_module(&an, semantic_module_name);
     // try to load project config (mach.toml) to enable long-term dependency resolution
     ProjectConfig *cfg = config_load_from_dir(project_dir_root);
     if (cfg)
@@ -310,6 +304,37 @@ int mach_cmd_build(int argc, char **argv)
     }
     for (int i = 0; i < inc.count; i++) module_manager_add_search_path(&an.module_manager, inc.items[i]);
     for (int i = 0; i < al.count; i++) module_manager_add_alias(&an.module_manager, al.names[i], al.dirs[i]);
+
+    PreprocessorConstant constants[32];
+    size_t constant_count = module_manager_collect_constants(&an.module_manager, constants, sizeof(constants) / sizeof(constants[0]));
+
+    PreprocessorOutput pp_output; preprocessor_output_init(&pp_output);
+    if (!preprocessor_run(source, constants, constant_count, &pp_output))
+    {
+        fprintf(stderr, "#! directive error in '%s' line %d: %s\n", filename, pp_output.line, pp_output.message ? pp_output.message : "unknown");
+        preprocessor_output_dnit(&pp_output);
+        if (cfg) { config_dnit(cfg); free(cfg); }
+        semantic_analyzer_dnit(&an);
+        free(project_dir_root);
+        for (int i=0;i<inc.count;i++) free(inc.items[i]); free(inc.items);
+        for (int i=0;i<al.count;i++) { free(al.names[i]); free(al.dirs[i]); }
+        free(al.names); free(al.dirs);
+        free(source);
+        return 1;
+    }
+
+    free(source);
+    source = pp_output.source;
+    pp_output.source = NULL;
+    preprocessor_output_dnit(&pp_output);
+
+    Lexer lx; lexer_init(&lx, source); Parser ps; parser_init(&ps, &lx); AstNode *prog = parser_parse_program(&ps);
+    if (ps.had_error) { fprintf(stderr, "parsing failed with %d error(s):\n", ps.errors.count); parser_error_list_print(&ps.errors, &lx, filename); parser_dnit(&ps); lexer_dnit(&lx); free(source); if (cfg) { config_dnit(cfg); free(cfg); } semantic_analyzer_dnit(&an); free(project_dir_root); for (int i=0;i<inc.count;i++) free(inc.items[i]); free(inc.items); for (int i=0;i<al.count;i++) { free(al.names[i]); free(al.dirs[i]); } free(al.names); free(al.dirs); return 1; }
+
+    char *module_name_override = derive_module_name_from_aliases(filename, &al);
+
+    const char *semantic_module_name = module_name_override ? module_name_override : filename;
+    semantic_analyzer_set_module(&an, semantic_module_name);
 
     if (!semantic_analyze(&an, prog)) {
         if (an.errors.count > 0) { fprintf(stderr, "semantic analysis failed with %d error(s):\n", an.errors.count); semantic_print_errors(&an, &lx, filename); }

@@ -194,6 +194,28 @@ Type *semantic_analyze_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr,
         return semantic_analyze_array_expr(analyzer, expr);
     case AST_EXPR_STRUCT:
         return semantic_analyze_struct_expr(analyzer, expr);
+    case AST_EXPR_VARARGS:
+        if (!analyzer->current_function || !analyzer->current_function->symbol)
+        {
+            semantic_error(analyzer, expr, "'...' used outside a variadic function");
+            return NULL;
+        }
+
+        if (!analyzer->current_function->fun_stmt.is_variadic)
+        {
+            semantic_error(analyzer, expr, "'...' used outside a variadic function");
+            return NULL;
+        }
+
+        Symbol *current_func_symbol = analyzer->current_function->symbol;
+        if (!current_func_symbol || current_func_symbol->kind != SYMBOL_FUNC || !current_func_symbol->func.uses_mach_varargs)
+        {
+            semantic_error(analyzer, expr, "'...' forwarding requires a Mach variadic function");
+            return NULL;
+        }
+
+        expr->type = type_ptr();
+        return expr->type;
     default:
         semantic_error(analyzer, expr, "unknown expression kind");
         return NULL;
@@ -2279,8 +2301,34 @@ bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, A
     size_t actual_count = args ? args->count : 0;
     bool   is_variadic  = func_type->function.is_variadic;
 
+    bool   forwards_varargs = false;
+    size_t forward_index     = SIZE_MAX;
+
+    if (args)
+    {
+        for (size_t i = 0; i < actual_count; i++)
+        {
+            AstNode *arg = args->items[i];
+            if (arg && arg->kind == AST_EXPR_VARARGS)
+            {
+                if (forwards_varargs)
+                {
+                    semantic_error(analyzer, node, "multiple '...' arguments are not allowed");
+                    return false;
+                }
+                forwards_varargs = true;
+                forward_index    = i;
+            }
+        }
+    }
+
     if (!is_variadic)
     {
+        if (forwards_varargs)
+        {
+            semantic_error(analyzer, node, "'...' cannot be used with non-variadic functions");
+            return false;
+        }
         if (fixed_count != actual_count)
         {
             semantic_error(analyzer, node, "function expects %zu arguments, got %zu", fixed_count, actual_count);
@@ -2296,14 +2344,65 @@ bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, A
         }
     }
 
+    if (forwards_varargs)
+    {
+        if (!analyzer->current_function || !analyzer->current_function->symbol || !analyzer->current_function->fun_stmt.is_variadic)
+        {
+            semantic_error(analyzer, node, "'...' used outside a variadic function");
+            return false;
+        }
+
+        if (forward_index < fixed_count)
+        {
+            semantic_error(analyzer, node, "'...' cannot satisfy required parameters");
+            return false;
+        }
+
+        if (forward_index != actual_count - 1)
+        {
+            semantic_error(analyzer, node, "'...' must be the final argument");
+            return false;
+        }
+
+        if (actual_count > fixed_count + 1)
+        {
+            semantic_error(analyzer, node, "additional arguments are not allowed when forwarding '...'");
+            return false;
+        }
+
+        Symbol *callee_symbol = (node && node->call_expr.func) ? node->call_expr.func->symbol : NULL;
+        bool    callee_uses_mach_varargs = is_variadic;
+        if (callee_symbol && callee_symbol->kind == SYMBOL_FUNC)
+        {
+            callee_uses_mach_varargs = callee_symbol->func.uses_mach_varargs;
+        }
+
+        if (!callee_uses_mach_varargs)
+        {
+            semantic_error(analyzer, node, "'...' forwarding requires a Mach variadic function");
+            return false;
+        }
+    }
+
     // check fixed arguments
     for (size_t i = 0; i < fixed_count; i++)
     {
+        AstNode *arg_node = args ? args->items[i] : NULL;
+        if (!arg_node)
+        {
+            semantic_error(analyzer, node, "missing argument for parameter %zu", i);
+            return false;
+        }
+        if (arg_node->kind == AST_EXPR_VARARGS)
+        {
+            semantic_error(analyzer, arg_node, "'...' cannot bind to a fixed parameter");
+            return false;
+        }
         Type *param_type = func_type->function.param_types[i];
-        Type *arg_type   = semantic_analyze_expr_with_hint(analyzer, args->items[i], param_type);
+        Type *arg_type   = semantic_analyze_expr_with_hint(analyzer, arg_node, param_type);
         if (!arg_type)
             return false;
-        if (!semantic_check_assignment(analyzer, param_type, arg_type, args->items[i]))
+        if (!semantic_check_assignment(analyzer, param_type, arg_type, arg_node))
             return false;
     }
 
@@ -2312,8 +2411,18 @@ bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, A
     {
         for (size_t i = fixed_count; i < actual_count; i++)
         {
+            AstNode *arg_node = args->items[i];
+            if (arg_node->kind == AST_EXPR_VARARGS)
+            {
+                continue;
+            }
+            if (forwards_varargs)
+            {
+                semantic_error(analyzer, arg_node, "additional arguments are not allowed when forwarding '...'");
+                return false;
+            }
             // no type checking beyond being a valid expression
-            if (!semantic_analyze_expr(analyzer, args->items[i]))
+            if (!semantic_analyze_expr(analyzer, arg_node))
                 return false;
         }
     }

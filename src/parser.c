@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "lexer.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1442,21 +1443,22 @@ static AstNode *parser_parse_stmt_asm(Parser *parser)
         }
     }
 
-    int sem_pos = pos;
-    while (sem_pos < source_len && (source[sem_pos] == ' ' || source[sem_pos] == '\t' || source[sem_pos] == '\n' || source[sem_pos] == '\r'))
+    int next_pos = pos;
+    while (next_pos < source_len && isspace((unsigned char)source[next_pos]))
     {
-        sem_pos++;
+        next_pos++;
     }
 
-    if (sem_pos >= source_len || source[sem_pos] != ';')
+    if (next_pos < source_len && source[next_pos] == ';')
     {
-        free(code);
-        parser_error(parser, open_token, "expected ';' after asm block");
-        return NULL;
+        next_pos++;
+        while (next_pos < source_len && isspace((unsigned char)source[next_pos]))
+        {
+            next_pos++;
+        }
     }
 
-    int after_sem = sem_pos + 1;
-    parser->lexer->pos = after_sem;
+    parser->lexer->pos = next_pos;
     parser_advance(parser);
 
     AstNode *node = parser_alloc_node(parser, AST_STMT_ASM, tok);

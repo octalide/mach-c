@@ -14,7 +14,7 @@ General guidelines:
 - Follow existing code styles and patterns.
 - Follow instructions carefully.
 - Do NOT, under any circumstances, leave written code unimplemented.
-- Brief, single-line comments should be `// lower case`
+- Brief, single-line comments should be `# lower case`
 - Keep console output clean and lowercase.
 
 Project guidelines:

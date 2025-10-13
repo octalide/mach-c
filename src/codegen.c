@@ -2936,7 +2936,18 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
         }
     }
 
-    LLVMValueRef object = codegen_expr(ctx, expr->field_expr.object);
+    AstNode *original_object_expr = expr->field_expr.object;
+    AstNode *object_expr          = original_object_expr;
+    bool     forced_pointer       = false;
+
+    if (object_expr && object_expr->kind == AST_EXPR_UNARY && object_expr->unary_expr.op == TOKEN_AT)
+    {
+        // treat (@ptr).field / ptr->field as pointer-based field access
+        forced_pointer = true;
+        object_expr    = object_expr->unary_expr.expr;
+    }
+
+    LLVMValueRef object = codegen_expr(ctx, object_expr);
     if (!object)
     {
         codegen_error(ctx, expr, "failed to generate object for field access");
@@ -2944,7 +2955,7 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
     }
 
     // get the object type
-    Type *original_type = type_resolve_alias(expr->field_expr.object->type);
+    Type *original_type = type_resolve_alias(object_expr->type);
     Type *object_type   = original_type;
     bool  object_is_pointer = false;
 
@@ -2952,6 +2963,11 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
     {
         object_is_pointer = true;
         object_type       = type_resolve_alias(object_type->pointer.base);
+    }
+    else if (forced_pointer)
+    {
+        codegen_error(ctx, expr, "field access through dereference of non-pointer type");
+        return NULL;
     }
 
     if (!object_type)
@@ -2977,7 +2993,7 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
         }
         else
         {
-            fat_ptr = codegen_load_if_needed(ctx, object, expr->field_expr.object->type, expr->field_expr.object);
+            fat_ptr = codegen_load_if_needed(ctx, object, original_object_expr->type, original_object_expr);
         }
 
         if (strcmp(expr->field_expr.field, "data") == 0)

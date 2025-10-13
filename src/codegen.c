@@ -681,9 +681,6 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
     ctx->opt_level      = 2;
     ctx->debug_info     = false;
     ctx->debug_finalized = false;
-    ctx->is_runtime     = false;
-    ctx->use_runtime    = false;
-    ctx->package_name   = NULL;
     ctx->di_builder            = NULL;
     ctx->di_compile_unit       = NULL;
     ctx->di_file               = NULL;
@@ -733,7 +730,6 @@ void codegen_context_dnit(CodegenContext *ctx)
     LLVMDisposeModule(ctx->module);
     LLVMDisposeTargetMachine(ctx->target_machine);
     LLVMContextDispose(ctx->context);
-    free(ctx->package_name);
     free(ctx->module_inline_asm);
 
     // no heap state for varargs
@@ -1416,34 +1412,7 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         return NULL;
     }
 
-    // function name mangling: main handled specially; other functions get package__name prefix to avoid collisions
-    const char *func_name    = stmt->fun_stmt.name;
-    char       *mangled_name = NULL;
-
-    // mangle rules for main:
-    // - if compiling runtime module, its 'main' remains 'main'
-    // - if building entry with runtime, user 'main' becomes '__mach_main'
-    // - if building without runtime, user 'main' stays 'main'
-    if (strcmp(func_name, "main") == 0)
-    {
-        if (ctx->is_runtime)
-        {
-            func_name = stmt->fun_stmt.name;
-        }
-        else if (ctx->use_runtime)
-        {
-            mangled_name = strdup("__mach_main");
-            func_name    = mangled_name;
-        }
-    }
-    // other functions: apply package prefix if available
-    else if (stmt->fun_stmt.name && ctx->package_name)
-    {
-        size_t len   = strlen(ctx->package_name) + 2 + strlen(stmt->fun_stmt.name) + 1;
-        mangled_name = malloc(len);
-        snprintf(mangled_name, len, "%s__%s", ctx->package_name, stmt->fun_stmt.name);
-        func_name = mangled_name;
-    }
+    const char *func_name = stmt->fun_stmt.name;
 
     Type *func_type           = stmt->type;
     bool  uses_mach_varargs   = stmt->symbol && stmt->symbol->func.uses_mach_varargs;
@@ -1489,9 +1458,6 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         if (func_name)
             stmt->symbol->func.mangled_name = strdup(func_name);
     }
-
-    if (mangled_name)
-        free(mangled_name);
 
     // generate body if present
     if (stmt->fun_stmt.body)

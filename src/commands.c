@@ -372,7 +372,7 @@ int mach_cmd_build(int argc, char **argv)
         }
     }
 
-    CodegenContext cg; codegen_context_init(&cg, semantic_module_name, no_pie); cg.opt_level = opt_level; cg.use_runtime = (cfg && config_has_runtime_module(cfg)); cg.debug_info = debug_info; cg.source_file = filename; cg.source_lexer = &lx;
+    CodegenContext cg; codegen_context_init(&cg, semantic_module_name, no_pie); cg.opt_level = opt_level; cg.debug_info = debug_info; cg.source_file = filename; cg.source_lexer = &lx;
 
     if (!codegen_generate(&cg, prog, &an)) { fprintf(stderr, "code generation failed:\n"); codegen_print_errors(&cg); codegen_context_dnit(&cg); if (cfg) { config_dnit(cfg); free(cfg); } free(module_name_override); semantic_analyzer_dnit(&an); ast_node_dnit(prog); free(prog); parser_dnit(&ps); lexer_dnit(&lx); free(source); free(auto_ast); return 1; }
 
@@ -442,17 +442,35 @@ int mach_cmd_build(int argc, char **argv)
 
     if (link_exe) {
     char *exe = NULL; if (!output_file) exe = get_base_filename_only(filename); else exe = strdup(output_file);
-        size_t sz = 4096 + (link_objs.count * 256) + (dep_count * 256); char *cmd = malloc(sz);
-        const char *link_fmt = NULL;
-        if (no_pie)
-            link_fmt = debug_info ? "cc -g -no-pie -o %s %s" : "cc -no-pie -o %s %s";
+        size_t sz = 4096 + (link_objs.count * 256) + (dep_count * 256);
+        char  *cmd = malloc(sz);
+        if (!cmd)
+        {
+            fprintf(stderr, "error: oom during link command setup\n");
+            free(exe);
+            exe = NULL;
+        }
         else
-            link_fmt = debug_info ? "cc -g -pie -o %s %s" : "cc -pie -o %s %s";
-        snprintf(cmd, sz, link_fmt, exe, obj_file);
-        for (int i = 0; i < dep_count; i++) { strcat(cmd, " "); strcat(cmd, dep_objs[i]); }
-        for (int i = 0; i < link_objs.count; i++) { strcat(cmd, " "); strcat(cmd, link_objs.items[i]); }
-        if (system(cmd) != 0) { fprintf(stderr, "error: failed to link executable '%s'\n", exe); }
-        free(cmd); free(exe);
+        {
+            cmd[0] = '\0';
+            strcat(cmd, "cc -nostartfiles -nostdlib");
+            if (no_pie)
+                strcat(cmd, " -no-pie");
+            else
+                strcat(cmd, " -pie");
+            if (debug_info)
+                strcat(cmd, " -g");
+            strcat(cmd, " -o ");
+            strcat(cmd, exe);
+            strcat(cmd, " ");
+            strcat(cmd, obj_file);
+            for (int i = 0; i < dep_count; i++) { strcat(cmd, " "); strcat(cmd, dep_objs[i]); }
+            for (int i = 0; i < link_objs.count; i++) { strcat(cmd, " "); strcat(cmd, link_objs.items[i]); }
+            if (system(cmd) != 0) { fprintf(stderr, "error: failed to link executable '%s'\n", exe); }
+            free(cmd);
+        }
+        if (exe)
+            free(exe);
     }
 
     codegen_context_dnit(&cg);

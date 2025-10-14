@@ -91,6 +91,12 @@ If resolution fails, the analyser emits a diagnostic pointing to the failing `us
 - Arrays/slices are fat pointers `{ data: *T, len: u64 }`. Passing an array to external C functions usually requires extracting the data pointer manually (`?arr[0]`).
 - All pointers (`ptr` and `*T`) are 64-bit. The compiler currently assumes a 64-bit target; other architectures require adjustments in `type.c` and the LLVM target configuration.
 
+## Runtime panic handling
+
+- The standard runtime now exports `mach_panic(message: []u8)` and an `abort()` fallback. Both write a short diagnostic to `STDERR` and terminate the process via the platform-specific exit shim.
+- Bounds checks and other compiler-inserted guards call `abort` when a violation is detected. Providing `abort` inside the runtime keeps the generated objects self-contained even when linking without the C runtime.
+- `mach_panic` is available to user code as well; it is the unified way to surface unrecoverable errors until richer error handling is implemented.
+
 ## Error reporting and diagnostics
 
 The semantic analyser reports errors with token locations. When an error originates in an imported module, diagnostics fall back to less detailed output (`module:pos:n`). Inline assembly blocks bypass semantic checks; errors may surface during LLVM IR verification or at link time.

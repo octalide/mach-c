@@ -22,6 +22,7 @@ void semantic_analyzer_init(SemanticAnalyzer *analyzer)
     analyzer->current_function = NULL;
     analyzer->loop_depth       = 0;
     analyzer->has_errors       = false;
+    analyzer->has_fatal_error  = false;
     analyzer->current_module_name = NULL;
 }
 
@@ -114,6 +115,7 @@ bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
         if (!module_manager_resolve_dependencies(&analyzer->module_manager, root, "."))
         {
             analyzer->has_errors = true;
+            semantic_mark_fatal(analyzer);
             return false;
         }
 
@@ -128,7 +130,12 @@ bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
                     analyzer->has_errors = true;
                 }
             }
+            if (analyzer->has_fatal_error)
+                break;
         }
+
+        if (analyzer->has_fatal_error)
+            return false;
 
         // second pass: analyze imported modules now that module symbols exist
         for (int i = 0; i < root->program.stmts->count; i++)
@@ -141,7 +148,12 @@ bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
                     analyzer->has_errors = true;
                 }
             }
+            if (analyzer->has_fatal_error)
+                break;
         }
+
+        if (analyzer->has_fatal_error)
+            return false;
 
         // third pass: analyze the current module statements
         for (int i = 0; i < root->program.stmts->count; i++)
@@ -150,6 +162,8 @@ bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
             {
                 analyzer->has_errors = true;
             }
+            if (analyzer->has_fatal_error)
+                break;
         }
     }
 
@@ -271,6 +285,9 @@ bool semantic_analyze_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     if (!analyzer || !stmt)
         return false;
 
+    if (analyzer->has_fatal_error)
+        return false;
+
     switch (stmt->kind)
     {
     case AST_STMT_USE:
@@ -331,6 +348,7 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         if (!canonical)
         {
             semantic_error(analyzer, stmt, "module path '%s' could not be resolved", raw_path ? raw_path : module_path);
+            semantic_mark_fatal(analyzer);
             free(raw_path);
             return false;
         }
@@ -344,6 +362,7 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     if (!module)
     {
         semantic_error(analyzer, stmt, "module '%s' not found", module_path);
+        semantic_mark_fatal(analyzer);
         free(raw_path);
         return false;
     }
@@ -441,7 +460,12 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
 
     if (module->is_analyzed)
     {
-        return semantic_import_public_symbols(analyzer, module, use_stmt);
+        if (!semantic_import_public_symbols(analyzer, module, use_stmt))
+        {
+            semantic_mark_fatal(analyzer);
+            return false;
+        }
+        return true;
     }
 
     if (module->ast && module->ast->kind == AST_PROGRAM)
@@ -491,6 +515,7 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
             if (!ok)
             {
                 semantic_error(analyzer, use_stmt, "failed to analyze externs in module '%s'", module_path);
+                semantic_mark_fatal(analyzer);
                 return false;
             }
 
@@ -577,6 +602,7 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
     else
     {
         semantic_error(analyzer, use_stmt, "failed to analyze module '%s'", module_path);
+        semantic_mark_fatal(analyzer);
     }
 
     for (int i = 0; i < module_analyzer.errors.count; i++)
@@ -597,6 +623,9 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
 
     semantic_error_list_dnit(&module_analyzer.errors);
     module_manager_dnit(&module_analyzer.module_manager);
+
+    if (!success)
+        semantic_mark_fatal(analyzer);
 
     return success;
 }
@@ -2476,6 +2505,105 @@ void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *
     list->count++;
 }
 
+static bool semantic_fetch_file_context(const char *file_path, int pos, int *line_out, int *col_out, char **line_text_out)
+{
+    if (!file_path)
+        return false;
+
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp)
+        return false;
+
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        fclose(fp);
+        return false;
+    }
+
+    long size = ftell(fp);
+    if (size < 0)
+    {
+        fclose(fp);
+        return false;
+    }
+
+    if (fseek(fp, 0, SEEK_SET) != 0)
+    {
+        fclose(fp);
+        return false;
+    }
+
+    char *buffer = malloc((size_t)size + 1);
+    if (!buffer)
+    {
+        fclose(fp);
+        return false;
+    }
+
+    size_t read = fread(buffer, 1, (size_t)size, fp);
+    fclose(fp);
+    buffer[read] = '\0';
+
+    if (pos < 0)
+        pos = 0;
+    if ((size_t)pos > read)
+        pos = (int)read;
+
+    size_t index = 0;
+    int    line  = 1;
+    int    col   = 1;
+    while (index < (size_t)pos && index < read)
+    {
+        if (buffer[index] == '\n')
+        {
+            line++;
+            col = 1;
+        }
+        else
+        {
+            col++;
+        }
+        index++;
+    }
+
+    size_t caret_index = (size_t)pos;
+    if (caret_index >= read && read > 0)
+        caret_index = read - 1;
+
+    size_t line_start = caret_index;
+    while (line_start > 0 && buffer[line_start - 1] != '\n' && buffer[line_start - 1] != '\r')
+        line_start--;
+
+    size_t line_end = caret_index;
+    while (line_end < read && buffer[line_end] != '\n' && buffer[line_end] != '\r')
+        line_end++;
+
+    size_t len = line_end > line_start ? (line_end - line_start) : 0;
+    char  *line_text = malloc(len + 1);
+    if (!line_text)
+    {
+        free(buffer);
+        return false;
+    }
+
+    if (len > 0)
+        memcpy(line_text, buffer + line_start, len);
+    line_text[len] = '\0';
+
+    free(buffer);
+
+    if (line_out)
+        *line_out = line;
+    if (col_out)
+        *col_out = col;
+    if (line_text_out)
+        *line_text_out = line_text;
+    else
+        free(line_text);
+
+    return true;
+}
+
 void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char *file_path)
 {
     for (int i = 0; i < list->count; i++)
@@ -2483,12 +2611,11 @@ void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char
         Token      *token           = list->errors[i].token;
         const char *error_file_path = list->errors[i].file_path ? list->errors[i].file_path : file_path;
 
-        printf("error: %s\n", list->errors[i].message);
+        fprintf(stderr, "error: %s\n", list->errors[i].message);
 
         if (token && error_file_path)
         {
-            // if the error is from the same file as the main lexer, use it for detailed info
-            if (lexer && file_path && error_file_path && strcmp(error_file_path, file_path) == 0)
+            if (lexer && file_path && strcmp(error_file_path, file_path) == 0)
             {
                 int   line      = lexer_get_pos_line(lexer, token->pos);
                 int   col       = lexer_get_pos_line_offset(lexer, token->pos);
@@ -2499,23 +2626,36 @@ void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char
                     line_text = strdup("unable to retrieve line text");
                 }
 
-                printf("%s:%d:%d\n", error_file_path, line + 1, col);
-                printf("%5d | %-*s\n", line + 1, col > 1 ? col - 1 : 0, line_text);
-                printf("      | %*s^\n", col - 1, "");
+                fprintf(stderr, "%s:%d:%d\n", error_file_path, line + 1, col);
+                fprintf(stderr, "%5d | %s\n", line + 1, line_text);
+                fprintf(stderr, "      | %*s^\n", col > 1 ? col - 1 : 0, "");
 
                 free(line_text);
             }
             else
             {
-                // for errors from other files, just show basic location info
-                printf("%s:pos:%d\n", error_file_path, token->pos);
-                printf("      | (from imported module)\n");
+                int   line_num = 0;
+                int   col_num  = 0;
+                char *line_text = NULL;
+
+                if (semantic_fetch_file_context(error_file_path, token->pos, &line_num, &col_num, &line_text))
+                {
+                    fprintf(stderr, "%s:%d:%d\n", error_file_path, line_num, col_num);
+                    fprintf(stderr, "%5d | %s\n", line_num, line_text ? line_text : "");
+                    fprintf(stderr, "      | %*s^\n", col_num > 1 ? col_num - 1 : 0, "");
+                    free(line_text);
+                }
+                else
+                {
+                    fprintf(stderr, "%s:pos:%d\n", error_file_path, token->pos);
+                    fprintf(stderr, "      | (from imported module)\n");
+                }
             }
         }
         else if (error_file_path)
         {
-            printf("%s\n", error_file_path);
-            printf("      | (location unavailable)\n");
+            fprintf(stderr, "%s\n", error_file_path);
+            fprintf(stderr, "      | (location unavailable)\n");
         }
     }
 }
@@ -2556,4 +2696,17 @@ void semantic_warning(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt
     va_end(args);
 
     printf("\n");
+}
+
+void semantic_mark_fatal(SemanticAnalyzer *analyzer)
+{
+    if (!analyzer)
+        return;
+
+    analyzer->has_fatal_error = true;
+}
+
+bool semantic_has_fatal_error(SemanticAnalyzer *analyzer)
+{
+    return analyzer ? analyzer->has_fatal_error : false;
 }

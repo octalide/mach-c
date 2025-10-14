@@ -32,6 +32,7 @@ typedef struct SemanticAnalyzer
     AstNode          *current_function; // for return type checking
     int               loop_depth;       // for break/continue checking
     bool              has_errors;
+    bool              has_fatal_error;
     const char       *current_module_name;      // optional: canonical module path
 } SemanticAnalyzer;
 
@@ -90,5 +91,7 @@ void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *
 void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char *file_path);
 void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...);
 void semantic_warning(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...);
+void semantic_mark_fatal(SemanticAnalyzer *analyzer);
+bool semantic_has_fatal_error(SemanticAnalyzer *analyzer);
 
 #endif

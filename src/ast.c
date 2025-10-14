@@ -86,6 +86,11 @@ void ast_node_dnit(AstNode *node)
             ast_list_dnit(node->fun_stmt.params);
             free(node->fun_stmt.params);
         }
+        if (node->fun_stmt.generics)
+        {
+            ast_list_dnit(node->fun_stmt.generics);
+            free(node->fun_stmt.generics);
+        }
         if (node->fun_stmt.return_type)
         {
             ast_node_dnit(node->fun_stmt.return_type);
@@ -245,6 +250,24 @@ void ast_node_dnit(AstNode *node)
             ast_list_dnit(node->call_expr.args);
             free(node->call_expr.args);
         }
+        if (node->call_expr.type_args)
+        {
+            ast_list_dnit(node->call_expr.type_args);
+            free(node->call_expr.type_args);
+        }
+        break;
+
+    case AST_EXPR_TYPEINST:
+        if (node->type_inst.object)
+        {
+            ast_node_dnit(node->type_inst.object);
+            free(node->type_inst.object);
+        }
+        if (node->type_inst.type_args)
+        {
+            ast_list_dnit(node->type_inst.type_args);
+            free(node->type_inst.type_args);
+        }
         break;
 
     case AST_EXPR_INDEX:
@@ -348,6 +371,10 @@ void ast_node_dnit(AstNode *node)
             ast_node_dnit(node->type_array.size);
             free(node->type_array.size);
         }
+        break;
+
+    case AST_TYPE_PARAM:
+        free(node->type_param.name);
         break;
 
     case AST_TYPE_FUN:

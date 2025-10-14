@@ -1666,42 +1666,6 @@ AstNode *parser_parse_expr_postfix(Parser *parser)
             field_expr->field_expr.field  = field;
             expr                          = field_expr;
         }
-        else if (parser_match(parser, TOKEN_ARROW))
-        {
-            Token  *arrow_token = parser->previous;
-            char   *field       = parser_parse_identifier(parser);
-            if (!field)
-            {
-                ast_node_dnit(expr);
-                free(expr);
-                return NULL;
-            }
-
-            AstNode *deref = parser_alloc_node(parser, AST_EXPR_UNARY, arrow_token);
-            if (!deref)
-            {
-                free(field);
-                ast_node_dnit(expr);
-                free(expr);
-                return NULL;
-            }
-
-            deref->unary_expr.op   = TOKEN_AT;
-            deref->unary_expr.expr = expr;
-
-            AstNode *field_expr = parser_alloc_node(parser, AST_EXPR_FIELD, parser->previous);
-            if (!field_expr)
-            {
-                free(field);
-                ast_node_dnit(deref);
-                free(deref);
-                return NULL;
-            }
-
-            field_expr->field_expr.object = deref;
-            field_expr->field_expr.field  = field;
-            expr                          = field_expr;
-        }
         else if (parser_match(parser, TOKEN_COLON_COLON))
         {
             // type cast

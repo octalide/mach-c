@@ -47,11 +47,13 @@ typedef enum AstKind
     AST_EXPR_ARRAY,
     AST_EXPR_VARARGS,
     AST_EXPR_STRUCT,
+    AST_EXPR_TYPEINST,
 
     // types
     AST_TYPE_NAME,
     AST_TYPE_PTR,
     AST_TYPE_ARRAY,
+    AST_TYPE_PARAM,
     AST_TYPE_FUN,
     AST_TYPE_STR,
     AST_TYPE_UNI,
@@ -130,6 +132,7 @@ struct AstNode
         {
             char    *name;
             AstList *params;
+            AstList *generics;   // optional generic parameters
             AstNode *return_type; // null for no return
             AstNode *body;        // null for external functions
             bool     is_variadic; // true if function has variadic arguments
@@ -227,7 +230,15 @@ struct AstNode
         {
             AstNode *func;
             AstList *args;
+            AstList *type_args;
         } call_expr;
+
+            // explicit type instantiation on an expression (foo<T, U>)
+            struct
+            {
+                AstNode *object;
+                AstList *type_args;
+            } type_inst;
 
         // array indexing
         struct
@@ -306,6 +317,11 @@ struct AstNode
             AstNode *elem_type;
             AstNode *size; // null for unbound arrays [_]
         } type_array;
+
+        struct
+        {
+            char *name;
+        } type_param;
 
         struct
         {

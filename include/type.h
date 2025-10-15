@@ -109,7 +109,7 @@ bool   type_is_integer(Type *type);
 bool   type_is_float(Type *type);
 bool   type_is_signed(Type *type);
 bool   type_is_pointer_like(Type *type);
-bool   type_is_truthy(Type *type); // can be used in boolean context (non-zero)
+bool   type_is_truthy(Type *type); // true when type is the mach boolean (u8)
 bool   type_can_cast_to(Type *from, Type *to);
 bool   type_can_assign_to(Type *from, Type *to);
 size_t type_sizeof(Type *type);

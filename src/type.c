@@ -337,8 +337,8 @@ bool type_is_truthy(Type *type)
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
-    // in Mach, any numeric type or pointer-like type can be used in boolean context
-    return type_is_numeric(type) || type_is_pointer_like(type);
+    // only raw u8 values (0 or 1 at runtime) are valid boolean conditions
+    return type->kind == TYPE_U8;
 }
 
 bool type_can_cast_to(Type *from, Type *to)

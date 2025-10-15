@@ -1729,10 +1729,10 @@ bool semantic_analyze_if_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         return false;
     }
 
-    // condition should be truthy (numeric or pointer-like)
+    // condition must evaluate to the mach boolean (u8)
     if (!type_is_truthy(cond_type))
     {
-        semantic_error(analyzer, stmt, "condition must be numeric or pointer-like");
+        semantic_error(analyzer, stmt, "condition must be of type u8");
         return false;
     }
 
@@ -1763,7 +1763,7 @@ bool semantic_analyze_or_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         }
         else if (!type_is_truthy(cond_type))
         {
-            semantic_error(analyzer, stmt, "condition must be numeric or pointer-like");
+            semantic_error(analyzer, stmt, "condition must be of type u8");
             success = false;
         }
     }
@@ -1805,7 +1805,7 @@ bool semantic_analyze_for_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         }
         else if (!type_is_truthy(cond_type))
         {
-            semantic_error(analyzer, stmt, "loop condition must be numeric or pointer-like");
+            semantic_error(analyzer, stmt, "loop condition must be of type u8");
             success = false;
         }
     }

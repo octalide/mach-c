@@ -1,12 +1,14 @@
 # Mach C Bootstrap Compiler
 
-`mach-c` is the reference C23 implementation of the Mach language front-end. It parses `.mach` sources, performs semantic analysis, and lowers programs to LLVM IR before invoking the system linker. The project exists so early adopters can experiment with the language while the self-hosted toolchain is under construction.
+`mach-c` is the reference C23 implementation of the Mach language front-end.
+
+This project exists both as an early adoption playground while the self-hosted toolchain is under construction and as the bootstrap compiler.
 
 ## Project status
 
 - Targets 64-bit Linux; builds with Clang/LLVM 16+.
 - Emits object files and executables via the host C toolchain (`cc`).
-- Ships with the minimal standard library (`mach-std`) required to build CLI programs and exercise the language runtime.
+- The minimal standard library [`mach-std`](https://github.com/octalide/mach-std) is required to build CLI programs and exercise the language runtime.
 - Language coverage is documented in [`doc/`](doc/README.md). Anything not captured there should be considered unsupported.
 
 ## Building
@@ -17,7 +19,7 @@ cd mach-c
 make        # produces bin/cmach
 ```
 
-The build expects `clang`, `lld`, and `llvm-config` on `$PATH`. `make test` runs the smoke-test suite once it exists; today the recommended validation is to compile the companion [`mach`](https://github.com/octalide/mach) sample application and run it end-to-end.
+The build expects `clang`, `lld`, and `llvm-config` on `$PATH`. The recommended validation is to compile the standard library ([`mach-std`](https://github.com/octalide/mach-std)).
 
 ## Tool usage
 
@@ -41,7 +43,7 @@ The language surface implemented by this compiler is described in [`doc/`](doc/R
 
 ## Related repositories
 
-- [`mach`](https://github.com/octalide/mach) &mdash; minimal Mach application template showing how to integrate `mach-c`, `mach-std`, and project configuration.
-- [`mach-std`](https://github.com/octalide/mach-std) &mdash; standard library modules (`std.types.array`, `std.io.console`, etc.).
+- [`mach`](https://github.com/octalide/mach) &mdash; future home of the self-hosted Mach compiler
+- [`mach-std`](https://github.com/octalide/mach-std) &mdash; standard library
 
 Issues and pull requests are welcome while the language is still settling. Please include the compiler revision and reproduction steps with any bug report.

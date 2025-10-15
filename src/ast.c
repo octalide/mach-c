@@ -257,19 +257,6 @@ void ast_node_dnit(AstNode *node)
         }
         break;
 
-    case AST_EXPR_TYPEINST:
-        if (node->type_inst.object)
-        {
-            ast_node_dnit(node->type_inst.object);
-            free(node->type_inst.object);
-        }
-        if (node->type_inst.type_args)
-        {
-            ast_list_dnit(node->type_inst.type_args);
-            free(node->type_inst.type_args);
-        }
-        break;
-
     case AST_EXPR_INDEX:
         if (node->index_expr.array)
         {
@@ -350,6 +337,11 @@ void ast_node_dnit(AstNode *node)
 
     case AST_TYPE_NAME:
         free(node->type_name.name);
+        if (node->type_name.generic_args)
+        {
+            ast_list_dnit(node->type_name.generic_args);
+            free(node->type_name.generic_args);
+        }
         break;
 
     case AST_TYPE_PTR:
@@ -443,6 +435,282 @@ void ast_list_append(AstList *list, AstNode *node)
     list->items[list->count++] = node;
 }
 
+static char *ast_strdup(const char *src)
+{
+    return src ? strdup(src) : NULL;
+}
+
+static AstNode *ast_clone_checked(const AstNode *node);
+
+AstList *ast_list_clone(const AstList *list)
+{
+    if (!list)
+        return NULL;
+
+    AstList *clone = malloc(sizeof(AstList));
+    if (!clone)
+        return NULL;
+
+    ast_list_init(clone);
+
+    for (int i = 0; i < list->count; i++)
+    {
+        AstNode *item_clone = ast_clone_checked(list->items[i]);
+        if (!item_clone)
+        {
+            ast_list_dnit(clone);
+            free(clone);
+            return NULL;
+        }
+        ast_list_append(clone, item_clone);
+    }
+
+    return clone;
+}
+
+AstNode *ast_clone(const AstNode *node)
+{
+    return ast_clone_checked(node);
+}
+
+static AstNode *ast_clone_checked(const AstNode *node)
+{
+    if (!node)
+        return NULL;
+
+    AstNode *clone = malloc(sizeof(AstNode));
+    if (!clone)
+        return NULL;
+
+    ast_node_init(clone, node->kind);
+    clone->type   = NULL;
+    clone->symbol = NULL;
+
+    if (node->token)
+    {
+        clone->token = malloc(sizeof(Token));
+        if (!clone->token)
+        {
+            free(clone);
+            return NULL;
+        }
+        token_copy((Token *)node->token, clone->token);
+    }
+
+    switch (node->kind)
+    {
+    case AST_PROGRAM:
+        clone->program.stmts = ast_list_clone(node->program.stmts);
+        break;
+
+    case AST_MODULE:
+        clone->module.name  = ast_strdup(node->module.name);
+        clone->module.stmts = ast_list_clone(node->module.stmts);
+        break;
+
+    case AST_STMT_USE:
+        clone->use_stmt.module_path = ast_strdup(node->use_stmt.module_path);
+        break;
+
+    case AST_STMT_EXT:
+        clone->ext_stmt.name       = ast_strdup(node->ext_stmt.name);
+        clone->ext_stmt.convention = ast_strdup(node->ext_stmt.convention);
+        clone->ext_stmt.symbol     = ast_strdup(node->ext_stmt.symbol);
+        clone->ext_stmt.type       = ast_clone_checked(node->ext_stmt.type);
+        clone->ext_stmt.is_public  = node->ext_stmt.is_public;
+        break;
+
+    case AST_STMT_DEF:
+        clone->def_stmt.name      = ast_strdup(node->def_stmt.name);
+        clone->def_stmt.type      = ast_clone_checked(node->def_stmt.type);
+        clone->def_stmt.is_public = node->def_stmt.is_public;
+        break;
+
+    case AST_STMT_VAL:
+    case AST_STMT_VAR:
+        clone->var_stmt.name      = ast_strdup(node->var_stmt.name);
+        clone->var_stmt.type      = ast_clone_checked(node->var_stmt.type);
+        clone->var_stmt.init      = ast_clone_checked(node->var_stmt.init);
+        clone->var_stmt.is_val    = node->var_stmt.is_val;
+        clone->var_stmt.is_public = node->var_stmt.is_public;
+        break;
+
+    case AST_STMT_FUN:
+        clone->fun_stmt.name      = ast_strdup(node->fun_stmt.name);
+        clone->fun_stmt.params    = ast_list_clone(node->fun_stmt.params);
+        clone->fun_stmt.generics  = ast_list_clone(node->fun_stmt.generics);
+        clone->fun_stmt.return_type = ast_clone_checked(node->fun_stmt.return_type);
+        clone->fun_stmt.body        = ast_clone_checked(node->fun_stmt.body);
+        clone->fun_stmt.is_variadic = node->fun_stmt.is_variadic;
+        clone->fun_stmt.is_public   = node->fun_stmt.is_public;
+        break;
+
+    case AST_STMT_STR:
+        clone->str_stmt.name   = ast_strdup(node->str_stmt.name);
+        clone->str_stmt.fields = ast_list_clone(node->str_stmt.fields);
+        clone->str_stmt.is_public = node->str_stmt.is_public;
+        break;
+
+    case AST_STMT_UNI:
+        clone->uni_stmt.name   = ast_strdup(node->uni_stmt.name);
+        clone->uni_stmt.fields = ast_list_clone(node->uni_stmt.fields);
+        clone->uni_stmt.is_public = node->uni_stmt.is_public;
+        break;
+
+    case AST_STMT_FIELD:
+        clone->field_stmt.name = ast_strdup(node->field_stmt.name);
+        clone->field_stmt.type = ast_clone_checked(node->field_stmt.type);
+        break;
+
+    case AST_STMT_PARAM:
+        clone->param_stmt.name        = ast_strdup(node->param_stmt.name);
+        clone->param_stmt.type        = ast_clone_checked(node->param_stmt.type);
+        clone->param_stmt.is_variadic = node->param_stmt.is_variadic;
+        break;
+
+    case AST_STMT_BLOCK:
+        clone->block_stmt.stmts = ast_list_clone(node->block_stmt.stmts);
+        break;
+
+    case AST_STMT_EXPR:
+        clone->expr_stmt.expr = ast_clone_checked(node->expr_stmt.expr);
+        break;
+
+    case AST_STMT_ASM:
+        clone->asm_stmt.code        = ast_strdup(node->asm_stmt.code);
+        clone->asm_stmt.constraints = ast_strdup(node->asm_stmt.constraints);
+        break;
+
+    case AST_STMT_RET:
+        clone->ret_stmt.expr = ast_clone_checked(node->ret_stmt.expr);
+        break;
+
+    case AST_STMT_IF:
+    case AST_STMT_OR:
+        clone->cond_stmt.cond    = ast_clone_checked(node->cond_stmt.cond);
+        clone->cond_stmt.body    = ast_clone_checked(node->cond_stmt.body);
+        clone->cond_stmt.stmt_or = ast_clone_checked(node->cond_stmt.stmt_or);
+        break;
+
+    case AST_STMT_FOR:
+        clone->for_stmt.cond = ast_clone_checked(node->for_stmt.cond);
+        clone->for_stmt.body = ast_clone_checked(node->for_stmt.body);
+        break;
+
+    case AST_STMT_BRK:
+    case AST_STMT_CNT:
+        break;
+
+    case AST_EXPR_BINARY:
+        clone->binary_expr.left  = ast_clone_checked(node->binary_expr.left);
+        clone->binary_expr.right = ast_clone_checked(node->binary_expr.right);
+        clone->binary_expr.op    = node->binary_expr.op;
+        break;
+
+    case AST_EXPR_UNARY:
+        clone->unary_expr.expr = ast_clone_checked(node->unary_expr.expr);
+        clone->unary_expr.op   = node->unary_expr.op;
+        break;
+
+    case AST_EXPR_CALL:
+        clone->call_expr.func      = ast_clone_checked(node->call_expr.func);
+        clone->call_expr.args      = ast_list_clone(node->call_expr.args);
+        clone->call_expr.type_args = ast_list_clone(node->call_expr.type_args);
+        break;
+
+    case AST_EXPR_INDEX:
+        clone->index_expr.array = ast_clone_checked(node->index_expr.array);
+        clone->index_expr.index = ast_clone_checked(node->index_expr.index);
+        break;
+
+    case AST_EXPR_FIELD:
+        clone->field_expr.object = ast_clone_checked(node->field_expr.object);
+        clone->field_expr.field  = ast_strdup(node->field_expr.field);
+        break;
+
+    case AST_EXPR_CAST:
+        clone->cast_expr.expr = ast_clone_checked(node->cast_expr.expr);
+        clone->cast_expr.type = ast_clone_checked(node->cast_expr.type);
+        break;
+
+    case AST_EXPR_IDENT:
+        clone->ident_expr.name = ast_strdup(node->ident_expr.name);
+        break;
+
+    case AST_EXPR_LIT:
+        clone->lit_expr.kind = node->lit_expr.kind;
+        switch (node->lit_expr.kind)
+        {
+        case TOKEN_LIT_INT:
+            clone->lit_expr.int_val = node->lit_expr.int_val;
+            break;
+        case TOKEN_LIT_FLOAT:
+            clone->lit_expr.float_val = node->lit_expr.float_val;
+            break;
+        case TOKEN_LIT_CHAR:
+            clone->lit_expr.char_val = node->lit_expr.char_val;
+            break;
+        case TOKEN_LIT_STRING:
+            clone->lit_expr.string_val = ast_strdup(node->lit_expr.string_val);
+            break;
+        default:
+            break;
+        }
+        break;
+
+    case AST_EXPR_NULL:
+    case AST_EXPR_VARARGS:
+        break;
+
+    case AST_EXPR_ARRAY:
+        clone->array_expr.type             = ast_clone_checked(node->array_expr.type);
+        clone->array_expr.elems            = ast_list_clone(node->array_expr.elems);
+        clone->array_expr.is_slice_literal = node->array_expr.is_slice_literal;
+        break;
+
+    case AST_EXPR_STRUCT:
+        clone->struct_expr.type   = ast_clone_checked(node->struct_expr.type);
+        clone->struct_expr.fields = ast_list_clone(node->struct_expr.fields);
+        break;
+
+    case AST_TYPE_NAME:
+        clone->type_name.name         = ast_strdup(node->type_name.name);
+        clone->type_name.generic_args = ast_list_clone(node->type_name.generic_args);
+        break;
+
+    case AST_TYPE_PTR:
+        clone->type_ptr.base = ast_clone_checked(node->type_ptr.base);
+        break;
+
+    case AST_TYPE_ARRAY:
+        clone->type_array.elem_type = ast_clone_checked(node->type_array.elem_type);
+        clone->type_array.size      = ast_clone_checked(node->type_array.size);
+        break;
+
+    case AST_TYPE_PARAM:
+        clone->type_param.name = ast_strdup(node->type_param.name);
+        break;
+
+    case AST_TYPE_FUN:
+        clone->type_fun.params      = ast_list_clone(node->type_fun.params);
+        clone->type_fun.return_type = ast_clone_checked(node->type_fun.return_type);
+        clone->type_fun.is_variadic = node->type_fun.is_variadic;
+        break;
+
+    case AST_TYPE_STR:
+        clone->type_str.name   = ast_strdup(node->type_str.name);
+        clone->type_str.fields = ast_list_clone(node->type_str.fields);
+        break;
+
+    case AST_TYPE_UNI:
+        clone->type_uni.name   = ast_strdup(node->type_uni.name);
+        clone->type_uni.fields = ast_list_clone(node->type_uni.fields);
+        break;
+    }
+
+    return clone;
+}
+
 // helper for printing
 static void print_indent(int indent)
 {
@@ -523,6 +791,15 @@ void ast_print(AstNode *node, int indent)
 
     case AST_STMT_FUN:
         printf("FUN %s\n", node->fun_stmt.name);
+        if (node->fun_stmt.generics && node->fun_stmt.generics->count > 0)
+        {
+            print_indent(indent + 1);
+            printf("generics:\n");
+            for (int i = 0; i < node->fun_stmt.generics->count; i++)
+            {
+                ast_print(node->fun_stmt.generics->items[i], indent + 2);
+            }
+        }
         print_indent(indent + 1);
         printf("params:\n");
         for (int i = 0; i < node->fun_stmt.params->count; i++)
@@ -660,6 +937,15 @@ void ast_print(AstNode *node, int indent)
     case AST_EXPR_CALL:
         printf("CALL\n");
         ast_print(node->call_expr.func, indent + 1);
+        if (node->call_expr.type_args && node->call_expr.type_args->count > 0)
+        {
+            print_indent(indent + 1);
+            printf("type_args:\n");
+            for (int i = 0; i < node->call_expr.type_args->count; i++)
+            {
+                ast_print(node->call_expr.type_args->items[i], indent + 2);
+            }
+        }
         print_indent(indent + 1);
         printf("args:\n");
         for (int i = 0; i < node->call_expr.args->count; i++)
@@ -740,6 +1026,15 @@ void ast_print(AstNode *node, int indent)
 
     case AST_TYPE_NAME:
         printf("TYPE %s\n", node->type_name.name);
+        if (node->type_name.generic_args && node->type_name.generic_args->count > 0)
+        {
+            print_indent(indent + 1);
+            printf("generic_args:\n");
+            for (int i = 0; i < node->type_name.generic_args->count; i++)
+            {
+                ast_print(node->type_name.generic_args->items[i], indent + 2);
+            }
+        }
         break;
 
     case AST_TYPE_PTR:
@@ -772,6 +1067,10 @@ void ast_print(AstNode *node, int indent)
         for (int i = 0; i < node->type_fun.params->count; i++)
         {
             ast_print(node->type_fun.params->items[i], indent + 2);
+
+    case AST_TYPE_PARAM:
+        printf("TYPE_PARAM %s\n", node->type_param.name ? node->type_param.name : "<anon>");
+        break;
         }
         if (node->type_fun.return_type)
         {
@@ -887,6 +1186,8 @@ const char *ast_node_kind_to_string(AstKind kind)
         return "TYPE_PTR";
     case AST_TYPE_ARRAY:
         return "TYPE_ARRAY";
+    case AST_TYPE_PARAM:
+        return "TYPE_PARAM";
     case AST_TYPE_FUN:
         return "TYPE_FUN";
     case AST_TYPE_STR:
@@ -974,6 +1275,15 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         break;
     case AST_STMT_FUN:
         fprintf(file, "FUN %s\n", node->fun_stmt.name);
+        if (node->fun_stmt.generics && node->fun_stmt.generics->count > 0)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "generics:\n");
+            for (int i = 0; i < node->fun_stmt.generics->count; i++)
+            {
+                ast_print_to_file(node->fun_stmt.generics->items[i], file, indent + 2);
+            }
+        }
         print_indent_to_file(file, indent + 1);
         fprintf(file, "params:\n");
         for (int i = 0; i < node->fun_stmt.params->count; i++)
@@ -1096,6 +1406,15 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
     case AST_EXPR_CALL:
         fprintf(file, "CALL\n");
         ast_print_to_file(node->call_expr.func, file, indent + 1);
+        if (node->call_expr.type_args && node->call_expr.type_args->count > 0)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "type_args:\n");
+            for (int i = 0; i < node->call_expr.type_args->count; i++)
+            {
+                ast_print_to_file(node->call_expr.type_args->items[i], file, indent + 2);
+            }
+        }
         print_indent_to_file(file, indent + 1);
         fprintf(file, "args:\n");
         for (int i = 0; i < node->call_expr.args->count; i++)
@@ -1167,6 +1486,15 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         break;
     case AST_TYPE_NAME:
         fprintf(file, "TYPE %s\n", node->type_name.name);
+        if (node->type_name.generic_args && node->type_name.generic_args->count > 0)
+        {
+            print_indent_to_file(file, indent + 1);
+            fprintf(file, "generic_args:\n");
+            for (int i = 0; i < node->type_name.generic_args->count; i++)
+            {
+                ast_print_to_file(node->type_name.generic_args->items[i], file, indent + 2);
+            }
+        }
         break;
     case AST_TYPE_PTR:
         fprintf(file, "TYPE_PTR\n");
@@ -1196,6 +1524,9 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         for (int i = 0; i < node->type_fun.params->count; i++)
         {
             ast_print_to_file(node->type_fun.params->items[i], file, indent + 2);
+    case AST_TYPE_PARAM:
+        fprintf(file, "TYPE_PARAM %s\n", node->type_param.name ? node->type_param.name : "<anon>");
+        break;
         }
         if (node->type_fun.return_type)
         {

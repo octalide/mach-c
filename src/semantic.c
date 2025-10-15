@@ -3,6 +3,7 @@
 #include "lexer.h"
 #include "module.h"
 #include "token.h"
+#include <ctype.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -13,6 +14,16 @@
 // forward declarations
 static Type *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNode *expr, Type *specified_type, Type *resolved_type);
 static Type *semantic_analyze_null_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
+static bool semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node);
+static Type *semantic_lookup_generic_binding(SemanticAnalyzer *analyzer, const char *name);
+static bool semantic_push_generic_binding(SemanticAnalyzer *analyzer, const char *name, Type *type);
+static void semantic_pop_generic_bindings(SemanticAnalyzer *analyzer, size_t count);
+static Symbol *semantic_instantiate_generic_function(SemanticAnalyzer *analyzer, Symbol *generic_symbol, AstNode *call_expr);
+
+static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count);
+static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count);
+static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count);
 
 void semantic_analyzer_init(SemanticAnalyzer *analyzer)
 {
@@ -20,10 +31,14 @@ void semantic_analyzer_init(SemanticAnalyzer *analyzer)
     module_manager_init(&analyzer->module_manager);
     semantic_error_list_init(&analyzer->errors);
     analyzer->current_function = NULL;
+    analyzer->program_root     = NULL;
     analyzer->loop_depth       = 0;
     analyzer->has_errors       = false;
     analyzer->has_fatal_error  = false;
     analyzer->current_module_name = NULL;
+    analyzer->generic_bindings        = NULL;
+    analyzer->generic_binding_count   = 0;
+    analyzer->generic_binding_capacity = 0;
 }
 
 void semantic_analyzer_dnit(SemanticAnalyzer *analyzer)
@@ -32,6 +47,11 @@ void semantic_analyzer_dnit(SemanticAnalyzer *analyzer)
     module_manager_dnit(&analyzer->module_manager);
     semantic_error_list_dnit(&analyzer->errors);
     analyzer->current_module_name = NULL;
+    analyzer->program_root        = NULL;
+    free(analyzer->generic_bindings);
+    analyzer->generic_bindings        = NULL;
+    analyzer->generic_binding_count   = 0;
+    analyzer->generic_binding_capacity = 0;
 }
 
 void semantic_analyzer_set_module(SemanticAnalyzer *analyzer, const char *module_name)
@@ -82,6 +102,424 @@ static bool semantic_in_top_level_scope(SemanticAnalyzer *analyzer)
     return false;
 }
 
+static Type *semantic_lookup_generic_binding(SemanticAnalyzer *analyzer, const char *name)
+{
+    if (!analyzer || !name)
+        return NULL;
+
+    for (size_t i = analyzer->generic_binding_count; i > 0; i--)
+    {
+        GenericBinding *binding = &analyzer->generic_bindings[i - 1];
+        if (binding->name && strcmp(binding->name, name) == 0)
+        {
+            return binding->type;
+        }
+    }
+
+    return NULL;
+}
+
+static bool semantic_push_generic_binding(SemanticAnalyzer *analyzer, const char *name, Type *type)
+{
+    if (!analyzer || !name || !type)
+        return false;
+
+    if (analyzer->generic_binding_count >= analyzer->generic_binding_capacity)
+    {
+        size_t new_capacity = analyzer->generic_binding_capacity ? analyzer->generic_binding_capacity * 2 : 8;
+        GenericBinding *new_bindings = realloc(analyzer->generic_bindings, new_capacity * sizeof(GenericBinding));
+        if (!new_bindings)
+            return false;
+        analyzer->generic_bindings        = new_bindings;
+        analyzer->generic_binding_capacity = new_capacity;
+    }
+
+    analyzer->generic_bindings[analyzer->generic_binding_count].name = name;
+    analyzer->generic_bindings[analyzer->generic_binding_count].type = type;
+    analyzer->generic_binding_count++;
+    return true;
+}
+
+static void semantic_pop_generic_bindings(SemanticAnalyzer *analyzer, size_t count)
+{
+    if (!analyzer || count == 0)
+        return;
+
+    if (count > analyzer->generic_binding_count)
+    {
+        analyzer->generic_binding_count = 0;
+    }
+    else
+    {
+        analyzer->generic_binding_count -= count;
+    }
+}
+
+static char *semantic_sanitize_type_token(const char *input)
+{
+    if (!input)
+        return strdup("anon");
+
+    size_t len = strlen(input);
+    char  *out = malloc(len + 1);
+    if (!out)
+        return NULL;
+
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++)
+    {
+        unsigned char c = (unsigned char)input[i];
+        if (isalnum(c))
+        {
+            out[j++] = (char)tolower(c);
+        }
+        else if (c == '_' || c == '$')
+        {
+            out[j++] = '_';
+        }
+        else if (c == '*')
+        {
+            out[j++] = 'p';
+        }
+        else if (c == '[' || c == ']')
+        {
+            out[j++] = 'a';
+        }
+        else if (c == '.'){ out[j++] = '_'; }
+        else
+        {
+            out[j++] = '_';
+        }
+    }
+
+    if (j == 0)
+        out[j++] = 't';
+
+    out[j] = '\0';
+    return out;
+}
+
+static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count)
+{
+    const char *base_name = generic_symbol->name ? generic_symbol->name : "fun";
+    size_t      base_len  = strlen(base_name);
+
+    char **parts = NULL;
+    size_t total_len = base_len;
+
+    if (arg_count > 0)
+    {
+        parts = calloc(arg_count, sizeof(char *));
+        if (!parts)
+            return NULL;
+        for (size_t i = 0; i < arg_count; i++)
+        {
+            char *raw = type_to_string(type_args[i]);
+            if (!raw)
+            {
+                for (size_t j = 0; j < i; j++)
+                    free(parts[j]);
+                free(parts);
+                return NULL;
+            }
+            char *sanitized = semantic_sanitize_type_token(raw);
+            free(raw);
+            if (!sanitized)
+            {
+                for (size_t j = 0; j < i; j++)
+                    free(parts[j]);
+                free(parts);
+                return NULL;
+            }
+            parts[i]   = sanitized;
+            total_len += 1 + strlen(sanitized);
+        }
+    }
+
+    char *mangled = malloc(total_len + 1);
+    if (!mangled)
+    {
+        if (parts)
+        {
+            for (size_t i = 0; i < arg_count; i++)
+                free(parts[i]);
+            free(parts);
+        }
+        return NULL;
+    }
+
+    strcpy(mangled, base_name);
+    size_t offset = base_len;
+    for (size_t i = 0; i < arg_count; i++)
+    {
+        mangled[offset++] = '$';
+        size_t part_len   = strlen(parts[i]);
+        memcpy(mangled + offset, parts[i], part_len);
+        offset += part_len;
+    }
+    mangled[offset] = '\0';
+
+    if (parts)
+    {
+        for (size_t i = 0; i < arg_count; i++)
+            free(parts[i]);
+        free(parts);
+    }
+
+    return mangled;
+}
+
+static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count)
+{
+    for (GenericSpecialization *spec = generic_symbol->func.generic_specializations; spec; spec = spec->next)
+    {
+        if (spec->arg_count != arg_count)
+            continue;
+
+        bool match = true;
+        for (size_t i = 0; i < arg_count; i++)
+        {
+            if (!type_equals(spec->type_args[i], type_args[i]))
+            {
+                match = false;
+                break;
+            }
+        }
+
+        if (match)
+            return spec->symbol;
+    }
+
+    return NULL;
+}
+
+static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count)
+{
+    GenericSpecialization *spec = malloc(sizeof(GenericSpecialization));
+    if (!spec)
+        return;
+
+    spec->arg_count = arg_count;
+    spec->symbol    = specialized_symbol;
+    spec->next      = generic_symbol->func.generic_specializations;
+
+    if (arg_count > 0)
+    {
+        spec->type_args = malloc(sizeof(Type *) * arg_count);
+        if (!spec->type_args)
+        {
+            free(spec);
+            return;
+        }
+        for (size_t i = 0; i < arg_count; i++)
+        {
+            spec->type_args[i] = type_args[i];
+        }
+    }
+    else
+    {
+        spec->type_args = NULL;
+    }
+
+    generic_symbol->func.generic_specializations = spec;
+}
+
+static Symbol *semantic_instantiate_generic_function(SemanticAnalyzer *analyzer, Symbol *generic_symbol, AstNode *call_expr)
+{
+    if (!generic_symbol || !call_expr)
+        return NULL;
+
+    size_t expected_count = generic_symbol->func.generic_param_count;
+    int    provided_count = call_expr->call_expr.type_args ? call_expr->call_expr.type_args->count : 0;
+
+    if (expected_count == 0)
+    {
+        semantic_error(analyzer, call_expr, "function '%s' is generic but declares no type parameters", generic_symbol->name);
+        return NULL;
+    }
+
+    if (!call_expr->call_expr.type_args || provided_count == 0)
+    {
+        semantic_error(analyzer, call_expr, "generic function '%s' requires explicit type arguments", generic_symbol->name);
+        return NULL;
+    }
+
+    if ((size_t)provided_count != expected_count)
+    {
+        semantic_error(analyzer, call_expr, "generic function '%s' expects %zu type arguments (got %d)", generic_symbol->name, expected_count, provided_count);
+        return NULL;
+    }
+
+    Type **type_args = malloc(sizeof(Type *) * expected_count);
+    if (!type_args)
+    {
+        semantic_error(analyzer, call_expr, "failed to allocate type argument buffer");
+        return NULL;
+    }
+
+    for (size_t i = 0; i < expected_count; i++)
+    {
+        AstNode *type_arg_node = call_expr->call_expr.type_args->items[i];
+        Type    *resolved      = resolve_type(analyzer, type_arg_node);
+        if (!resolved)
+        {
+            free(type_args);
+            return NULL;
+        }
+        type_args[i] = resolved;
+    }
+
+    Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, expected_count);
+    if (existing)
+    {
+        free(type_args);
+        return existing;
+    }
+
+    if (!generic_symbol->decl || generic_symbol->decl->kind != AST_STMT_FUN)
+    {
+        semantic_error(analyzer, call_expr, "generic function '%s' has no definition to instantiate", generic_symbol->name);
+        free(type_args);
+        return NULL;
+    }
+
+    AstNode *clone = ast_clone(generic_symbol->decl);
+    if (!clone)
+    {
+        semantic_error(analyzer, call_expr, "failed to instantiate generic function '%s'", generic_symbol->name);
+        free(type_args);
+        return NULL;
+    }
+
+    char *mangled_name = semantic_mangle_generic_function(generic_symbol, type_args, expected_count);
+    if (!mangled_name)
+    {
+        semantic_error(analyzer, call_expr, "failed to mangle generic function '%s'", generic_symbol->name);
+        ast_node_dnit(clone);
+        free(clone);
+        free(type_args);
+        return NULL;
+    }
+
+    free(clone->fun_stmt.name);
+    clone->fun_stmt.name = mangled_name;
+
+    if (clone->fun_stmt.generics)
+    {
+        ast_list_dnit(clone->fun_stmt.generics);
+        free(clone->fun_stmt.generics);
+        clone->fun_stmt.generics = NULL;
+    }
+
+    clone->fun_stmt.is_public = generic_symbol->is_public;
+
+    size_t binding_start = analyzer->generic_binding_count;
+    bool   binding_ok    = true;
+    for (size_t i = 0; i < expected_count; i++)
+    {
+        const char *param_name = generic_symbol->func.generic_param_names ? generic_symbol->func.generic_param_names[i] : NULL;
+        if (!param_name || !semantic_push_generic_binding(analyzer, param_name, type_args[i]))
+        {
+            binding_ok = false;
+            break;
+        }
+    }
+
+    if (!binding_ok)
+    {
+        semantic_error(analyzer, call_expr, "failed to bind generic parameters for '%s'", generic_symbol->name);
+        semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
+        ast_node_dnit(clone);
+        free(clone);
+        free(type_args);
+        return NULL;
+    }
+
+    if (generic_symbol->func.generic_param_names)
+    {
+        for (size_t i = 0; i < expected_count; i++)
+        {
+            const char *param_name = generic_symbol->func.generic_param_names[i];
+            if (!semantic_lookup_generic_binding(analyzer, param_name))
+            {
+                semantic_error(analyzer, call_expr, "internal error: missing binding for generic parameter '%s'", param_name);
+                semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
+                ast_node_dnit(clone);
+                free(clone);
+                free(type_args);
+                return NULL;
+            }
+        }
+    }
+
+    Scope *saved_scope        = analyzer->symbol_table.current_scope;
+    Scope *saved_module_scope = analyzer->symbol_table.module_scope;
+    Scope *saved_global_scope = analyzer->symbol_table.global_scope;
+
+    Scope *home_scope = generic_symbol->home_scope;
+    if (!home_scope && generic_symbol->import_module)
+    {
+        Module *source_module = module_manager_find_module(&analyzer->module_manager, generic_symbol->import_module);
+        if (source_module && source_module->symbols)
+        {
+            home_scope = source_module->symbols->module_scope ? source_module->symbols->module_scope : source_module->symbols->global_scope;
+        }
+    }
+    if (home_scope)
+    {
+        analyzer->symbol_table.current_scope = home_scope;
+
+        Scope *module_scope = home_scope;
+        while (module_scope && !module_scope->is_module)
+            module_scope = module_scope->parent;
+        if (module_scope)
+            analyzer->symbol_table.module_scope = module_scope;
+
+        Scope *global_scope = home_scope;
+        while (global_scope && global_scope->parent)
+            global_scope = global_scope->parent;
+        if (global_scope)
+            analyzer->symbol_table.global_scope = global_scope;
+    }
+    else if (analyzer->symbol_table.module_scope)
+    {
+        analyzer->symbol_table.current_scope = analyzer->symbol_table.module_scope;
+    }
+    else
+    {
+        analyzer->symbol_table.current_scope = analyzer->symbol_table.global_scope;
+    }
+
+    bool success = semantic_analyze_fun_stmt(analyzer, clone);
+
+    analyzer->symbol_table.current_scope = saved_scope;
+    analyzer->symbol_table.module_scope  = saved_module_scope;
+    analyzer->symbol_table.global_scope  = saved_global_scope;
+    semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
+
+    if (!success || !clone->symbol)
+    {
+        ast_node_dnit(clone);
+        free(clone);
+        free(type_args);
+        return NULL;
+    }
+
+    clone->symbol->func.is_specialized_instance = true;
+    clone->symbol->func.is_generic              = false;
+    clone->symbol->func.generic_param_count     = 0;
+
+    semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, expected_count);
+
+    if (analyzer->program_root && analyzer->program_root->kind == AST_PROGRAM)
+    {
+        ast_list_append(analyzer->program_root->program.stmts, clone);
+    }
+
+    free(type_args);
+    return clone->symbol;
+}
+
 static bool scope_has_module_import(Scope *scope, const char *module_name)
 {
     if (!scope || !module_name)
@@ -102,6 +540,8 @@ bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
 {
     if (!analyzer || !root)
         return false;
+
+    analyzer->program_root = root;
 
     // initialize type system
     type_system_init();
@@ -272,12 +712,205 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
     if (type_node->type)
         return type_node->type;
 
+    switch (type_node->kind)
+    {
+    case AST_TYPE_NAME:
+    {
+        Type *bound = semantic_lookup_generic_binding(analyzer, type_node->type_name.name);
+        if (bound)
+        {
+            type_node->type = bound;
+            return bound;
+        }
+        break;
+    }
+    case AST_TYPE_PARAM:
+    {
+        Type *bound = semantic_lookup_generic_binding(analyzer, type_node->type_param.name);
+        if (!bound)
+        {
+            semantic_error(analyzer, type_node, "unknown generic type parameter '%s'", type_node->type_param.name);
+            return NULL;
+        }
+        type_node->type = bound;
+        return bound;
+    }
+    case AST_TYPE_PTR:
+    {
+        Type *base = resolve_type(analyzer, type_node->type_ptr.base);
+        if (!base)
+            return NULL;
+        Type *ptr_type = type_pointer_create(base);
+        type_node->type = ptr_type;
+        return ptr_type;
+    }
+    case AST_TYPE_ARRAY:
+    {
+        Type *elem_type = resolve_type(analyzer, type_node->type_array.elem_type);
+        if (!elem_type)
+        {
+            semantic_error(analyzer, type_node, "failed to resolve array element type");
+            return NULL;
+        }
+        Type *array_type = type_array_create(elem_type);
+        type_node->type = array_type;
+        return array_type;
+    }
+    case AST_TYPE_FUN:
+    {
+        Type *return_type = NULL;
+        if (type_node->type_fun.return_type)
+        {
+            return_type = resolve_type(analyzer, type_node->type_fun.return_type);
+            if (!return_type)
+                return NULL;
+        }
+
+        size_t param_count = type_node->type_fun.params ? type_node->type_fun.params->count : 0;
+        Type **param_types = NULL;
+        if (param_count > 0)
+        {
+            param_types = malloc(sizeof(Type *) * param_count);
+            if (!param_types)
+            {
+                semantic_error(analyzer, type_node, "out of memory resolving function type");
+                return NULL;
+            }
+            for (size_t i = 0; i < param_count; i++)
+            {
+                AstNode *param_node = type_node->type_fun.params->items[i];
+                param_types[i]      = resolve_type(analyzer, param_node);
+                if (!param_types[i])
+                {
+                    free(param_types);
+                    return NULL;
+                }
+            }
+        }
+
+        bool  is_variadic = type_node->type_fun.is_variadic;
+        Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
+        free(param_types);
+        type_node->type = func_type;
+        return func_type;
+    }
+    default:
+        break;
+    }
+
     Type *resolved = type_resolve(type_node, &analyzer->symbol_table);
     if (resolved)
     {
         type_node->type = resolved;
+        return resolved;
     }
-    return resolved;
+
+    const char *type_name = NULL;
+    switch (type_node->kind)
+    {
+    case AST_TYPE_NAME:
+        type_name = type_node->type_name.name;
+        break;
+    case AST_TYPE_PARAM:
+        type_name = type_node->type_param.name;
+        break;
+    default:
+        break;
+    }
+    if (type_name)
+    {
+        semantic_error(analyzer, type_node, "unknown type '%s'", type_name);
+    }
+    else
+    {
+        semantic_error(analyzer, type_node, "unable to resolve type");
+    }
+    return NULL;
+}
+
+static bool semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    const char *name = stmt->fun_stmt.name;
+    size_t      generic_count = stmt->fun_stmt.generics ? (size_t)stmt->fun_stmt.generics->count : 0;
+
+    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
+    if (existing)
+    {
+        if (existing->kind != SYMBOL_FUNC || !existing->func.is_generic)
+        {
+            semantic_error(analyzer, stmt, "redefinition of '%s' conflicts with existing non-generic symbol", name);
+            return false;
+        }
+
+        if (existing->func.generic_param_count != generic_count)
+        {
+            semantic_error(analyzer, stmt, "generic function '%s' declared with mismatched type parameter count", name);
+            return false;
+        }
+
+        if (stmt->fun_stmt.body && existing->func.is_defined)
+        {
+            semantic_error(analyzer, stmt, "redefinition of generic function '%s'", name);
+            return false;
+        }
+
+        existing->func.is_defined = (stmt->fun_stmt.body != NULL);
+        existing->decl            = stmt;
+        stmt->symbol              = existing;
+        stmt->type                = existing->type;
+        if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
+        {
+            existing->is_public = true;
+        }
+        return true;
+    }
+
+    Type *placeholder_type = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
+    Symbol *symbol         = symbol_create(SYMBOL_FUNC, name, placeholder_type, stmt);
+    symbol->func.is_external             = false;
+    symbol->func.is_defined              = (stmt->fun_stmt.body != NULL);
+    symbol->func.uses_mach_varargs       = stmt->fun_stmt.is_variadic;
+    symbol->func.is_generic              = true;
+    symbol->func.generic_param_count     = generic_count;
+    symbol->func.generic_specializations = NULL;
+
+    if (generic_count > 0)
+    {
+        symbol->func.generic_param_names = malloc(sizeof(char *) * generic_count);
+        if (!symbol->func.generic_param_names)
+        {
+            semantic_error(analyzer, stmt, "failed to allocate generic parameter storage");
+            symbol_destroy(symbol);
+            return false;
+        }
+        for (size_t i = 0; i < generic_count; i++)
+        {
+            AstNode *param = stmt->fun_stmt.generics->items[i];
+            if (!param || param->kind != AST_TYPE_PARAM)
+            {
+                semantic_error(analyzer, stmt, "invalid generic parameter declaration");
+                symbol_destroy(symbol);
+                return false;
+            }
+            symbol->func.generic_param_names[i] = strdup(param->type_param.name);
+            if (!symbol->func.generic_param_names[i])
+            {
+                semantic_error(analyzer, stmt, "failed to allocate generic parameter name");
+                symbol_destroy(symbol);
+                return false;
+            }
+        }
+    }
+
+    if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
+    {
+        symbol->is_public = true;
+    }
+
+    symbol_add(analyzer->symbol_table.current_scope, symbol);
+    stmt->symbol = symbol;
+    stmt->type   = placeholder_type;
+    return true;
 }
 
 bool semantic_analyze_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
@@ -411,6 +1044,7 @@ static bool semantic_import_public_symbols(SemanticAnalyzer *analyzer, Module *m
         imported_sym->has_const_i64 = sym->has_const_i64;
         imported_sym->const_i64     = sym->const_i64;
         imported_sym->import_module = module->name;
+    imported_sym->home_scope    = sym->home_scope;
 
         switch (sym->kind)
         {
@@ -831,6 +1465,16 @@ static bool stmt_has_return(AstNode *stmt)
 
 bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
+    if (stmt->symbol && stmt->symbol->kind == SYMBOL_FUNC && stmt->symbol->func.is_specialized_instance)
+    {
+        return true;
+    }
+
+    if (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
+    {
+        return semantic_register_generic_fun_stmt(analyzer, stmt);
+    }
+
     const char *name = stmt->fun_stmt.name;
 
     // resolve return type
@@ -1625,6 +2269,19 @@ Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     if (!func_type)
         return NULL;
 
+    Symbol *target_symbol = expr->call_expr.func->symbol;
+    if (target_symbol && target_symbol->kind == SYMBOL_FUNC && target_symbol->func.is_generic)
+    {
+        Symbol *specialized = semantic_instantiate_generic_function(analyzer, target_symbol, expr);
+        if (!specialized)
+        {
+            return NULL;
+        }
+        expr->call_expr.func->symbol = specialized;
+        expr->call_expr.func->type   = specialized->type;
+        func_type                   = specialized->type;
+    }
+
     // resolve aliases to get the underlying type
     Type *resolved_type = type_resolve_alias(func_type);
     if (!resolved_type)
@@ -1842,10 +2499,11 @@ Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *e
             }
 
             // if we have an expected integer type and value fits, use it
-            if (expected_type && type_is_integer(expected_type))
+            Type *resolved_expected = expected_type ? type_resolve_alias(expected_type) : NULL;
+            if (resolved_expected && type_is_integer(resolved_expected))
             {
                 bool fits = false;
-                switch (expected_type->kind)
+                switch (resolved_expected->kind)
                 {
                 case TYPE_U8:
                     fits = (value <= UINT8_MAX);
@@ -1899,6 +2557,11 @@ Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *e
             else
             {
                 int_type = type_u64();
+            }
+
+            if (type_sizeof(int_type) < type_sizeof(type_u32()))
+            {
+                int_type = type_u32();
             }
 
             expr->type = int_type;
@@ -1983,17 +2646,17 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         if (elem_count == 2)
         {
             AstNode *data_node = expr->array_expr.elems->items[0];
-            AstNode *len_node  = expr->array_expr.elems->items[1];
+            AstNode *cap_node  = expr->array_expr.elems->items[1];
 
             Type *data_type = semantic_analyze_expr(analyzer, data_node);
             if (!data_type)
                 return NULL;
 
-            Type *len_type = semantic_analyze_expr(analyzer, len_node);
-            if (!len_type)
+            Type *cap_type = semantic_analyze_expr(analyzer, cap_node);
+            if (!cap_type)
                 return NULL;
 
-            if (type_is_pointer_like(data_type) && type_is_integer(len_type))
+            if (type_is_pointer_like(data_type) && type_is_integer(cap_type))
             {
                 Type *expected_ptr = type_pointer_create(elem_type);
                 if (!semantic_check_assignment(analyzer, expected_ptr, data_type, data_node))
@@ -2001,8 +2664,8 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
                     return NULL;
                 }
 
-                Type *expected_len = type_u64();
-                if (!semantic_check_assignment(analyzer, expected_len, len_type, len_node))
+                Type *expected_cap = type_u64();
+                if (!semantic_check_assignment(analyzer, expected_cap, cap_type, cap_node))
                 {
                     return NULL;
                 }

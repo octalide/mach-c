@@ -47,7 +47,6 @@ typedef enum AstKind
     AST_EXPR_ARRAY,
     AST_EXPR_VARARGS,
     AST_EXPR_STRUCT,
-    AST_EXPR_TYPEINST,
 
     // types
     AST_TYPE_NAME,
@@ -233,13 +232,6 @@ struct AstNode
             AstList *type_args;
         } call_expr;
 
-            // explicit type instantiation on an expression (foo<T, U>)
-            struct
-            {
-                AstNode *object;
-                AstList *type_args;
-            } type_inst;
-
         // array indexing
         struct
         {
@@ -304,7 +296,8 @@ struct AstNode
         // type expressions
         struct
         {
-            char *name;
+            char    *name;
+            AstList *generic_args;
         } type_name;
 
         struct
@@ -352,6 +345,10 @@ void ast_node_dnit(AstNode *node);
 void ast_list_init(AstList *list);
 void ast_list_dnit(AstList *list);
 void ast_list_append(AstList *list, AstNode *node);
+
+// cloning helpers
+AstNode *ast_clone(const AstNode *node);
+AstList *ast_list_clone(const AstList *list);
 
 // pretty printing for debugging
 void ast_print(AstNode *node, int indent);

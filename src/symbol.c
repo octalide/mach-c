@@ -85,6 +85,7 @@ Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *de
     symbol->name   = name ? strdup(name) : NULL;
     symbol->type   = type;
     symbol->decl   = decl;
+    symbol->home_scope = NULL;
     symbol->next   = NULL;
     symbol->is_imported    = false;
     symbol->is_public      = false;
@@ -108,6 +109,11 @@ Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *de
         symbol->func.extern_name = NULL;
         symbol->func.convention  = NULL;
         symbol->func.mangled_name = NULL;
+        symbol->func.is_generic  = false;
+        symbol->func.generic_param_count = 0;
+        symbol->func.generic_param_names = NULL;
+        symbol->func.generic_specializations = NULL;
+        symbol->func.is_specialized_instance = false;
         break;
 
     case SYMBOL_TYPE:
@@ -152,6 +158,25 @@ void symbol_destroy(Symbol *symbol)
         symbol->func.extern_name = NULL;
         symbol->func.convention  = NULL;
         symbol->func.mangled_name = NULL;
+
+        if (symbol->func.generic_param_names)
+        {
+            for (size_t i = 0; i < symbol->func.generic_param_count; i++)
+            {
+                free(symbol->func.generic_param_names[i]);
+            }
+            free(symbol->func.generic_param_names);
+            symbol->func.generic_param_names = NULL;
+        }
+        GenericSpecialization *spec = symbol->func.generic_specializations;
+        while (spec)
+        {
+            GenericSpecialization *next = spec->next;
+            free(spec->type_args);
+            free(spec);
+            spec = next;
+        }
+        symbol->func.generic_specializations = NULL;
     }
 
     free(symbol);
@@ -161,6 +186,9 @@ void symbol_add(Scope *scope, Symbol *symbol)
 {
     if (!scope || !symbol)
         return;
+
+    if (!symbol->home_scope)
+        symbol->home_scope = scope;
 
     // add to front of list
     symbol->next   = scope->symbols;

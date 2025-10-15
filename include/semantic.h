@@ -24,16 +24,26 @@ typedef struct SemanticErrorList
     int            capacity;
 } SemanticErrorList;
 
+typedef struct GenericBinding
+{
+    const char *name;
+    Type       *type;
+} GenericBinding;
+
 typedef struct SemanticAnalyzer
 {
     SymbolTable       symbol_table;
     ModuleManager     module_manager;   // for cross-module analysis
     SemanticErrorList errors;           // error tracking
     AstNode          *current_function; // for return type checking
+    AstNode          *program_root;     // root program node for synthesized items
     int               loop_depth;       // for break/continue checking
     bool              has_errors;
     bool              has_fatal_error;
     const char       *current_module_name;      // optional: canonical module path
+    GenericBinding   *generic_bindings;
+    size_t            generic_binding_count;
+    size_t            generic_binding_capacity;
 } SemanticAnalyzer;
 
 // semantic analyzer operations

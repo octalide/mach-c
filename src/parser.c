@@ -46,6 +46,10 @@ static AstList *parser_alloc_list(Parser *parser)
 // forward for asm stmt
 static AstNode *parser_parse_stmt_asm(Parser *parser);
 
+static bool parser_should_parse_type_args(Parser *parser);
+static AstList *parser_parse_type_arguments(Parser *parser);
+static AstList *parser_parse_generic_param_list(Parser *parser);
+
 // parser lifecycle
 void parser_init(Parser *parser, Lexer *lexer)
 {
@@ -276,6 +280,203 @@ char *parser_parse_identifier(Parser *parser)
         return NULL;
     }
     return lexer_raw_value(parser->lexer, parser->previous);
+}
+
+static bool parser_should_parse_type_args(Parser *parser)
+{
+    if (!parser || !parser->current || parser->current->kind != TOKEN_LESS)
+    {
+        return false;
+    }
+
+    char *source = parser->lexer->source;
+    if (!source)
+    {
+        return false;
+    }
+
+    int  index      = parser->current->pos + 1;
+    int  depth      = 1;
+    bool has_tokens = false;
+
+    while (source[index] != '\0')
+    {
+        char c = source[index];
+        if (c == '<')
+        {
+            depth++;
+        }
+        else if (c == '>')
+        {
+            depth--;
+            index++;
+            if (depth == 0)
+            {
+                break;
+            }
+        }
+        else if (c == '\n' || c == ';')
+        {
+            return false;
+        }
+        else if (!isspace((unsigned char)c))
+        {
+            has_tokens = true;
+        }
+        index++;
+    }
+
+    if (depth != 0 || !has_tokens)
+    {
+        return false;
+    }
+
+    while (isspace((unsigned char)source[index]))
+    {
+        index++;
+    }
+
+    return source[index] == '(';
+}
+
+static AstList *parser_parse_type_arguments(Parser *parser)
+{
+    if (!parser_consume(parser, TOKEN_LESS, "expected '<' to start type arguments"))
+    {
+        return NULL;
+    }
+
+    AstList *args = parser_alloc_list(parser);
+    if (!args)
+    {
+        return NULL;
+    }
+
+    if (!parser_check(parser, TOKEN_GREATER))
+    {
+        do
+        {
+            AstNode *type_arg = parser_parse_type(parser);
+            if (!type_arg)
+            {
+                ast_list_dnit(args);
+                free(args);
+                return NULL;
+            }
+            ast_list_append(args, type_arg);
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    if (!parser_consume(parser, TOKEN_GREATER, "expected '>' after type arguments"))
+    {
+        ast_list_dnit(args);
+        free(args);
+        return NULL;
+    }
+
+    return args;
+}
+
+static AstList *parser_parse_generic_param_list(Parser *parser)
+{
+    AstList *params = parser_alloc_list(parser);
+    if (!params)
+    {
+        return NULL;
+    }
+
+    if (!parser_check(parser, TOKEN_GREATER))
+    {
+        do
+        {
+            char *name = parser_parse_identifier(parser);
+            if (!name)
+            {
+                ast_list_dnit(params);
+                free(params);
+                return NULL;
+            }
+
+            AstNode *param_node = parser_alloc_node(parser, AST_TYPE_PARAM, parser->previous);
+            if (!param_node)
+            {
+                free(name);
+                ast_list_dnit(params);
+                free(params);
+                return NULL;
+            }
+
+            param_node->type_param.name = name;
+            ast_list_append(params, param_node);
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    if (!parser_consume(parser, TOKEN_GREATER, "expected '>' after generic parameters"))
+    {
+        ast_list_dnit(params);
+        free(params);
+        return NULL;
+    }
+
+    return params;
+}
+
+static AstNode *parser_finish_call(Parser *parser, AstNode *callee, AstList *type_args)
+{
+    AstNode *call = parser_alloc_node(parser, AST_EXPR_CALL, parser->previous);
+    if (!call)
+    {
+        if (type_args)
+        {
+            ast_list_dnit(type_args);
+            free(type_args);
+        }
+        if (callee)
+        {
+            ast_node_dnit(callee);
+            free(callee);
+        }
+        return NULL;
+    }
+
+    call->call_expr.func      = callee;
+    call->call_expr.args      = parser_alloc_list(parser);
+    call->call_expr.type_args = type_args;
+    if (!call->call_expr.args)
+    {
+        if (type_args)
+        {
+            ast_list_dnit(type_args);
+            free(type_args);
+        }
+        ast_node_dnit(call);
+        free(call);
+        return NULL;
+    }
+
+    if (!parser_check(parser, TOKEN_R_PAREN))
+    {
+        do
+        {
+            AstNode *arg = parser_parse_expr(parser);
+            if (!arg)
+            {
+                ast_node_dnit(call);
+                free(call);
+                return NULL;
+            }
+            ast_list_append(call->call_expr.args, arg);
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after arguments"))
+    {
+        ast_node_dnit(call);
+        free(call);
+        return NULL;
+    }
+
+    return call;
 }
 
 // precedence climbing for expressions
@@ -791,6 +992,17 @@ AstNode *parser_parse_stmt_fun(Parser *parser, bool is_public)
         ast_node_dnit(node);
         free(node);
         return NULL;
+    }
+
+    if (parser_match(parser, TOKEN_LESS))
+    {
+        node->fun_stmt.generics = parser_parse_generic_param_list(parser);
+        if (!node->fun_stmt.generics)
+        {
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
     }
 
     if (!parser_consume(parser, TOKEN_L_PAREN, "expected '(' after function name"))
@@ -1564,45 +1776,38 @@ AstNode *parser_parse_expr_postfix(Parser *parser)
 
     for (;;)
     {
-        if (parser_match(parser, TOKEN_L_PAREN))
+        if (parser_check(parser, TOKEN_LESS) && parser_should_parse_type_args(parser))
         {
-            // function call
-            AstNode *call = parser_alloc_node(parser, AST_EXPR_CALL, parser->previous);
-            if (!call)
+            AstList *type_args = parser_parse_type_arguments(parser);
+            if (!type_args)
             {
                 ast_node_dnit(expr);
                 free(expr);
                 return NULL;
             }
 
-            call->call_expr.func = expr;
-            call->call_expr.args = parser_alloc_list(parser);
-            if (!call->call_expr.args)
+            if (!parser_consume(parser, TOKEN_L_PAREN, "expected '(' after type arguments"))
             {
-                ast_node_dnit(call);
-                free(call);
+                ast_list_dnit(type_args);
+                free(type_args);
+                ast_node_dnit(expr);
+                free(expr);
                 return NULL;
             }
 
-            if (!parser_check(parser, TOKEN_R_PAREN))
+            AstNode *call = parser_finish_call(parser, expr, type_args);
+            if (!call)
             {
-                do
-                {
-                    AstNode *arg = parser_parse_expr(parser);
-                    if (!arg)
-                    {
-                        ast_node_dnit(call);
-                        free(call);
-                        return NULL;
-                    }
-                    ast_list_append(call->call_expr.args, arg);
-                } while (parser_match(parser, TOKEN_COMMA));
+                return NULL;
             }
 
-            if (!parser_consume(parser, TOKEN_R_PAREN, "expected ')' after arguments"))
+            expr = call;
+        }
+        else if (parser_match(parser, TOKEN_L_PAREN))
+        {
+            AstNode *call = parser_finish_call(parser, expr, NULL);
+            if (!call)
             {
-                ast_node_dnit(call);
-                free(call);
                 return NULL;
             }
 
@@ -2061,6 +2266,18 @@ AstNode *parser_parse_type_name(Parser *parser)
         ast_node_dnit(type);
         free(type);
         return NULL;
+    }
+
+    if (parser_check(parser, TOKEN_LESS))
+    {
+        AstList *generic_args = parser_parse_type_arguments(parser);
+        if (!generic_args)
+        {
+            ast_node_dnit(type);
+            free(type);
+            return NULL;
+        }
+        type->type_name.generic_args = generic_args;
     }
 
     return type;

@@ -7,6 +7,8 @@
 
 // forward declarations
 typedef struct AstNode AstNode;
+struct Symbol;
+struct Scope;
 
 typedef enum SymbolKind
 {
@@ -19,12 +21,23 @@ typedef enum SymbolKind
     SYMBOL_MODULE, // module
 } SymbolKind;
 
+typedef struct GenericSpecialization GenericSpecialization;
+
+struct GenericSpecialization
+{
+    size_t                  arg_count;
+    Type                   **type_args;
+    struct Symbol          *symbol;
+    GenericSpecialization  *next;
+};
+
 typedef struct Symbol
 {
     SymbolKind     kind;
     char          *name;
     Type          *type;
     AstNode       *decl; // declaration node
+    struct Scope  *home_scope; // scope where the symbol is registered
     struct Symbol *next; // for linked list in scope
     bool           is_imported; // true if this symbol was imported from another module
     bool           is_public;   // true if symbol should be exported from module
@@ -50,6 +63,11 @@ typedef struct Symbol
             char *extern_name;      // c-level symbol name for externs (defaults to mach name)
             char *convention;       // calling convention hint (e.g. "C")
             char *mangled_name;     // cached mangled name for codegen
+            bool  is_generic;
+            size_t generic_param_count;
+            char **generic_param_names;
+            GenericSpecialization *generic_specializations;
+            bool  is_specialized_instance;
         } func;
 
         // SYMBOL_TYPE

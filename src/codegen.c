@@ -939,7 +939,7 @@ LLVMTypeRef codegen_get_llvm_type(CodegenContext *ctx, Type *type)
         break;
     case TYPE_ARRAY:
     {
-        // all arrays are fat pointers: {ptr data, u64 length}
+    // all arrays are fat pointers: {ptr data, u64 length}
         LLVMTypeRef fat_ptr_fields[2] = {
             LLVMPointerTypeInContext(ctx->context, 0), // data pointer
             LLVMInt64TypeInContext(ctx->context)       // length (u64)
@@ -1412,6 +1412,11 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         return NULL;
     }
 
+    if ((stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0) || (stmt->symbol && stmt->symbol->func.is_generic))
+    {
+        return NULL;
+    }
+
     const char *func_name = stmt->fun_stmt.name;
 
     Type *func_type           = stmt->type;
@@ -1500,7 +1505,20 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
                 if (param->param_stmt.is_variadic)
                     continue;
                 LLVMValueRef param_value = LLVMGetParam(func, (unsigned)fixed_index);
-                LLVMSetValueName2(param_value, param->param_stmt.name, strlen(param->param_stmt.name));
+                if (!param_value)
+                {
+                    codegen_error(ctx, stmt, "failed to access parameter '%s'", param->param_stmt.name ? param->param_stmt.name : "<anon>");
+                    fixed_index++;
+                    continue;
+                }
+
+                if (!param->type)
+                {
+                    codegen_error(ctx, param, "parameter '%s' missing resolved type", param->param_stmt.name ? param->param_stmt.name : "<anon>");
+                    fixed_index++;
+                    continue;
+                }
+
                 LLVMTypeRef  param_type   = codegen_get_llvm_type(ctx, param->type);
                 LLVMValueRef param_alloca = codegen_create_alloca(ctx, param_type, param->param_stmt.name);
                 LLVMBuildStore(ctx->builder, param_value, param_alloca);
@@ -1863,7 +1881,7 @@ LLVMValueRef codegen_expr_lit(CodegenContext *ctx, AstNode *expr)
         Type *resolved_type = type_resolve_alias(expr->type);
         if (resolved_type && resolved_type->kind == TYPE_ARRAY)
         {
-            // create fat pointer: { ptr data, u64 length }
+    // create fat pointer: { ptr data, u64 length }
             LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, expr->type);
             LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
 
@@ -1906,6 +1924,11 @@ LLVMValueRef codegen_expr_ident(CodegenContext *ctx, AstNode *expr)
     }
 
     LLVMValueRef value = codegen_get_symbol_value(ctx, expr->symbol);
+    if (!value && expr->symbol->kind == SYMBOL_FUNC)
+    {
+        codegen_declare_function_symbol(ctx, expr->symbol);
+        value = codegen_get_symbol_value(ctx, expr->symbol);
+    }
     if (!value)
     {
         // declare external global for module-level val/var
@@ -2356,6 +2379,15 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
         }
     }
 
+    Symbol *callee_symbol = expr->call_expr.func->symbol;
+    if (callee_symbol && callee_symbol->kind == SYMBOL_FUNC)
+    {
+        if (!codegen_get_symbol_value(ctx, callee_symbol))
+        {
+            codegen_declare_function_symbol(ctx, callee_symbol);
+        }
+    }
+
     LLVMValueRef func = codegen_expr(ctx, expr->call_expr.func);
     if (!func)
     {
@@ -2374,8 +2406,7 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
         return NULL;
     }
 
-    Symbol *callee_symbol     = expr->call_expr.func->symbol;
-    bool    uses_mach_varargs = callee_symbol && callee_symbol->kind == SYMBOL_FUNC && callee_symbol->func.uses_mach_varargs;
+    bool uses_mach_varargs = callee_symbol && callee_symbol->kind == SYMBOL_FUNC && callee_symbol->func.uses_mach_varargs;
     int     arg_expr_count    = expr->call_expr.args ? expr->call_expr.args->count : 0;
     size_t  fixed_param_count = func_type->function.param_count;
 
@@ -3049,8 +3080,8 @@ LLVMValueRef codegen_expr_index(CodegenContext *ctx, AstNode *expr)
         LLVMBasicBlockRef bounds_ok_block   = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "bounds_ok");
 
         // extract fat pointer fields
-    LLVMValueRef fat_ptr  = codegen_load_if_needed(ctx, array, array_type, expr->index_expr.array);
-        LLVMValueRef length   = LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
+        LLVMValueRef fat_ptr  = codegen_load_if_needed(ctx, array, array_type, expr->index_expr.array);
+    LLVMValueRef length = LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
         LLVMValueRef data_ptr = LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
 
         LLVMValueRef bounds_violated;
@@ -3172,7 +3203,7 @@ LLVMValueRef codegen_expr_array(CodegenContext *ctx, AstNode *expr)
             codegen_error(ctx, len_node, "failed to generate slice length expression");
             return NULL;
         }
-    len_value = codegen_load_if_needed(ctx, len_value, len_node->type, len_node);
+        len_value = codegen_load_if_needed(ctx, len_value, len_node->type, len_node);
 
         LLVMTypeRef len_type_ref   = LLVMTypeOf(len_value);
         LLVMTypeRef len_field_type = LLVMInt64TypeInContext(ctx->context);

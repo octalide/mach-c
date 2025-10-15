@@ -33,12 +33,32 @@ Key points illustrated:
 - Strings are `[]u8` fat pointers at compile time and can be passed to external functions that expect pointers to byte sequences.
 - `ret` either returns a value (`ret 0;`) or exits a void function (`ret;`).
 
-Compile and run:
+Compile and run the example:
 
 ```bash
+# 1. Build the compiler (once)
+cd mach-c
 make
-./bin/cmach path/to/program.mach
+
+# 2. Build the standard library archive
+cd ../mach-std
+make
+
+# 3. Compile the Mach source to an object file
+cd ../mach
+../mach-c/bin/cmach build src/main.mach \
+    --emit-obj --no-link \
+    -M std=../mach-std/src \
+    -o out/obj/main.o
+
+# 4. Link the final executable with the std archive
+cc out/obj/main.o ../mach-std/out/lib/libmachstd.a -o out/bin/mach
+
+# 5. Run it
+./out/bin/mach
 ```
+
+The `mach` repository ships with a `Makefile` that automates these steps (`make` builds and links; `make run` executes the binary). Treat it as a minimal template for new projects.
 
 ## Source form
 

@@ -49,6 +49,21 @@ Array literals accept two shapes:
 
 When a type alias resolves to an array type, `Alias{ ... }` uses the same rules.
 
+> **Dynamic growth.** The core language does not auto-resize slices; any append-like operation must allocate explicitly. The bundled standard library module `std.types.array` exposes helper functions—`array_append`, `array_append_slice`, `array_reserve`, `array_shrink_to_fit`, `array_clear`, and `array_free`—that manage capacity by storing bookkeeping metadata in front of the slice’s data pointer. Each helper returns a new slice value (potentially with a different backing pointer), so call sites must reassign the result:
+
+```mach
+use std.types.array;
+
+var bytes: []u8 = []u8{ nil, 0 };
+bytes = array_append<u8>(bytes, 42);
+bytes = array_append_slice<u8>(bytes, []u8{ 'O', 'K', 0 });
+
+# release the allocation once it is no longer needed
+bytes = array_free<u8>(bytes);
+```
+
+Treat these helpers as part of the contract of the standard library. Code that bypasses them must allocate and free the slice storage manually.
+
 ## Structs
 
 Struct types are introduced with `str` declarations:

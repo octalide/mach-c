@@ -1286,7 +1286,9 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
     if (!ctx->current_function)
     {
         // top-level: create a true LLVM global
-        const char *gname  = stmt->var_stmt.name;
+        const char *gname = stmt->symbol && stmt->symbol->var.mangled_name && stmt->symbol->var.mangled_name[0]
+                                ? stmt->symbol->var.mangled_name
+                                : stmt->var_stmt.name;
         LLVMValueRef global = LLVMGetNamedGlobal(ctx->module, gname);
         if (!global)
         {
@@ -1417,7 +1419,11 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         return NULL;
     }
 
-    const char *func_name = stmt->fun_stmt.name;
+    const char *func_name = NULL;
+    if (stmt->symbol && stmt->symbol->func.mangled_name && stmt->symbol->func.mangled_name[0])
+        func_name = stmt->symbol->func.mangled_name;
+    else
+        func_name = stmt->fun_stmt.name;
 
     Type *func_type           = stmt->type;
     bool  uses_mach_varargs   = stmt->symbol && stmt->symbol->func.uses_mach_varargs;
@@ -1442,6 +1448,13 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         }
     }
 
+    if (!func_name || !func_name[0])
+    {
+        free(param_types);
+        codegen_error(ctx, stmt, "function has no resolvable name");
+        return NULL;
+    }
+
     LLVMTypeRef  llvm_func_type = LLVMFunctionType(return_type, param_types, llvm_param_count, uses_mach_varargs ? false : func_type->function.is_variadic);
     LLVMValueRef func           = LLVMGetNamedFunction(ctx->module, func_name);
     if (!func)
@@ -1453,16 +1466,8 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
     // clean up mangled name
     codegen_set_symbol_value(ctx, stmt->symbol, func);
 
-    if (stmt->symbol)
-    {
-        if (stmt->symbol->func.mangled_name)
-        {
-            free(stmt->symbol->func.mangled_name);
-            stmt->symbol->func.mangled_name = NULL;
-        }
-        if (func_name)
-            stmt->symbol->func.mangled_name = strdup(func_name);
-    }
+    if (stmt->symbol && !stmt->symbol->func.mangled_name && func_name)
+        stmt->symbol->func.mangled_name = strdup(func_name);
 
     // generate body if present
     if (stmt->fun_stmt.body)
@@ -1935,10 +1940,13 @@ LLVMValueRef codegen_expr_ident(CodegenContext *ctx, AstNode *expr)
         if (expr->symbol->kind == SYMBOL_VAR || expr->symbol->kind == SYMBOL_VAL)
         {
             LLVMTypeRef ty = codegen_get_llvm_type(ctx, expr->symbol->type);
-            value          = LLVMGetNamedGlobal(ctx->module, expr->ident_expr.name);
+            const char   *gname = expr->symbol->var.mangled_name && expr->symbol->var.mangled_name[0]
+                                     ? expr->symbol->var.mangled_name
+                                     : expr->ident_expr.name;
+            value                = LLVMGetNamedGlobal(ctx->module, gname);
             if (!value)
             {
-                value = LLVMAddGlobal(ctx->module, ty, expr->ident_expr.name);
+                value = LLVMAddGlobal(ctx->module, ty, gname);
             }
             codegen_set_symbol_value(ctx, expr->symbol, value);
         }

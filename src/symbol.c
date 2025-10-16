@@ -92,6 +92,7 @@ Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *de
     symbol->has_const_i64 = false;
     symbol->const_i64 = 0;
     symbol->import_module = NULL;
+    symbol->module_name    = NULL;
 
     // initialize kind-specific data
     switch (kind)
@@ -100,6 +101,7 @@ Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *de
     case SYMBOL_VAL:
         symbol->var.is_global = false;
         symbol->var.is_const  = (kind == SYMBOL_VAL);
+        symbol->var.mangled_name = NULL;
         break;
 
     case SYMBOL_FUNC:
@@ -143,12 +145,19 @@ void symbol_destroy(Symbol *symbol)
         return;
 
     free(symbol->name);
+    free(symbol->module_name);
+    symbol->module_name = NULL;
 
     if (symbol->kind == SYMBOL_MODULE)
     {
-        free(symbol->module.path);
-        symbol->module.path = NULL;
-        // don't destroy module scope here - it's managed separately
+        if (symbol->module.scope && symbol->is_imported)
+        {
+            scope_destroy(symbol->module.scope);
+            symbol->module.scope = NULL;
+        }
+    free(symbol->module.path);
+    symbol->module.path = NULL;
+    // non-imported module scopes are managed separately
     }
     else if (symbol->kind == SYMBOL_FUNC)
     {
@@ -177,6 +186,11 @@ void symbol_destroy(Symbol *symbol)
             spec = next;
         }
         symbol->func.generic_specializations = NULL;
+    }
+    else if (symbol->kind == SYMBOL_VAR || symbol->kind == SYMBOL_VAL)
+    {
+        free(symbol->var.mangled_name);
+        symbol->var.mangled_name = NULL;
     }
 
     free(symbol);

@@ -764,7 +764,7 @@ static bool preprocessor_handle_if(const char                 *rest,
     long long cond     = preprocessor_eval_condition(rest, constants, constant_count, &cond_ok);
     if (!cond_ok)
     {
-        output->message = strdup("invalid #! if expression");
+        output->message = strdup("invalid #@if expression");
         output->line    = line_no;
         return false;
     }
@@ -798,7 +798,7 @@ static bool preprocessor_handle_or(const char                 *rest,
     PreprocessorFrame *frame = preprocessor_frame_stack_top(frames);
     if (!frame)
     {
-        output->message = strdup("#! or without matching #! if");
+        output->message = strdup("#@or without matching #@if");
         output->line    = line_no;
         return false;
     }
@@ -807,7 +807,7 @@ static bool preprocessor_handle_or(const char                 *rest,
     long long cond = preprocessor_eval_condition(rest, constants, constant_count, &cond_ok);
     if (!cond_ok)
     {
-        output->message = strdup("invalid #! or expression");
+        output->message = strdup("invalid #@or expression");
         output->line    = line_no;
         return false;
     }
@@ -832,7 +832,7 @@ static bool preprocessor_handle_end(PreprocessorFrameStack *frames,
     PreprocessorFrame frame;
     if (!preprocessor_frame_stack_pop(frames, &frame))
     {
-        output->message = strdup("#! end without matching #! if");
+        output->message = strdup("#@end without matching #@if");
         output->line    = line_no;
         return false;
     }
@@ -850,7 +850,7 @@ static bool preprocessor_handle_end(PreprocessorFrameStack *frames,
 
 static bool preprocessor_is_directive(const char *trimmed)
 {
-    return trimmed && trimmed[0] == '#' && trimmed[1] == '!';
+    return trimmed && trimmed[0] == '#' && trimmed[1] == '@';
 }
 
 bool preprocessor_run(const char *source,
@@ -914,6 +914,7 @@ bool preprocessor_run(const char *source,
                     directive++;
                 }
 
+                // Check if it's a preprocessor conditional directive
                 if (strncmp(directive, "if", 2) == 0 && (directive[2] == '\0' || directive[2] == ' ' || directive[2] == '\t' || directive[2] == '('))
                 {
                     const char *expr = directive + 2;
@@ -930,14 +931,15 @@ bool preprocessor_run(const char *source,
                 }
                 else
                 {
-                    output->message = strdup("unknown #! directive");
-                    output->line    = line_no;
-                    ok              = false;
-                }
-
-                if (has_newline && ok)
-                {
-                    ok = preprocessor_buffer_append_char(&buffer, '\n');
+                    // Not a preprocessor directive (e.g., #@symbol), pass through as regular line
+                    if (global_active)
+                    {
+                        ok = preprocessor_buffer_append_range(&buffer, line, line_length);
+                    }
+                    if (has_newline && ok)
+                    {
+                        ok = preprocessor_buffer_append_char(&buffer, '\n');
+                    }
                 }
             }
             else
@@ -975,7 +977,7 @@ bool preprocessor_run(const char *source,
 
     if (ok && frames.count != 0)
     {
-        output->message = strdup("unterminated #! if block");
+        output->message = strdup("unterminated #@if block");
         output->line    = line_no;
         ok              = false;
     }

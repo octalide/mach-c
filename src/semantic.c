@@ -25,6 +25,207 @@ static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **typ
 static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count);
 static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count);
 
+static char semantic_sanitize_export_char(char c)
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
+        return c;
+    return '_';
+}
+
+static char *semantic_build_export_name(const char *module_name, const char *symbol_name)
+{
+    if (!symbol_name || !symbol_name[0])
+        return NULL;
+
+    const char *module = (module_name && module_name[0]) ? module_name : NULL;
+    size_t       module_len = module ? strlen(module) : 0;
+    size_t       symbol_len = strlen(symbol_name);
+
+    size_t total = module_len ? (module_len + 2 + symbol_len) : symbol_len;
+    char  *out   = malloc(total + 1);
+    if (!out)
+        return NULL;
+
+    size_t pos = 0;
+    if (module_len)
+    {
+        for (size_t i = 0; i < module_len; i++)
+            out[pos++] = semantic_sanitize_export_char(module[i]);
+        out[pos++] = '_';
+        out[pos++] = '_';
+    }
+
+    for (size_t i = 0; i < symbol_len; i++)
+        out[pos++] = semantic_sanitize_export_char(symbol_name[i]);
+
+    out[pos] = '\0';
+    return out;
+}
+
+static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module_name)
+{
+    if (!source)
+        return NULL;
+
+    Symbol *clone = symbol_create(source->kind, source->name, source->type, source->decl);
+    if (!clone)
+        return NULL;
+
+    clone->is_imported   = true;
+    clone->is_public     = source->is_public;
+    clone->has_const_i64 = source->has_const_i64;
+    clone->const_i64     = source->const_i64;
+    clone->import_module = module_name;
+
+    free(clone->module_name);
+    if (source->module_name)
+        clone->module_name = strdup(source->module_name);
+    else if (module_name)
+        clone->module_name = strdup(module_name);
+    else
+        clone->module_name = NULL;
+
+    switch (source->kind)
+    {
+    case SYMBOL_VAR:
+    case SYMBOL_VAL:
+        clone->var.is_global = source->var.is_global;
+        clone->var.is_const  = source->var.is_const;
+        free(clone->var.mangled_name);
+        clone->var.mangled_name = source->var.mangled_name ? strdup(source->var.mangled_name) : NULL;
+        break;
+    case SYMBOL_FUNC:
+        clone->func.is_external            = source->func.is_external;
+        clone->func.is_defined             = source->func.is_defined;
+        clone->func.uses_mach_varargs      = source->func.uses_mach_varargs;
+        clone->func.extern_name            = source->func.extern_name ? strdup(source->func.extern_name) : NULL;
+        clone->func.convention             = source->func.convention ? strdup(source->func.convention) : NULL;
+        clone->func.mangled_name           = source->func.mangled_name ? strdup(source->func.mangled_name) : NULL;
+        clone->func.is_generic             = false;
+        clone->func.generic_param_count    = 0;
+        clone->func.generic_param_names    = NULL;
+        clone->func.generic_specializations = NULL;
+        clone->func.is_specialized_instance = source->func.is_specialized_instance;
+        break;
+    case SYMBOL_TYPE:
+        clone->type_def.is_alias = source->type_def.is_alias;
+        break;
+    case SYMBOL_FIELD:
+        clone->field.offset = source->field.offset;
+        break;
+    case SYMBOL_PARAM:
+        clone->param.index = source->param.index;
+        break;
+    case SYMBOL_MODULE:
+        break;
+    }
+
+    return clone;
+}
+
+static bool semantic_populate_module_alias_scope(SemanticAnalyzer *analyzer, Symbol *module_symbol)
+{
+    if (!analyzer || !module_symbol || module_symbol->kind != SYMBOL_MODULE)
+        return false;
+
+    Scope *alias_scope = module_symbol->module.scope;
+    if (!alias_scope)
+        return false;
+
+    if (alias_scope->symbols)
+        return true;
+
+    const char *module_path = module_symbol->module.path ? module_symbol->module.path : module_symbol->name;
+    if (!module_path)
+        return false;
+
+    Module *origin = module_manager_find_module(&analyzer->module_manager, module_path);
+    if (!origin || !origin->symbols)
+        return false;
+
+    Scope *export_scope = origin->symbols->module_scope ? origin->symbols->module_scope : origin->symbols->global_scope;
+    if (!export_scope)
+        return false;
+
+    for (Symbol *sym = export_scope->symbols; sym; sym = sym->next)
+    {
+        if (sym->kind == SYMBOL_MODULE || sym->is_imported || !sym->is_public)
+            continue;
+
+        if (symbol_lookup_scope(alias_scope, sym->name))
+            continue;
+
+        Symbol *alias_copy = semantic_clone_imported_symbol(sym, module_symbol->module.path);
+        if (!alias_copy)
+            return false;
+
+        alias_copy->home_scope = alias_scope;
+        symbol_add(alias_scope, alias_copy);
+    }
+
+    return alias_scope->symbols != NULL;
+}
+
+static Symbol *semantic_lookup_module_member(SemanticAnalyzer *analyzer, Symbol *module_symbol, const char *name)
+{
+    if (!analyzer || !module_symbol || module_symbol->kind != SYMBOL_MODULE || !name)
+        return NULL;
+
+    semantic_populate_module_alias_scope(analyzer, module_symbol);
+
+    if (module_symbol->module.scope)
+    {
+        Symbol *member = symbol_lookup_scope(module_symbol->module.scope, name);
+        if (member)
+            return member;
+    }
+
+    const char *module_name = module_symbol->module.path ? module_symbol->module.path : module_symbol->name;
+
+    if (module_name)
+    {
+        Symbol *global_member = symbol_lookup_module(&analyzer->symbol_table, module_name, name);
+        if (global_member)
+            return global_member;
+
+        Module *origin = module_manager_find_module(&analyzer->module_manager, module_name);
+        if (origin && origin->symbols)
+        {
+            Scope *export_scope = origin->symbols->module_scope ? origin->symbols->module_scope : origin->symbols->global_scope;
+            if (export_scope)
+            {
+                Symbol *member = symbol_lookup_scope(export_scope, name);
+                if (member)
+                    return member;
+            }
+        }
+    }
+
+    for (Scope *scope = analyzer->symbol_table.current_scope; scope; scope = scope->parent)
+    {
+        for (Symbol *sym = scope->symbols; sym; sym = sym->next)
+        {
+            if (!sym->name || strcmp(sym->name, name) != 0)
+                continue;
+
+            const char *origin = NULL;
+            if (sym->kind == SYMBOL_MODULE)
+            {
+                origin = sym->module.path ? sym->module.path : sym->name;
+            }
+            else
+            {
+                origin = sym->import_module ? sym->import_module : sym->module_name;
+            }
+
+            if (origin && module_name && strcmp(origin, module_name) == 0)
+                return sym;
+        }
+    }
+
+    return NULL;
+}
+
 void semantic_analyzer_init(SemanticAnalyzer *analyzer)
 {
     symbol_table_init(&analyzer->symbol_table);
@@ -520,22 +721,6 @@ static Symbol *semantic_instantiate_generic_function(SemanticAnalyzer *analyzer,
     return clone->symbol;
 }
 
-static bool scope_has_module_import(Scope *scope, const char *module_name)
-{
-    if (!scope || !module_name)
-        return false;
-
-    for (Symbol *sym = scope->symbols; sym; sym = sym->next)
-    {
-        if (sym->is_imported && sym->import_module && strcmp(sym->import_module, module_name) == 0)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
 {
     if (!analyzer || !root)
@@ -1001,6 +1186,34 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     }
 
     free(raw_path);
+
+    if (stmt->use_stmt.alias)
+    {
+        if (symbol_lookup_scope(analyzer->symbol_table.current_scope, stmt->use_stmt.alias))
+        {
+            semantic_error(analyzer, stmt, "alias '%s' conflicts with existing symbol", stmt->use_stmt.alias);
+            return false;
+        }
+
+        Symbol *module_symbol = symbol_create_module(stmt->use_stmt.alias, module->name);
+        if (!module_symbol)
+        {
+            semantic_error(analyzer, stmt, "failed to create alias for module '%s'", module->name);
+            semantic_mark_fatal(analyzer);
+            return false;
+        }
+        module_symbol->is_imported                = true;
+        module_symbol->import_module              = module->name;
+        module_symbol->module.scope->parent       = analyzer->symbol_table.current_scope;
+        module_symbol->module.scope->is_module    = true;
+        symbol_add(analyzer->symbol_table.current_scope, module_symbol);
+        stmt->symbol = module_symbol;
+    }
+    else
+    {
+        stmt->symbol = NULL;
+    }
+
     return true;
 }
 
@@ -1012,17 +1225,27 @@ static bool semantic_import_public_symbols(SemanticAnalyzer *analyzer, Module *m
         return false;
     }
 
-    if (scope_has_module_import(analyzer->symbol_table.current_scope, module->name))
-    {
-        return true;
-    }
-
     Scope *export_scope = module->symbols->module_scope ? module->symbols->module_scope : module->symbols->global_scope;
     if (!export_scope)
     {
         semantic_error(analyzer, use_stmt, "module '%s' has no export scope", use_stmt->use_stmt.module_path);
         return false;
     }
+
+    Symbol *alias_symbol = use_stmt->symbol;
+    if (!alias_symbol && use_stmt->use_stmt.alias)
+    {
+        alias_symbol = symbol_lookup_scope(analyzer->symbol_table.current_scope, use_stmt->use_stmt.alias);
+        if (alias_symbol && alias_symbol->kind == SYMBOL_MODULE)
+        {
+            use_stmt->symbol = alias_symbol;
+        }
+        else
+        {
+            alias_symbol = NULL;
+        }
+    }
+    Scope  *alias_scope  = alias_symbol ? alias_symbol->module.scope : NULL;
 
     for (Symbol *sym = export_scope->symbols; sym; sym = sym->next)
     {
@@ -1038,44 +1261,32 @@ static bool semantic_import_public_symbols(SemanticAnalyzer *analyzer, Module *m
             return false;
         }
 
-        Symbol *imported_sym = symbol_create(sym->kind, sym->name, sym->type, sym->decl);
-        imported_sym->is_imported   = true;
-        imported_sym->is_public     = sym->is_public;
-        imported_sym->has_const_i64 = sym->has_const_i64;
-        imported_sym->const_i64     = sym->const_i64;
-        imported_sym->import_module = module->name;
-    imported_sym->home_scope    = sym->home_scope;
-
-        switch (sym->kind)
+        Symbol *imported_sym = semantic_clone_imported_symbol(sym, module->name);
+        if (!imported_sym)
         {
-        case SYMBOL_VAR:
-        case SYMBOL_VAL:
-            imported_sym->var = sym->var;
-            break;
-        case SYMBOL_FUNC:
-            imported_sym->func = sym->func;
-            if (sym->func.extern_name)
-                imported_sym->func.extern_name = strdup(sym->func.extern_name);
-            if (sym->func.convention)
-                imported_sym->func.convention = strdup(sym->func.convention);
-            if (sym->func.mangled_name)
-                imported_sym->func.mangled_name = strdup(sym->func.mangled_name);
-            break;
-        case SYMBOL_TYPE:
-            imported_sym->type_def = sym->type_def;
-            break;
-        case SYMBOL_FIELD:
-            imported_sym->field = sym->field;
-            break;
-        case SYMBOL_PARAM:
-            imported_sym->param = sym->param;
-            break;
-        case SYMBOL_MODULE:
-            // modules are skipped above
-            break;
+            semantic_error(analyzer, use_stmt, "out of memory while importing symbol '%s'", sym->name);
+            semantic_mark_fatal(analyzer);
+            return false;
         }
 
+        imported_sym->home_scope = analyzer->symbol_table.current_scope;
         symbol_add(analyzer->symbol_table.current_scope, imported_sym);
+
+        if (alias_scope)
+        {
+            if (!symbol_lookup_scope(alias_scope, sym->name))
+            {
+                Symbol *alias_copy = semantic_clone_imported_symbol(sym, module->name);
+                if (!alias_copy)
+                {
+                    semantic_error(analyzer, use_stmt, "out of memory while populating alias '%s'", alias_symbol->name);
+                    semantic_mark_fatal(analyzer);
+                    return false;
+                }
+                alias_copy->home_scope = alias_scope;
+                symbol_add(alias_scope, alias_copy);
+            }
+        }
     }
 
     return true;
@@ -1410,6 +1621,43 @@ bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         symbol->is_public = true;
     }
 
+    if (analyzer->current_module_name)
+    {
+        free(symbol->module_name);
+        symbol->module_name = strdup(analyzer->current_module_name);
+    }
+
+    if (stmt->var_stmt.mangle_name)
+    {
+        if (!symbol->var.is_global)
+        {
+            semantic_error(analyzer, stmt, "'#@symbol' is only valid for top-level declarations");
+            symbol_destroy(symbol);
+            return false;
+        }
+        free(symbol->var.mangled_name);
+        symbol->var.mangled_name = strdup(stmt->var_stmt.mangle_name);
+        if (!symbol->var.mangled_name)
+        {
+            semantic_error(analyzer, stmt, "out of memory while applying mangle directive");
+            semantic_mark_fatal(analyzer);
+            symbol_destroy(symbol);
+            return false;
+        }
+    }
+    else if (symbol->var.is_global && !symbol->var.mangled_name)
+    {
+        char *auto_name = semantic_build_export_name(symbol->module_name, symbol->name);
+        if (!auto_name)
+        {
+            semantic_error(analyzer, stmt, "out of memory while generating mangled name");
+            semantic_mark_fatal(analyzer);
+            symbol_destroy(symbol);
+            return false;
+        }
+        symbol->var.mangled_name = auto_name;
+    }
+
     symbol_add(analyzer->symbol_table.current_scope, symbol);
     stmt->symbol = symbol;
     stmt->type   = final_type;
@@ -1575,6 +1823,51 @@ bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         stmt->symbol = symbol;
         stmt->type   = func_type;
         existing     = symbol;
+    }
+
+    Symbol *function_symbol = stmt->symbol;
+    bool    is_top_level    = semantic_in_top_level_scope(analyzer);
+
+    if (analyzer->current_module_name)
+    {
+        free(function_symbol->module_name);
+        function_symbol->module_name = strdup(analyzer->current_module_name);
+    }
+
+    const char *custom_mangle = stmt->fun_stmt.mangle_name;
+    if (custom_mangle)
+    {
+        if (!is_top_level)
+        {
+            semantic_error(analyzer, stmt, "'#@symbol' is only valid for top-level declarations");
+            return false;
+        }
+        if (function_symbol->func.mangled_name && strcmp(function_symbol->func.mangled_name, custom_mangle) != 0)
+        {
+            semantic_error(analyzer, stmt, "conflicting '#@symbol' directives for function '%s'", name);
+            return false;
+        }
+        if (!function_symbol->func.mangled_name)
+        {
+            function_symbol->func.mangled_name = strdup(custom_mangle);
+            if (!function_symbol->func.mangled_name)
+            {
+                semantic_error(analyzer, stmt, "out of memory while applying mangle directive");
+                semantic_mark_fatal(analyzer);
+                return false;
+            }
+        }
+    }
+    else if (is_top_level && !function_symbol->func.mangled_name)
+    {
+        char *auto_name = semantic_build_export_name(function_symbol->module_name, function_symbol->name);
+        if (!auto_name)
+        {
+            semantic_error(analyzer, stmt, "out of memory while generating mangled name for function '%s'", name);
+            semantic_mark_fatal(analyzer);
+            return false;
+        }
+        function_symbol->func.mangled_name = auto_name;
     }
 
     // analyze function body if present
@@ -2355,8 +2648,8 @@ Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         Symbol *object_symbol = expr->field_expr.object->symbol;
         if (object_symbol && object_symbol->kind == SYMBOL_MODULE)
         {
-            // this is module.member access
-            Symbol *member = symbol_lookup_scope(object_symbol->module.scope, expr->field_expr.field);
+            Symbol *member = semantic_lookup_module_member(analyzer, object_symbol, expr->field_expr.field);
+
             if (!member)
             {
                 semantic_error(analyzer, expr, "no symbol named '%s' in module '%s'", expr->field_expr.field, object_symbol->name);

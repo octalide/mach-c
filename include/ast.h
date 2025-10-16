@@ -96,6 +96,7 @@ struct AstNode
         struct
         {
             char *module_path;
+            char *alias;
         } use_stmt;
 
         // external statement
@@ -124,6 +125,7 @@ struct AstNode
             AstNode *init; // initializer expression
             bool     is_val;
             bool     is_public;
+            char    *mangle_name;
         } var_stmt;
 
         // function statement
@@ -136,6 +138,7 @@ struct AstNode
             AstNode *body;        // null for external functions
             bool     is_variadic; // true if function has variadic arguments
             bool     is_public;
+            char    *mangle_name;
         } fun_stmt;
 
         // struct statement

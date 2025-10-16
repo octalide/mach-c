@@ -43,6 +43,189 @@ static AstList *parser_alloc_list(Parser *parser)
     return list;
 }
 
+static void parser_set_pending_mangle(Parser *parser, char *value)
+{
+    if (!parser)
+    {
+        free(value);
+        return;
+    }
+
+    free(parser->pending_mangle);
+    parser->pending_mangle = value;
+}
+
+static char *parser_take_pending_mangle(Parser *parser)
+{
+    if (!parser)
+    {
+        return NULL;
+    }
+
+    char *value             = parser->pending_mangle;
+    parser->pending_mangle  = NULL;
+    return value;
+}
+
+static void parser_handle_comment(Parser *parser, Token *token)
+{
+    if (!parser || !token)
+    {
+        return;
+    }
+
+    char *raw = lexer_raw_value(parser->lexer, token);
+    if (!raw)
+    {
+        return;
+    }
+
+    if (strncmp(raw, "#@", 2) != 0)
+    {
+        free(raw);
+        return;
+    }
+
+    const char *cursor = raw + 2;
+    while (isspace((unsigned char)*cursor))
+    {
+        cursor++;
+    }
+
+    if (strncmp(cursor, "symbol", 6) == 0)
+    {
+        cursor += 6;
+        while (isspace((unsigned char)*cursor))
+        {
+            cursor++;
+        }
+
+        if (*cursor != '(')
+        {
+            parser_error(parser, token, "expected '(' after '#@symbol'");
+            parser_set_pending_mangle(parser, NULL);
+            free(raw);
+            return;
+        }
+        cursor++;
+
+        while (isspace((unsigned char)*cursor))
+        {
+            cursor++;
+        }
+
+        if (*cursor != '"')
+        {
+            parser_error(parser, token, "expected string literal in '#@symbol'");
+            parser_set_pending_mangle(parser, NULL);
+            free(raw);
+            return;
+        }
+        cursor++;
+
+        size_t buffer_cap = strlen(cursor) + 1;
+        char  *buffer     = malloc(buffer_cap);
+        if (!buffer)
+        {
+            parser_error(parser, token, "memory allocation failed for '#@symbol'");
+            parser_set_pending_mangle(parser, NULL);
+            free(raw);
+            return;
+        }
+
+        size_t buffer_len = 0;
+        bool   ok         = true;
+
+        while (*cursor && *cursor != '"')
+        {
+            char ch = *cursor++;
+            if (ch == '\\')
+            {
+                if (*cursor == '\0')
+                {
+                    ok = false;
+                    break;
+                }
+                char esc = *cursor++;
+                switch (esc)
+                {
+                case 'n': ch = '\n'; break;
+                case 'r': ch = '\r'; break;
+                case 't': ch = '\t'; break;
+                case '\\': ch = '\\'; break;
+                case '"': ch = '"'; break;
+                default: ch = esc; break;
+                }
+            }
+
+            if (buffer_len + 1 >= buffer_cap)
+            {
+                size_t new_cap = buffer_cap * 2;
+                char  *tmp     = realloc(buffer, new_cap);
+                if (!tmp)
+                {
+                    ok = false;
+                    break;
+                }
+                buffer     = tmp;
+                buffer_cap = new_cap;
+            }
+
+            buffer[buffer_len++] = ch;
+        }
+
+        if (!ok || *cursor != '"')
+        {
+            parser_error(parser, token, "unterminated string in '#@symbol'");
+            free(buffer);
+            parser_set_pending_mangle(parser, NULL);
+            free(raw);
+            return;
+        }
+
+        buffer[buffer_len] = '\0';
+        cursor++;
+
+        while (isspace((unsigned char)*cursor))
+        {
+            cursor++;
+        }
+
+        if (*cursor != ')')
+        {
+            parser_error(parser, token, "expected ')' after '#@symbol' string");
+            free(buffer);
+            parser_set_pending_mangle(parser, NULL);
+            free(raw);
+            return;
+        }
+        cursor++;
+
+        while (isspace((unsigned char)*cursor))
+        {
+            cursor++;
+        }
+
+        if (*cursor != '\0')
+        {
+            parser_error(parser, token, "unexpected characters after '#@symbol' directive");
+            free(buffer);
+            parser_set_pending_mangle(parser, NULL);
+            free(raw);
+            return;
+        }
+
+        parser_set_pending_mangle(parser, buffer);
+        free(raw);
+        return;
+    }
+
+    // unknown #@ directive
+    parser_error(parser, token, "unknown '#@' directive");
+    parser_set_pending_mangle(parser, NULL);
+    free(raw);
+}
+
 // forward for asm stmt
 static AstNode *parser_parse_stmt_asm(Parser *parser);
 
@@ -58,6 +241,7 @@ void parser_init(Parser *parser, Lexer *lexer)
     parser->previous   = NULL;
     parser->panic_mode = false;
     parser->had_error  = false;
+    parser->pending_mangle = NULL;
     parser_error_list_init(&parser->errors);
 
     // prime the parser
@@ -76,6 +260,8 @@ void parser_dnit(Parser *parser)
         token_dnit(parser->previous);
         free(parser->previous);
     }
+    free(parser->pending_mangle);
+    parser->pending_mangle = NULL;
     parser_error_list_dnit(&parser->errors);
 }
 
@@ -166,6 +352,7 @@ void parser_advance(Parser *parser)
         // skip comments
         if (parser->current->kind == TOKEN_COMMENT)
         {
+            parser_handle_comment(parser, parser->current);
             token_dnit(parser->current);
             free(parser->current);
             continue;
@@ -571,6 +758,16 @@ AstNode *parser_parse_stmt_top(Parser *parser)
     bool     is_public = parser_match(parser, TOKEN_KW_PUB);
     AstNode *result    = NULL;
 
+    if (parser->pending_mangle)
+    {
+        TokenKind next_kind = parser->current->kind;
+        if (next_kind != TOKEN_KW_VAL && next_kind != TOKEN_KW_VAR && next_kind != TOKEN_KW_FUN)
+        {
+            parser_error_at_current(parser, "'#@symbol' must precede 'val', 'var', or 'fun'");
+            parser_set_pending_mangle(parser, NULL);
+        }
+    }
+
     switch (parser->current->kind)
     {
     case TOKEN_KW_NIL:
@@ -646,6 +843,16 @@ AstNode *parser_parse_stmt_top(Parser *parser)
 // parse statements allowed at the function level
 AstNode *parser_parse_stmt(Parser *parser)
 {
+    if (parser->pending_mangle)
+    {
+        TokenKind kind = parser->current->kind;
+        if (kind != TOKEN_KW_VAL && kind != TOKEN_KW_VAR && kind != TOKEN_KW_FUN)
+        {
+            parser_error_at_current(parser, "'#@symbol' must precede 'val', 'var', or 'fun'");
+            parser_set_pending_mangle(parser, NULL);
+        }
+    }
+
     switch (parser->current->kind)
     {
     case TOKEN_KW_VAL:
@@ -694,17 +901,27 @@ AstNode *parser_parse_stmt_use(Parser *parser)
         return NULL;
     }
 
+    char *alias       = NULL;
+    char *module_path = NULL;
+
     if (parser_match(parser, TOKEN_COLON))
     {
-        parser_error(parser, parser->previous, "import aliases are not supported");
-        free(first);
-        ast_node_dnit(node);
-        free(node);
-        parser_synchronize(parser);
-        return NULL;
+        alias = first;
+        char *head = parser_parse_identifier(parser);
+        if (!head)
+        {
+            parser_error_at_current(parser, "expected module name after alias colon");
+            free(alias);
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+        module_path = head;
     }
-
-    node->use_stmt.module_path = first;
+    else
+    {
+        module_path = first;
+    }
 
     // parse rest of module path
     while (parser_match(parser, TOKEN_DOT))
@@ -713,18 +930,23 @@ AstNode *parser_parse_stmt_use(Parser *parser)
         if (!next)
         {
             parser_error_at_current(parser, "expected identifier after '.'");
+            free(alias);
+            free(module_path);
             ast_node_dnit(node);
             free(node);
             return NULL;
         }
 
-        size_t len      = strlen(node->use_stmt.module_path) + strlen(next) + 2;
+        size_t len      = strlen(module_path) + strlen(next) + 2;
         char  *new_path = malloc(len);
-        snprintf(new_path, len, "%s.%s", node->use_stmt.module_path, next);
-        free(node->use_stmt.module_path);
+        snprintf(new_path, len, "%s.%s", module_path, next);
+        free(module_path);
         free(next);
-        node->use_stmt.module_path = new_path;
+        module_path = new_path;
     }
+
+    node->use_stmt.module_path = module_path;
+    node->use_stmt.alias       = alias;
 
     if (!parser_consume(parser, TOKEN_SEMICOLON, "expected ';' after use statement"))
     {
@@ -895,6 +1117,8 @@ static AstNode *parser_parse_var_decl(Parser *parser, bool is_val, bool is_publi
         return NULL;
     }
 
+    node->var_stmt.mangle_name = parser_take_pending_mangle(parser);
+
     node->var_stmt.is_val    = is_val;
     node->var_stmt.is_public = is_public;
     node->var_stmt.name   = parser_parse_identifier(parser);
@@ -984,6 +1208,8 @@ AstNode *parser_parse_stmt_fun(Parser *parser, bool is_public)
     {
         return NULL;
     }
+
+    node->fun_stmt.mangle_name = parser_take_pending_mangle(parser);
 
     node->fun_stmt.name = parser_parse_identifier(parser);
     if (!node->fun_stmt.name)

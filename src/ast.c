@@ -42,6 +42,7 @@ void ast_node_dnit(AstNode *node)
 
     case AST_STMT_USE:
         free(node->use_stmt.module_path);
+        free(node->use_stmt.alias);
         break;
 
     case AST_STMT_EXT:
@@ -67,6 +68,7 @@ void ast_node_dnit(AstNode *node)
     case AST_STMT_VAL:
     case AST_STMT_VAR:
         free(node->var_stmt.name);
+        free(node->var_stmt.mangle_name);
         if (node->var_stmt.type)
         {
             ast_node_dnit(node->var_stmt.type);
@@ -81,6 +83,7 @@ void ast_node_dnit(AstNode *node)
 
     case AST_STMT_FUN:
         free(node->fun_stmt.name);
+        free(node->fun_stmt.mangle_name);
         if (node->fun_stmt.params)
         {
             ast_list_dnit(node->fun_stmt.params);
@@ -510,6 +513,7 @@ static AstNode *ast_clone_checked(const AstNode *node)
 
     case AST_STMT_USE:
         clone->use_stmt.module_path = ast_strdup(node->use_stmt.module_path);
+        clone->use_stmt.alias       = ast_strdup(node->use_stmt.alias);
         break;
 
     case AST_STMT_EXT:
@@ -533,6 +537,7 @@ static AstNode *ast_clone_checked(const AstNode *node)
         clone->var_stmt.init      = ast_clone_checked(node->var_stmt.init);
         clone->var_stmt.is_val    = node->var_stmt.is_val;
         clone->var_stmt.is_public = node->var_stmt.is_public;
+        clone->var_stmt.mangle_name = ast_strdup(node->var_stmt.mangle_name);
         break;
 
     case AST_STMT_FUN:
@@ -543,6 +548,7 @@ static AstNode *ast_clone_checked(const AstNode *node)
         clone->fun_stmt.body        = ast_clone_checked(node->fun_stmt.body);
         clone->fun_stmt.is_variadic = node->fun_stmt.is_variadic;
         clone->fun_stmt.is_public   = node->fun_stmt.is_public;
+        clone->fun_stmt.mangle_name = ast_strdup(node->fun_stmt.mangle_name);
         break;
 
     case AST_STMT_STR:
@@ -748,7 +754,14 @@ void ast_print(AstNode *node, int indent)
         }
         break;
     case AST_STMT_USE:
-        printf("USE %s\n", node->use_stmt.module_path);
+        if (node->use_stmt.alias)
+        {
+            printf("USE %s: %s\n", node->use_stmt.alias, node->use_stmt.module_path);
+        }
+        else
+        {
+            printf("USE %s\n", node->use_stmt.module_path);
+        }
         break;
 
     case AST_STMT_EXT:
@@ -762,7 +775,10 @@ void ast_print(AstNode *node, int indent)
         break;
 
     case AST_STMT_VAL:
-        printf("VAL %s:\n", node->var_stmt.name);
+        printf("VAL %s", node->var_stmt.name);
+        if (node->var_stmt.mangle_name)
+            printf(" [mangle=%s]", node->var_stmt.mangle_name);
+        printf(":\n");
         if (node->var_stmt.type)
         {
             ast_print(node->var_stmt.type, indent + 1);
@@ -776,7 +792,10 @@ void ast_print(AstNode *node, int indent)
         break;
 
     case AST_STMT_VAR:
-        printf("VAR %s:\n", node->var_stmt.name);
+        printf("VAR %s", node->var_stmt.name);
+        if (node->var_stmt.mangle_name)
+            printf(" [mangle=%s]", node->var_stmt.mangle_name);
+        printf(":\n");
         if (node->var_stmt.type)
         {
             ast_print(node->var_stmt.type, indent + 1);
@@ -790,7 +809,10 @@ void ast_print(AstNode *node, int indent)
         break;
 
     case AST_STMT_FUN:
-        printf("FUN %s\n", node->fun_stmt.name);
+        printf("FUN %s", node->fun_stmt.name);
+        if (node->fun_stmt.mangle_name)
+            printf(" [mangle=%s]", node->fun_stmt.mangle_name);
+        printf(":\n");
         if (node->fun_stmt.generics && node->fun_stmt.generics->count > 0)
         {
             print_indent(indent + 1);
@@ -1237,7 +1259,14 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         }
         break;
     case AST_STMT_USE:
-        fprintf(file, "USE %s\n", node->use_stmt.module_path);
+        if (node->use_stmt.alias)
+        {
+            fprintf(file, "USE %s: %s\n", node->use_stmt.alias, node->use_stmt.module_path);
+        }
+        else
+        {
+            fprintf(file, "USE %s\n", node->use_stmt.module_path);
+        }
         break;
     case AST_STMT_EXT:
         fprintf(file, "EXT %s:\n", node->ext_stmt.name);
@@ -1248,7 +1277,10 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         ast_print_to_file(node->def_stmt.type, file, indent + 1);
         break;
     case AST_STMT_VAL:
-        fprintf(file, "VAL %s:\n", node->var_stmt.name);
+        fprintf(file, "VAL %s", node->var_stmt.name);
+        if (node->var_stmt.mangle_name)
+            fprintf(file, " [mangle=%s]", node->var_stmt.mangle_name);
+        fprintf(file, ":\n");
         if (node->var_stmt.type)
         {
             ast_print_to_file(node->var_stmt.type, file, indent + 1);
@@ -1261,7 +1293,10 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         }
         break;
     case AST_STMT_VAR:
-        fprintf(file, "VAR %s:\n", node->var_stmt.name);
+        fprintf(file, "VAR %s", node->var_stmt.name);
+        if (node->var_stmt.mangle_name)
+            fprintf(file, " [mangle=%s]", node->var_stmt.mangle_name);
+        fprintf(file, ":\n");
         if (node->var_stmt.type)
         {
             ast_print_to_file(node->var_stmt.type, file, indent + 1);
@@ -1274,7 +1309,10 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         }
         break;
     case AST_STMT_FUN:
-        fprintf(file, "FUN %s\n", node->fun_stmt.name);
+        fprintf(file, "FUN %s", node->fun_stmt.name);
+        if (node->fun_stmt.mangle_name)
+            fprintf(file, " [mangle=%s]", node->fun_stmt.mangle_name);
+        fprintf(file, ":\n");
         if (node->fun_stmt.generics && node->fun_stmt.generics->count > 0)
         {
             print_indent_to_file(file, indent + 1);

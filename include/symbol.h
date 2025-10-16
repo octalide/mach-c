@@ -44,6 +44,7 @@ typedef struct Symbol
     bool           has_const_i64; // semantic constant folding result (integer/bool)
     int64_t        const_i64;
     const char    *import_module; // source module for imported symbols
+    char          *module_name;   // canonical module owning this symbol
 
     union
     {
@@ -52,6 +53,7 @@ typedef struct Symbol
         {
             bool is_global;
             bool is_const; // true for val
+            char *mangled_name;
         } var;
 
         // SYMBOL_FUNC

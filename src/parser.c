@@ -1366,6 +1366,19 @@ AstNode *parser_parse_stmt_str(Parser *parser, bool is_public)
         return NULL;
     }
 
+    // parse optional generic parameters
+    node->str_stmt.generics = NULL;
+    if (parser_match(parser, TOKEN_LESS))
+    {
+        node->str_stmt.generics = parser_parse_generic_param_list(parser);
+        if (!node->str_stmt.generics)
+        {
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+    }
+
     if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' after struct name"))
     {
         ast_node_dnit(node);
@@ -1413,6 +1426,19 @@ AstNode *parser_parse_stmt_uni(Parser *parser, bool is_public)
         ast_node_dnit(node);
         free(node);
         return NULL;
+    }
+
+    // parse optional generic parameters
+    node->uni_stmt.generics = NULL;
+    if (parser_match(parser, TOKEN_LESS))
+    {
+        node->uni_stmt.generics = parser_parse_generic_param_list(parser);
+        if (!node->uni_stmt.generics)
+        {
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
     }
 
     if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' after union name"))

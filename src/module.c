@@ -1283,6 +1283,7 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
             {
                 SemanticAnalyzer analyzer;
                 semantic_analyzer_init(&analyzer);
+                
                 module_manager_set_config(&analyzer.module_manager, manager->config, manager->project_dir);
                 semantic_analyzer_set_module(&analyzer, module->name);
 
@@ -1295,6 +1296,8 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
                         module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", analyzer.errors.errors[ei].message ? analyzer.errors.errors[ei].message : "semantic error");
                     }
                     manager->had_error = true;
+                    
+                    // don't let the analyzer free the shared context
                     semantic_analyzer_dnit(&analyzer);
                     return false;
                 }

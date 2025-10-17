@@ -30,20 +30,46 @@ typedef struct GenericBinding
     Type       *type;
 } GenericBinding;
 
+typedef enum InstantiationKind
+{
+    INSTANTIATION_FUNCTION,
+    INSTANTIATION_STRUCT,
+    INSTANTIATION_UNION,
+} InstantiationKind;
+
+typedef struct InstantiationRequest
+{
+    InstantiationKind kind;
+    Symbol           *generic_symbol;
+    Type            **type_args;
+    size_t            type_arg_count;
+    AstNode          *call_site;
+    char             *unique_id;
+    struct InstantiationRequest *next;
+} InstantiationRequest;
+
+typedef struct InstantiationQueue
+{
+    InstantiationRequest *head;
+    InstantiationRequest *tail;
+    size_t                count;
+} InstantiationQueue;
+
 typedef struct SemanticAnalyzer
 {
-    SymbolTable       symbol_table;
-    ModuleManager     module_manager;   // for cross-module analysis
-    SemanticErrorList errors;           // error tracking
-    AstNode          *current_function; // for return type checking
-    AstNode          *program_root;     // root program node for synthesized items
-    int               loop_depth;       // for break/continue checking
-    bool              has_errors;
-    bool              has_fatal_error;
-    const char       *current_module_name;      // optional: canonical module path
-    GenericBinding   *generic_bindings;
-    size_t            generic_binding_count;
-    size_t            generic_binding_capacity;
+    SymbolTable            symbol_table;
+    ModuleManager          module_manager;
+    SemanticErrorList      errors;
+    AstNode               *current_function;
+    AstNode               *program_root;
+    int                    loop_depth;
+    bool                   has_errors;
+    bool                   has_fatal_error;
+    const char            *current_module_name;
+    GenericBinding        *generic_bindings;
+    size_t                 generic_binding_count;
+    size_t                 generic_binding_capacity;
+    InstantiationQueue     instantiation_queue;
 } SemanticAnalyzer;
 
 // semantic analyzer operations

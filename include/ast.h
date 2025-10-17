@@ -145,6 +145,7 @@ struct AstNode
         struct
         {
             char    *name;
+            AstList *generics;
             AstList *fields;
             bool     is_public;
         } str_stmt;
@@ -153,6 +154,7 @@ struct AstNode
         struct
         {
             char    *name;
+            AstList *generics;
             AstList *fields;
             bool     is_public;
         } uni_stmt;

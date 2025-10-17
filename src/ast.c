@@ -108,6 +108,11 @@ void ast_node_dnit(AstNode *node)
 
     case AST_STMT_STR:
         free(node->str_stmt.name);
+        if (node->str_stmt.generics)
+        {
+            ast_list_dnit(node->str_stmt.generics);
+            free(node->str_stmt.generics);
+        }
         if (node->str_stmt.fields)
         {
             ast_list_dnit(node->str_stmt.fields);
@@ -117,6 +122,11 @@ void ast_node_dnit(AstNode *node)
 
     case AST_STMT_UNI:
         free(node->uni_stmt.name);
+        if (node->uni_stmt.generics)
+        {
+            ast_list_dnit(node->uni_stmt.generics);
+            free(node->uni_stmt.generics);
+        }
         if (node->uni_stmt.fields)
         {
             ast_list_dnit(node->uni_stmt.fields);
@@ -553,12 +563,14 @@ static AstNode *ast_clone_checked(const AstNode *node)
 
     case AST_STMT_STR:
         clone->str_stmt.name   = ast_strdup(node->str_stmt.name);
+        clone->str_stmt.generics = ast_list_clone(node->str_stmt.generics);
         clone->str_stmt.fields = ast_list_clone(node->str_stmt.fields);
         clone->str_stmt.is_public = node->str_stmt.is_public;
         break;
 
     case AST_STMT_UNI:
         clone->uni_stmt.name   = ast_strdup(node->uni_stmt.name);
+        clone->uni_stmt.generics = ast_list_clone(node->uni_stmt.generics);
         clone->uni_stmt.fields = ast_list_clone(node->uni_stmt.fields);
         clone->uni_stmt.is_public = node->uni_stmt.is_public;
         break;

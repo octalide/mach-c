@@ -1463,6 +1463,13 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
     }
     free(param_types);
 
+    // set linkage for specialized generic instances
+    // linkonce_odr = keep one definition, discard duplicates (like C++ templates)
+    if (stmt->symbol && stmt->symbol->func.is_specialized_instance)
+    {
+        LLVMSetLinkage(func, LLVMLinkOnceODRLinkage);
+    }
+
     // clean up mangled name
     codegen_set_symbol_value(ctx, stmt->symbol, func);
 

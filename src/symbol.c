@@ -93,6 +93,7 @@ Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *de
     symbol->const_i64 = 0;
     symbol->import_module = NULL;
     symbol->module_name    = NULL;
+    symbol->import_origin  = NULL;
 
     // initialize kind-specific data
     switch (kind)
@@ -178,12 +179,15 @@ void symbol_destroy(Symbol *symbol)
             symbol->func.generic_param_names = NULL;
         }
         GenericSpecialization *spec = symbol->func.generic_specializations;
-        while (spec)
+        if (!symbol->import_origin || symbol->import_origin == symbol)
         {
-            GenericSpecialization *next = spec->next;
-            free(spec->type_args);
-            free(spec);
-            spec = next;
+            while (spec)
+            {
+                GenericSpecialization *next = spec->next;
+                free(spec->type_args);
+                free(spec);
+                spec = next;
+            }
         }
         symbol->func.generic_specializations = NULL;
     }

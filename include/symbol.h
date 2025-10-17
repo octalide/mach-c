@@ -27,6 +27,7 @@ struct GenericSpecialization
 {
     size_t                  arg_count;
     Type                   **type_args;
+    struct Symbol          *generic_symbol; // owning generic symbol
     struct Symbol          *symbol;
     GenericSpecialization  *next;
 };
@@ -45,6 +46,7 @@ typedef struct Symbol
     int64_t        const_i64;
     const char    *import_module; // source module for imported symbols
     char          *module_name;   // canonical module owning this symbol
+    struct Symbol *import_origin; // original symbol when imported
 
     union
     {
@@ -75,7 +77,12 @@ typedef struct Symbol
         // SYMBOL_TYPE
         struct
         {
-            bool is_alias; // true for 'def' aliases
+            bool is_alias;
+            bool is_generic;
+            size_t generic_param_count;
+            char **generic_param_names;
+            GenericSpecialization *generic_specializations;
+            bool is_specialized_instance;
         } type_def;
 
         // SYMBOL_FIELD

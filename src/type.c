@@ -18,6 +18,28 @@ typedef struct PointerCacheEntry
 
 static PointerCacheEntry *g_pointer_cache = NULL;
 
+static size_t type_align_to(size_t value, size_t alignment)
+{
+    if (alignment <= 1)
+    {
+        return value;
+    }
+
+    size_t mask = alignment - 1;
+    return (value + mask) & ~mask;
+}
+
+static void type_free_field_list(Symbol *fields)
+{
+    while (fields)
+    {
+        Symbol *next = fields->next;
+        fields->next = NULL;
+        symbol_destroy(fields);
+        fields = next;
+    }
+}
+
 // type info table for builtin types
 static struct
 {
@@ -521,6 +543,160 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
     Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
         free(param_types); // function_create makes its own copy
         return func_type;
+    }
+
+    case AST_TYPE_STR:
+    {
+        if (type_node->type_str.name)
+        {
+            if (!symbol_table)
+            {
+                return NULL;
+            }
+
+            Symbol *symbol = symbol_lookup(symbol_table, type_node->type_str.name);
+            if (symbol && symbol->kind == SYMBOL_TYPE)
+            {
+                return symbol->type;
+            }
+
+            return NULL;
+        }
+
+        Type   *struct_type = type_struct_create(NULL);
+        Symbol *head        = NULL;
+        Symbol *tail        = NULL;
+        size_t  offset      = 0;
+        size_t  max_align   = 1;
+        size_t  field_count = 0;
+
+        if (type_node->type_str.fields)
+        {
+            for (int i = 0; i < type_node->type_str.fields->count; i++)
+            {
+                AstNode *field_node = type_node->type_str.fields->items[i];
+                Type    *field_type = type_resolve(field_node->field_stmt.type, symbol_table);
+                if (!field_type)
+                {
+                    type_free_field_list(head);
+                    free(struct_type->name);
+                    free(struct_type);
+                    return NULL;
+                }
+
+                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+
+                size_t field_align = type_alignof(field_type);
+                offset              = type_align_to(offset, field_align);
+                field_symbol->field.offset = offset;
+
+                if (!head)
+                {
+                    head = tail = field_symbol;
+                }
+                else
+                {
+                    tail->next = field_symbol;
+                    tail       = field_symbol;
+                }
+
+                offset += type_sizeof(field_type);
+                if (field_align > max_align)
+                {
+                    max_align = field_align;
+                }
+                field_count++;
+            }
+        }
+
+        offset    = type_align_to(offset, max_align);
+        max_align = max_align ? max_align : 1;
+
+        struct_type->size                  = offset;
+        struct_type->alignment             = max_align;
+        struct_type->composite.fields      = head;
+        struct_type->composite.field_count = field_count;
+
+        type_node->type = struct_type;
+        return struct_type;
+    }
+
+    case AST_TYPE_UNI:
+    {
+        if (type_node->type_uni.name)
+        {
+            if (!symbol_table)
+            {
+                return NULL;
+            }
+
+            Symbol *symbol = symbol_lookup(symbol_table, type_node->type_uni.name);
+            if (symbol && symbol->kind == SYMBOL_TYPE)
+            {
+                return symbol->type;
+            }
+
+            return NULL;
+        }
+
+        Type   *union_type = type_union_create(NULL);
+        Symbol *head       = NULL;
+        Symbol *tail       = NULL;
+        size_t  max_size   = 0;
+        size_t  max_align  = 1;
+        size_t  field_count = 0;
+
+        if (type_node->type_uni.fields)
+        {
+            for (int i = 0; i < type_node->type_uni.fields->count; i++)
+            {
+                AstNode *field_node = type_node->type_uni.fields->items[i];
+                Type    *field_type = type_resolve(field_node->field_stmt.type, symbol_table);
+                if (!field_type)
+                {
+                    type_free_field_list(head);
+                    free(union_type->name);
+                    free(union_type);
+                    return NULL;
+                }
+
+                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+                field_symbol->field.offset = 0;
+
+                if (!head)
+                {
+                    head = tail = field_symbol;
+                }
+                else
+                {
+                    tail->next = field_symbol;
+                    tail       = field_symbol;
+                }
+
+                size_t field_size   = type_sizeof(field_type);
+                size_t field_align  = type_alignof(field_type);
+                if (field_size > max_size)
+                {
+                    max_size = field_size;
+                }
+                if (field_align > max_align)
+                {
+                    max_align = field_align;
+                }
+                field_count++;
+            }
+        }
+
+        max_size  = type_align_to(max_size, max_align);
+        max_align = max_align ? max_align : 1;
+
+        union_type->size                  = max_size;
+        union_type->alignment             = max_align;
+        union_type->composite.fields      = head;
+        union_type->composite.field_count = field_count;
+
+        type_node->type = union_type;
+        return union_type;
     }
 
     default:

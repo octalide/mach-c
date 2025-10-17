@@ -2595,11 +2595,28 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
                     }
                     value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
 
+                    Type *arg_type = type_resolve_alias(arg_node->type);
+                    LLVMValueRef stored_value = value;
                     LLVMTypeRef value_ty = LLVMTypeOf(value);
+
+                    if (arg_type && type_is_integer(arg_type) && arg_type->size < 8)
+                    {
+                        if (type_is_signed(arg_type))
+                        {
+                            stored_value = LLVMBuildSExt(ctx->builder, value, i64_ty, "vararg_promote_signed");
+                            value_ty = i64_ty;
+                        }
+                        else
+                        {
+                            stored_value = LLVMBuildZExt(ctx->builder, value, i64_ty, "vararg_promote_unsigned");
+                            value_ty = i64_ty;
+                        }
+                    }
+
                     char        slot_name[32];
                     snprintf(slot_name, sizeof(slot_name), "mach_vararg_val_%d", j);
                     LLVMValueRef value_alloca = codegen_create_alloca(ctx, value_ty, slot_name);
-                    LLVMBuildStore(ctx->builder, value, value_alloca);
+                    LLVMBuildStore(ctx->builder, stored_value, value_alloca);
                     LLVMValueRef data_ptr = LLVMBuildBitCast(ctx->builder, value_alloca, i8_ptr_ty, "mach_vararg_cast");
 
                     LLVMValueRef idx_val   = LLVMConstInt(i64_ty, (unsigned long long)j, false);
@@ -3063,8 +3080,26 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
         return NULL;
     }
 
-    // generate GEP for field access
-    LLVMValueRef indices[] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), field_index, false)};
+    LLVMTypeRef llvm_i32 = LLVMInt32TypeInContext(ctx->context);
+
+    if (object_type->kind == TYPE_UNION)
+    {
+        LLVMValueRef indices[] = {
+            LLVMConstInt(llvm_i32, 0, false),
+            LLVMConstInt(llvm_i32, 0, false)
+        };
+
+        LLVMTypeRef union_type     = codegen_get_llvm_type(ctx, object_type);
+        LLVMValueRef storage_ptr   = LLVMBuildGEP2(ctx->builder, union_type, object, indices, 2, "union_field_storage");
+        LLVMTypeRef field_llvm     = codegen_get_llvm_type(ctx, field_symbol->type);
+        LLVMTypeRef field_ptr_type = LLVMPointerType(field_llvm, 0);
+        return LLVMBuildBitCast(ctx->builder, storage_ptr, field_ptr_type, "union_field");
+    }
+
+    LLVMValueRef indices[] = {
+        LLVMConstInt(llvm_i32, 0, false),
+        LLVMConstInt(llvm_i32, field_index, false)
+    };
 
     LLVMTypeRef struct_type = codegen_get_llvm_type(ctx, object_type);
     return LLVMBuildGEP2(ctx->builder, struct_type, object, indices, 2, "field");

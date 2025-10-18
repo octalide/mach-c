@@ -8,6 +8,7 @@
 
 // builtin types storage
 static Type *g_builtin_types[TYPE_PTR + 1] = {0};
+static Type *g_error_type                 = NULL;
 
 typedef struct PointerCacheEntry
 {
@@ -75,6 +76,15 @@ void type_system_init(void)
 
         g_builtin_types[type->kind] = type;
     }
+
+    if (!g_error_type)
+    {
+        g_error_type          = malloc(sizeof(Type));
+        g_error_type->kind    = TYPE_ERROR;
+        g_error_type->size    = 0;
+        g_error_type->alignment = 1;
+        g_error_type->name    = strdup("<error>");
+    }
 }
 
 void type_system_dnit(void)
@@ -98,6 +108,13 @@ void type_system_dnit(void)
         entry = next;
     }
     g_pointer_cache = NULL;
+
+    if (g_error_type)
+    {
+        free(g_error_type->name);
+        free(g_error_type);
+        g_error_type = NULL;
+    }
 }
 
 // builtin type accessors
@@ -148,6 +165,25 @@ Type *type_f64(void)
 Type *type_ptr(void)
 {
     return g_builtin_types[TYPE_PTR];
+}
+
+Type *type_error(void)
+{
+    return g_error_type;
+}
+
+Type *type_lookup_builtin(const char *name)
+{
+    if (!name)
+        return NULL;
+
+    for (size_t i = 0; i < sizeof(type_info_table) / sizeof(type_info_table[0]); i++)
+    {
+        if (strcmp(name, type_info_table[i].name) == 0)
+            return g_builtin_types[type_info_table[i].kind];
+    }
+
+    return NULL;
 }
 
 Type *type_pointer_create(Type *base)
@@ -259,6 +295,9 @@ bool type_equals(Type *a, Type *b)
     while (b->kind == TYPE_ALIAS)
         b = b->alias.target;
 
+    if (a->kind == TYPE_ERROR || b->kind == TYPE_ERROR)
+        return false;
+
     if (a->kind != b->kind)
         return false;
 
@@ -363,6 +402,17 @@ bool type_is_truthy(Type *type)
     return type->kind == TYPE_U8;
 }
 
+bool type_is_error(Type *type)
+{
+    if (!type)
+        return false;
+
+    while (type->kind == TYPE_ALIAS && type->alias.target)
+        type = type->alias.target;
+
+    return type->kind == TYPE_ERROR;
+}
+
 bool type_can_cast_to(Type *from, Type *to)
 {
     if (!from || !to)
@@ -371,6 +421,9 @@ bool type_can_cast_to(Type *from, Type *to)
         from = from->alias.target;
     while (to->kind == TYPE_ALIAS)
         to = to->alias.target;
+
+    if (from->kind == TYPE_ERROR || to->kind == TYPE_ERROR)
+        return false;
 
     // array to pointer decay is not supported via cast - use ?array[0] instead
     if (from->kind == TYPE_ARRAY && (to->kind == TYPE_PTR || to->kind == TYPE_POINTER))
@@ -413,6 +466,9 @@ bool type_can_assign_to(Type *from, Type *to)
         from = from->alias.target;
     while (to->kind == TYPE_ALIAS)
         to = to->alias.target;
+
+    if (from->kind == TYPE_ERROR || to->kind == TYPE_ERROR)
+        return false;
 
     // same type
     if (type_equals(from, to))
@@ -470,13 +526,9 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
         const char *name = type_node->type_name.name;
 
         // check builtin types
-        for (size_t i = 0; i < sizeof(type_info_table) / sizeof(type_info_table[0]); i++)
-        {
-            if (strcmp(name, type_info_table[i].name) == 0)
-            {
-                return g_builtin_types[type_info_table[i].kind];
-            }
-        }
+        Type *builtin = type_lookup_builtin(name);
+        if (builtin)
+            return builtin;
 
         // look up user-defined types in symbol table
         if (symbol_table)
@@ -797,6 +849,10 @@ char *type_to_string(Type *type)
 
     case TYPE_ALIAS:
         snprintf(result, 256, "%s", type->name);
+        break;
+
+    case TYPE_ERROR:
+        snprintf(result, 256, "%s", type->name ? type->name : "<error>");
         break;
     }
 

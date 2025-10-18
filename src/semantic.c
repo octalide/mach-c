@@ -24,6 +24,8 @@ static void semantic_pop_generic_bindings(SemanticAnalyzer *analyzer, size_t cou
 static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
 static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
 static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
+static void  semantic_register_builtin_types(SemanticAnalyzer *analyzer);
+static void  semantic_register_error_variable(SemanticAnalyzer *analyzer, AstNode *stmt, const char *name, bool is_val);
 
 static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count);
 static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count);
@@ -75,6 +77,41 @@ static Module *semantic_find_module_for_scope(ModuleManager *manager, Scope *sco
     }
 
     return NULL;
+}
+
+static void semantic_register_builtin_types(SemanticAnalyzer *analyzer)
+{
+    if (!analyzer || !analyzer->symbol_table.global_scope)
+        return;
+
+    static const char *builtin_names[] = {
+        "u8",  "u16", "u32", "u64", "i8",  "i16", "i32",
+        "i64", "f16", "f32", "f64", "ptr"
+    };
+
+    Scope *global_scope = analyzer->symbol_table.global_scope;
+
+    for (size_t i = 0; i < sizeof(builtin_names) / sizeof(builtin_names[0]); i++)
+    {
+        const char *name = builtin_names[i];
+        if (!name)
+            continue;
+
+        if (symbol_lookup_scope(global_scope, name))
+            continue;
+
+        Type *builtin_type = type_lookup_builtin(name);
+        if (!builtin_type)
+            continue;
+
+        Symbol *symbol = symbol_create(SYMBOL_TYPE, name, builtin_type, NULL);
+        if (!symbol)
+            continue;
+
+        symbol->is_public     = true;
+        symbol->import_origin = symbol;
+        symbol_add(global_scope, symbol);
+    }
 }
 
 static char semantic_sanitize_export_char(char c)
@@ -486,6 +523,7 @@ static Symbol *semantic_lookup_module_member(SemanticAnalyzer *analyzer, Symbol 
 void semantic_analyzer_init(SemanticAnalyzer *analyzer)
 {
     symbol_table_init(&analyzer->symbol_table);
+    semantic_register_builtin_types(analyzer);
     module_manager_init(&analyzer->module_manager);
     semantic_error_list_init(&analyzer->errors);
     analyzer->current_function = NULL;
@@ -2549,6 +2587,41 @@ bool semantic_analyze_def_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     return true;
 }
 
+static void semantic_register_error_variable(SemanticAnalyzer *analyzer, AstNode *stmt, const char *name, bool is_val)
+{
+    if (!analyzer || !stmt || !name || !name[0])
+        return;
+
+    if (stmt->symbol)
+        return;
+
+    if (symbol_lookup_scope(analyzer->symbol_table.current_scope, name))
+        return;
+
+    SymbolKind kind   = is_val ? SYMBOL_VAL : SYMBOL_VAR;
+    Symbol    *symbol = symbol_create(kind, name, type_error(), stmt);
+    if (!symbol)
+        return;
+
+    symbol->var.is_global = semantic_in_top_level_scope(analyzer);
+    symbol->var.is_const  = is_val;
+    symbol->import_origin = symbol;
+
+    if (analyzer->current_module_name)
+    {
+        symbol->module_name = strdup(analyzer->current_module_name);
+    }
+
+    if (symbol->var.is_global && stmt->var_stmt.is_public)
+    {
+        symbol->is_public = true;
+    }
+
+    symbol_add(analyzer->symbol_table.current_scope, symbol);
+    stmt->symbol = symbol;
+    stmt->type   = type_error();
+}
+
 bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
     const char *name   = stmt->var_stmt.name;
@@ -2562,6 +2635,7 @@ bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         if (!explicit_type)
         {
             semantic_error(analyzer, stmt, "cannot resolve type for variable '%s'", name);
+            semantic_register_error_variable(analyzer, stmt, name, is_val);
             return false;
         }
     }
@@ -2574,6 +2648,7 @@ bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         if (!init_type)
         {
             semantic_error(analyzer, stmt, "invalid initializer for variable '%s'", name);
+            semantic_register_error_variable(analyzer, stmt, name, is_val);
             return false;
         }
     }
@@ -2584,7 +2659,12 @@ bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     {
         if (!semantic_check_assignment(analyzer, explicit_type, init_type, stmt))
         {
-            semantic_error(analyzer, stmt, "cannot assign %s to %s", type_to_string(init_type), type_to_string(explicit_type));
+            char *init_str = type_to_string(init_type);
+            char *type_str = type_to_string(explicit_type);
+            semantic_error(analyzer, stmt, "cannot assign %s to %s", init_str ? init_str : "<error>", type_str ? type_str : "<error>");
+            free(init_str);
+            free(type_str);
+            semantic_register_error_variable(analyzer, stmt, name, is_val);
             return false;
         }
         final_type = explicit_type;
@@ -2600,6 +2680,7 @@ bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     else
     {
         semantic_error(analyzer, stmt, "variable '%s' has no type or initializer", name);
+        semantic_register_error_variable(analyzer, stmt, name, is_val);
         return false;
     }
 

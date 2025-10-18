@@ -29,6 +29,7 @@ typedef enum TypeKind
     TYPE_UNION,
     TYPE_FUNCTION,
     TYPE_ALIAS, // type alias from 'def'
+    TYPE_ERROR, // placeholder for failed type resolution
 } TypeKind;
 
 typedef struct Type
@@ -93,6 +94,7 @@ Type *type_f16(void);
 Type *type_f32(void);
 Type *type_f64(void);
 Type *type_ptr(void);
+Type *type_error(void);
 
 // type constructors
 Type *type_pointer_create(Type *base);
@@ -110,10 +112,14 @@ bool   type_is_float(Type *type);
 bool   type_is_signed(Type *type);
 bool   type_is_pointer_like(Type *type);
 bool   type_is_truthy(Type *type); // true when type is the mach boolean (u8)
+bool   type_is_error(Type *type);
 bool   type_can_cast_to(Type *from, Type *to);
 bool   type_can_assign_to(Type *from, Type *to);
 size_t type_sizeof(Type *type);
 size_t type_alignof(Type *type);
+
+// builtin lookup
+Type *type_lookup_builtin(const char *name);
 
 // type resolution from AST
 Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table);

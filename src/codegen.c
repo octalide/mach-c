@@ -1005,6 +1005,9 @@ LLVMTypeRef codegen_get_llvm_type(CodegenContext *ctx, Type *type)
     case TYPE_ALIAS:
         llvm_type = codegen_get_llvm_type(ctx, type->alias.target);
         break;
+    case TYPE_ERROR:
+        llvm_type = NULL;
+        break;
     }
 
     // cache the result

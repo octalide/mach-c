@@ -139,6 +139,8 @@ struct AstNode
             bool     is_variadic; // true if function has variadic arguments
             bool     is_public;
             char    *mangle_name;
+            bool     is_method;
+            AstNode *method_receiver; // typename before '.' for method declarations
         } fun_stmt;
 
         // struct statement
@@ -235,6 +237,7 @@ struct AstNode
             AstNode *func;
             AstList *args;
             AstList *type_args;
+            bool     is_method_call; // true when rewritten from receiver.method()
         } call_expr;
 
         // array indexing
@@ -249,6 +252,7 @@ struct AstNode
         {
             AstNode *object;
             char    *field;
+            bool     is_method; // true when referring to method symbol
         } field_expr;
 
         // type cast
@@ -352,6 +356,7 @@ void ast_node_dnit(AstNode *node);
 void ast_list_init(AstList *list);
 void ast_list_dnit(AstList *list);
 void ast_list_append(AstList *list, AstNode *node);
+void ast_list_prepend(AstList *list, AstNode *node);
 
 // cloning helpers
 AstNode *ast_clone(const AstNode *node);

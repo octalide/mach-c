@@ -28,6 +28,11 @@ static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer 
 static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count);
 static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count);
 static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count);
+static char *semantic_build_method_mangle_name(const char *module_name, const char *type_name, const char *method_name, bool receiver_is_pointer);
+static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+static bool semantic_compare_type_ast(const AstNode *a, const AstNode *b);
+static Symbol *semantic_find_type_symbol_from_type(SemanticAnalyzer *analyzer, Type *type);
+static bool semantic_prepare_method_call(SemanticAnalyzer *analyzer, AstNode *call_expr);
 
 static void instantiation_queue_init(InstantiationQueue *queue);
 static void instantiation_queue_dnit(InstantiationQueue *queue);
@@ -109,6 +114,55 @@ static char *semantic_build_export_name(const char *module_name, const char *sym
     return out;
 }
 
+static char *semantic_build_method_mangle_name(const char *module_name, const char *type_name, const char *method_name, bool receiver_is_pointer)
+{
+    if (!method_name || !method_name[0])
+        return NULL;
+
+    const char *type = type_name && type_name[0] ? type_name : "";
+    size_t       type_len = strlen(type);
+    size_t       method_len = strlen(method_name);
+    size_t       prefix_len = receiver_is_pointer ? 4 : 0; // ptr_
+    size_t       separator  = (type_len > 0) ? 2 : 0;      // __
+
+    size_t combined_len = prefix_len + type_len + separator + method_len;
+    if (combined_len == 0)
+        return NULL;
+
+    char *combined = malloc(combined_len + 1);
+    if (!combined)
+        return NULL;
+
+    size_t pos = 0;
+    if (receiver_is_pointer)
+    {
+        combined[pos++] = 'p';
+        combined[pos++] = 't';
+        combined[pos++] = 'r';
+        combined[pos++] = '_';
+    }
+
+    if (type_len > 0)
+    {
+        for (size_t i = 0; i < type_len; i++)
+            combined[pos++] = semantic_sanitize_export_char(type[i]);
+        if (method_len > 0)
+        {
+            combined[pos++] = '_';
+            combined[pos++] = '_';
+        }
+    }
+
+    for (size_t i = 0; i < method_len; i++)
+        combined[pos++] = semantic_sanitize_export_char(method_name[i]);
+
+    combined[pos] = '\0';
+
+    char *export_name = semantic_build_export_name(module_name, combined);
+    free(combined);
+    return export_name;
+}
+
 static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module_name)
 {
     if (!source)
@@ -176,9 +230,43 @@ static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module
         // imported clones don't own specialization lists; lookups forward to origin
         clone->func.generic_specializations = NULL;
         clone->func.is_specialized_instance = source->func.is_specialized_instance;
+        clone->func.is_method               = source->func.is_method;
+        clone->func.method_owner            = source->func.method_owner;
+        clone->func.method_forwarded_generic_count = source->func.method_forwarded_generic_count;
+        clone->func.method_receiver_is_pointer = source->func.method_receiver_is_pointer;
+        clone->func.method_receiver_name    = source->func.method_receiver_name ? strdup(source->func.method_receiver_name) : NULL;
         break;
     case SYMBOL_TYPE:
         clone->type_def.is_alias = source->type_def.is_alias;
+        clone->type_def.is_generic = source->type_def.is_generic;
+        clone->type_def.generic_param_count = source->type_def.generic_param_count;
+        if (source->type_def.generic_param_count > 0 && source->type_def.generic_param_names)
+        {
+            clone->type_def.generic_param_names = malloc(sizeof(char *) * source->type_def.generic_param_count);
+            if (clone->type_def.generic_param_names)
+            {
+                for (size_t i = 0; i < source->type_def.generic_param_count; i++)
+                {
+                    clone->type_def.generic_param_names[i] = source->type_def.generic_param_names[i] ? strdup(source->type_def.generic_param_names[i]) : NULL;
+                }
+            }
+            else
+            {
+                clone->type_def.generic_param_count = 0;
+            }
+        }
+        clone->type_def.generic_specializations = NULL;
+        clone->type_def.is_specialized_instance = source->type_def.is_specialized_instance;
+        clone->type_def.methods = NULL;
+        for (Symbol *method = source->type_def.methods; method; method = method->method_next)
+        {
+            Symbol *method_clone = semantic_clone_imported_symbol(method, module_name);
+            if (!method_clone)
+                continue;
+            method_clone->func.method_owner = clone;
+            method_clone->method_next       = NULL;
+            type_add_method(clone, method_clone);
+        }
         break;
     case SYMBOL_FIELD:
         clone->field.offset = source->field.offset;
@@ -191,6 +279,105 @@ static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module
     }
 
     return clone;
+}
+
+static bool semantic_compare_type_ast(const AstNode *a, const AstNode *b)
+{
+    if (a == b)
+        return true;
+    if (!a || !b)
+        return false;
+    if (a->kind != b->kind)
+        return false;
+
+    switch (a->kind)
+    {
+    case AST_TYPE_NAME:
+    {
+        if (!a->type_name.name || !b->type_name.name)
+            return a->type_name.name == b->type_name.name;
+        if (strcmp(a->type_name.name, b->type_name.name) != 0)
+            return false;
+
+        int count_a = a->type_name.generic_args ? a->type_name.generic_args->count : 0;
+        int count_b = b->type_name.generic_args ? b->type_name.generic_args->count : 0;
+        if (count_a != count_b)
+            return false;
+        for (int i = 0; i < count_a; i++)
+        {
+            if (!semantic_compare_type_ast(a->type_name.generic_args->items[i], b->type_name.generic_args->items[i]))
+                return false;
+        }
+        return true;
+    }
+    case AST_TYPE_PTR:
+        return semantic_compare_type_ast(a->type_ptr.base, b->type_ptr.base);
+    case AST_TYPE_ARRAY:
+    {
+        if (!semantic_compare_type_ast(a->type_array.elem_type, b->type_array.elem_type))
+            return false;
+        if ((a->type_array.size == NULL) != (b->type_array.size == NULL))
+            return false;
+        if (a->type_array.size && b->type_array.size)
+        {
+            return a->type_array.size == b->type_array.size;
+        }
+        return true;
+    }
+    case AST_TYPE_PARAM:
+        if (!a->type_param.name || !b->type_param.name)
+            return a->type_param.name == b->type_param.name;
+        return strcmp(a->type_param.name, b->type_param.name) == 0;
+    case AST_TYPE_FUN:
+    {
+        if (!semantic_compare_type_ast(a->type_fun.return_type, b->type_fun.return_type))
+            return false;
+        size_t count_a = a->type_fun.params ? a->type_fun.params->count : 0;
+        size_t count_b = b->type_fun.params ? b->type_fun.params->count : 0;
+        if (count_a != count_b)
+            return false;
+        for (size_t i = 0; i < count_a; i++)
+        {
+            if (!semantic_compare_type_ast(a->type_fun.params->items[i], b->type_fun.params->items[i]))
+                return false;
+        }
+        return a->type_fun.is_variadic == b->type_fun.is_variadic;
+    }
+    default:
+        break;
+    }
+
+    return false;
+}
+
+static Symbol *semantic_find_type_symbol_from_type(SemanticAnalyzer *analyzer, Type *type)
+{
+    if (!analyzer || !type)
+        return NULL;
+
+    Type *current = type;
+    while (current)
+    {
+        if (current->kind == TYPE_ALIAS && current->name)
+        {
+            Symbol *alias_symbol = symbol_lookup(&analyzer->symbol_table, current->name);
+            if (alias_symbol && alias_symbol->kind == SYMBOL_TYPE)
+                return alias_symbol;
+            current = current->alias.target;
+            continue;
+        }
+
+        if (current->name)
+        {
+            Symbol *named_symbol = symbol_lookup(&analyzer->symbol_table, current->name);
+            if (named_symbol && named_symbol->kind == SYMBOL_TYPE)
+                return named_symbol;
+        }
+
+        break;
+    }
+
+    return NULL;
 }
 
 static bool semantic_populate_module_alias_scope(SemanticAnalyzer *analyzer, Symbol *module_symbol)
@@ -1100,6 +1287,60 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
     clone->symbol->type_def.is_specialized_instance = true;
     clone->symbol->type_def.is_generic = false;
     clone->symbol->type_def.generic_param_count = 0;
+
+    bool methods_ok = true;
+    for (Symbol *method = generic_symbol->type_def.methods; methods_ok && method; method = method->method_next)
+    {
+        size_t method_generic_count = method->func.generic_param_count;
+        if (method_generic_count > 0 && method_generic_count != type_arg_count)
+        {
+            semantic_error(analyzer, call_site, "method '%s' on type '%s' expects %zu type arguments (got %zu)", method->name, generic_symbol->name, method_generic_count, type_arg_count);
+            methods_ok = false;
+            break;
+        }
+
+        InstantiationRequest method_request = {
+            .kind           = INSTANTIATION_FUNCTION,
+            .generic_symbol = method,
+            .type_args      = method_generic_count > 0 ? type_args : NULL,
+            .type_arg_count = method_generic_count,
+            .call_site      = call_site,
+            .unique_id      = NULL,
+            .next           = NULL
+        };
+
+        Symbol *specialized_method = semantic_instantiate_generic_function_from_request(analyzer, &method_request);
+
+        if (!specialized_method)
+        {
+            methods_ok = false;
+            break;
+        }
+
+        specialized_method->func.method_owner = clone->symbol;
+        specialized_method->func.method_receiver_is_pointer = method->func.method_receiver_is_pointer;
+        free(specialized_method->func.method_receiver_name);
+        specialized_method->func.method_receiver_name = clone->symbol->name ? strdup(clone->symbol->name) : NULL;
+        specialized_method->func.is_method = true;
+        if (specialized_method->func.method_receiver_name == NULL && clone->symbol->name)
+        {
+            semantic_error(analyzer, call_site, "out of memory while finalizing method '%s'", method->name);
+            methods_ok = false;
+            break;
+        }
+
+        if (type_find_method(clone->symbol, specialized_method->name, specialized_method->func.method_receiver_is_pointer) != specialized_method)
+        {
+            type_add_method(clone->symbol, specialized_method);
+        }
+    }
+
+    if (!methods_ok)
+    {
+        ast_node_dnit(clone);
+        free(clone);
+        return NULL;
+    }
 
     semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
 
@@ -2470,8 +2711,386 @@ static bool stmt_has_return(AstNode *stmt)
     }
 }
 
+static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    if (!analyzer || !stmt || !stmt->fun_stmt.method_receiver)
+    {
+        semantic_error(analyzer, stmt, "invalid method declaration");
+        return false;
+    }
+
+    AstNode *receiver_ast = stmt->fun_stmt.method_receiver;
+    bool     receiver_is_pointer = false;
+    AstNode *base_receiver_ast   = receiver_ast;
+    while (base_receiver_ast && base_receiver_ast->kind == AST_TYPE_PTR)
+    {
+        receiver_is_pointer = true;
+        base_receiver_ast   = base_receiver_ast->type_ptr.base;
+    }
+
+    if (!base_receiver_ast || base_receiver_ast->kind != AST_TYPE_NAME || !base_receiver_ast->type_name.name)
+    {
+        semantic_error(analyzer, stmt, "method receiver must be a named type");
+        return false;
+    }
+
+    const char *owner_name = base_receiver_ast->type_name.name;
+
+    Type   *resolved_receiver_type = resolve_type(analyzer, stmt->fun_stmt.method_receiver);
+    Symbol *resolved_owner_symbol  = NULL;
+    if (resolved_receiver_type)
+    {
+        resolved_owner_symbol = semantic_find_type_symbol_from_type(analyzer, resolved_receiver_type);
+    }
+
+    Symbol *declared_owner_symbol = symbol_lookup(&analyzer->symbol_table, owner_name);
+    if (!declared_owner_symbol || declared_owner_symbol->kind != SYMBOL_TYPE)
+    {
+        semantic_error(analyzer, stmt, "unknown type '%s' for method receiver", owner_name);
+        return false;
+    }
+
+    if (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
+    {
+        semantic_error(analyzer, stmt, "method-specific generics are not supported");
+        return false;
+    }
+
+    bool owner_is_generic = declared_owner_symbol->type_def.is_generic && declared_owner_symbol->type_def.generic_param_count > 0;
+    bool binding_active   = analyzer->generic_binding_count > 0;
+
+    bool treat_as_generic_definition = owner_is_generic && !binding_active && !resolved_owner_symbol;
+
+    if (!stmt->fun_stmt.params || stmt->fun_stmt.params->count == 0)
+    {
+        semantic_error(analyzer, stmt, "method must declare receiver parameter");
+        return false;
+    }
+
+    AstNode *receiver_param = stmt->fun_stmt.params->items[0];
+    if (!receiver_param || receiver_param->kind != AST_STMT_PARAM)
+    {
+        semantic_error(analyzer, receiver_param, "invalid receiver parameter");
+        return false;
+    }
+
+    if (treat_as_generic_definition)
+    {
+        if (!semantic_compare_type_ast(receiver_param->param_stmt.type, stmt->fun_stmt.method_receiver))
+        {
+            semantic_error(analyzer, receiver_param, "first parameter of method must match receiver type");
+            return false;
+        }
+    }
+    else
+    {
+        Type *param_receiver_type = resolve_type(analyzer, receiver_param->param_stmt.type);
+        if (!param_receiver_type)
+        {
+            semantic_error(analyzer, receiver_param, "cannot resolve receiver parameter type");
+            return false;
+        }
+
+        Type *expected_receiver_type = resolved_receiver_type ? resolved_receiver_type : resolve_type(analyzer, stmt->fun_stmt.method_receiver);
+        if (!expected_receiver_type)
+        {
+            semantic_error(analyzer, stmt, "cannot resolve receiver type");
+            return false;
+        }
+
+        if (!type_equals(param_receiver_type, expected_receiver_type))
+        {
+            char expected_str[128];
+            char actual_str[128];
+            format_type_name(expected_receiver_type, expected_str, sizeof(expected_str));
+            format_type_name(param_receiver_type, actual_str, sizeof(actual_str));
+            semantic_error(analyzer, receiver_param, "receiver parameter must be of type '%s' (got '%s')", expected_str, actual_str);
+            return false;
+        }
+    }
+
+    if (treat_as_generic_definition)
+    {
+        Symbol *existing = type_find_method(declared_owner_symbol, stmt->fun_stmt.name, receiver_is_pointer);
+        if (existing)
+        {
+            semantic_error(analyzer, stmt, "method '%s' already defined for type '%s'", stmt->fun_stmt.name, owner_name);
+            return false;
+        }
+
+        Type *placeholder_type = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
+        Symbol *method_symbol  = symbol_create(SYMBOL_FUNC, stmt->fun_stmt.name, placeholder_type, stmt);
+        if (!method_symbol)
+        {
+            semantic_error(analyzer, stmt, "out of memory while creating method symbol");
+            return false;
+        }
+
+        method_symbol->func.is_external       = false;
+        method_symbol->func.is_defined        = (stmt->fun_stmt.body != NULL);
+        method_symbol->func.uses_mach_varargs = stmt->fun_stmt.is_variadic;
+        method_symbol->func.is_generic        = owner_is_generic;
+        method_symbol->func.generic_param_count = owner_is_generic ? declared_owner_symbol->type_def.generic_param_count : 0;
+        method_symbol->func.generic_specializations = NULL;
+
+        if (method_symbol->func.generic_param_count > 0)
+        {
+            method_symbol->func.generic_param_names = malloc(sizeof(char *) * method_symbol->func.generic_param_count);
+            if (!method_symbol->func.generic_param_names)
+            {
+                semantic_error(analyzer, stmt, "failed to allocate method generic parameter storage");
+                symbol_destroy(method_symbol);
+                return false;
+            }
+            for (size_t i = 0; i < method_symbol->func.generic_param_count; i++)
+            {
+                const char *param_name = declared_owner_symbol->type_def.generic_param_names ? declared_owner_symbol->type_def.generic_param_names[i] : NULL;
+                method_symbol->func.generic_param_names[i] = param_name ? strdup(param_name) : NULL;
+                if (param_name && !method_symbol->func.generic_param_names[i])
+                {
+                    semantic_error(analyzer, stmt, "failed to allocate method generic parameter name");
+                    symbol_destroy(method_symbol);
+                    return false;
+                }
+            }
+        }
+
+        method_symbol->import_origin                 = method_symbol;
+        method_symbol->func.is_method                = true;
+        method_symbol->func.method_owner             = declared_owner_symbol;
+        method_symbol->func.method_receiver_is_pointer = receiver_is_pointer;
+        method_symbol->func.method_receiver_name     = owner_name ? strdup(owner_name) : NULL;
+        if (owner_name && !method_symbol->func.method_receiver_name)
+        {
+            semantic_error(analyzer, stmt, "out of memory while creating method symbol");
+            symbol_destroy(method_symbol);
+            return false;
+        }
+
+        if (analyzer->current_module_name)
+        {
+            free(method_symbol->module_name);
+            method_symbol->module_name = strdup(analyzer->current_module_name);
+        }
+        else if (declared_owner_symbol->module_name)
+        {
+            free(method_symbol->module_name);
+            method_symbol->module_name = strdup(declared_owner_symbol->module_name);
+        }
+
+        bool is_top_level = semantic_in_top_level_scope(analyzer);
+        if (is_top_level && stmt->fun_stmt.is_public)
+        {
+            method_symbol->is_public = true;
+        }
+
+        if (stmt->fun_stmt.mangle_name)
+        {
+            if (!is_top_level)
+            {
+                semantic_error(analyzer, stmt, "'#@symbol' is only valid for top-level methods");
+                symbol_destroy(method_symbol);
+                return false;
+            }
+            method_symbol->func.mangled_name = strdup(stmt->fun_stmt.mangle_name);
+            if (!method_symbol->func.mangled_name)
+            {
+                semantic_error(analyzer, stmt, "out of memory while applying mangle directive");
+                symbol_destroy(method_symbol);
+                semantic_mark_fatal(analyzer);
+                return false;
+            }
+        }
+
+        type_add_method(declared_owner_symbol, method_symbol);
+
+        stmt->symbol = method_symbol;
+        stmt->type   = placeholder_type;
+        return true;
+    }
+
+    Symbol *target_owner_symbol = resolved_owner_symbol ? resolved_owner_symbol : declared_owner_symbol;
+
+    Symbol *existing_method = type_find_method(target_owner_symbol, stmt->fun_stmt.name, receiver_is_pointer);
+    if (existing_method && !existing_method->func.is_generic)
+    {
+        semantic_error(analyzer, stmt, "method '%s' already defined for type '%s'", stmt->fun_stmt.name, target_owner_symbol->name ? target_owner_symbol->name : owner_name);
+        return false;
+    }
+
+    Type *return_type = NULL;
+    if (stmt->fun_stmt.return_type)
+    {
+        return_type = resolve_type(analyzer, stmt->fun_stmt.return_type);
+        if (!return_type)
+        {
+            semantic_error(analyzer, stmt, "cannot resolve method return type");
+            return false;
+        }
+    }
+
+    size_t original_param_nodes = stmt->fun_stmt.params ? stmt->fun_stmt.params->count : 0;
+    size_t fixed_param_count    = 0;
+    for (size_t i = 0; i < original_param_nodes; i++)
+    {
+        AstNode *param = stmt->fun_stmt.params->items[i];
+        if (!param->param_stmt.is_variadic)
+            fixed_param_count++;
+    }
+
+    Type **param_types = NULL;
+    if (fixed_param_count > 0)
+    {
+        param_types = malloc(sizeof(Type *) * fixed_param_count);
+        if (!param_types)
+        {
+            semantic_error(analyzer, stmt, "out of memory while analyzing method parameters");
+            return false;
+        }
+    }
+
+    size_t idx = 0;
+    for (size_t i = 0; i < original_param_nodes; i++)
+    {
+        AstNode *param = stmt->fun_stmt.params->items[i];
+        if (param->param_stmt.is_variadic)
+            continue;
+        param_types[idx] = resolve_type(analyzer, param->param_stmt.type);
+        if (!param_types[idx])
+        {
+            semantic_error(analyzer, param, "cannot resolve method parameter type '%s'", param->param_stmt.name);
+            free(param_types);
+            return false;
+        }
+        param->type = param_types[idx];
+        idx++;
+    }
+
+    Type *func_type = type_function_create(return_type, param_types, fixed_param_count, stmt->fun_stmt.is_variadic);
+    free(param_types);
+
+    Symbol *method_symbol = symbol_create(SYMBOL_FUNC, stmt->fun_stmt.name, func_type, stmt);
+    if (!method_symbol)
+    {
+        semantic_error(analyzer, stmt, "out of memory while creating method symbol");
+        return false;
+    }
+
+    method_symbol->func.is_external       = false;
+    method_symbol->func.is_defined        = (stmt->fun_stmt.body != NULL);
+    method_symbol->func.uses_mach_varargs = stmt->fun_stmt.is_variadic;
+    method_symbol->func.is_generic        = false;
+    method_symbol->import_origin          = method_symbol;
+    method_symbol->func.is_method         = true;
+    method_symbol->func.method_owner      = target_owner_symbol;
+    method_symbol->func.method_receiver_is_pointer = receiver_is_pointer;
+    method_symbol->func.method_receiver_name       = target_owner_symbol->name ? strdup(target_owner_symbol->name) : NULL;
+    if (target_owner_symbol->name && !method_symbol->func.method_receiver_name)
+    {
+        semantic_error(analyzer, stmt, "out of memory while creating method symbol");
+        symbol_destroy(method_symbol);
+        return false;
+    }
+
+    if (analyzer->current_module_name)
+    {
+        free(method_symbol->module_name);
+        method_symbol->module_name = strdup(analyzer->current_module_name);
+    }
+    else if (target_owner_symbol->module_name)
+    {
+        free(method_symbol->module_name);
+        method_symbol->module_name = strdup(target_owner_symbol->module_name);
+    }
+
+    bool is_top_level = semantic_in_top_level_scope(analyzer);
+    if (is_top_level && stmt->fun_stmt.is_public)
+    {
+        method_symbol->is_public = true;
+    }
+
+    const char *custom_mangle = stmt->fun_stmt.mangle_name;
+    if (custom_mangle)
+    {
+        if (!is_top_level)
+        {
+            semantic_error(analyzer, stmt, "'#@symbol' is only valid for top-level methods");
+            symbol_destroy(method_symbol);
+            return false;
+        }
+        method_symbol->func.mangled_name = strdup(custom_mangle);
+        if (!method_symbol->func.mangled_name)
+        {
+            semantic_error(analyzer, stmt, "out of memory while applying mangle directive");
+            symbol_destroy(method_symbol);
+            semantic_mark_fatal(analyzer);
+            return false;
+        }
+    }
+    else if (is_top_level)
+    {
+        char *auto_name = semantic_build_method_mangle_name(method_symbol->module_name, target_owner_symbol->name ? target_owner_symbol->name : owner_name, method_symbol->name, receiver_is_pointer);
+        if (!auto_name)
+        {
+            semantic_error(analyzer, stmt, "out of memory while generating method symbol name");
+            symbol_destroy(method_symbol);
+            semantic_mark_fatal(analyzer);
+            return false;
+        }
+        method_symbol->func.mangled_name = auto_name;
+    }
+
+    type_add_method(target_owner_symbol, method_symbol);
+
+    stmt->symbol = method_symbol;
+    stmt->type   = func_type;
+
+    if (!stmt->fun_stmt.body)
+    {
+        return true;
+    }
+
+    Scope *func_scope = scope_push(&analyzer->symbol_table, stmt->fun_stmt.name);
+
+    if (stmt->fun_stmt.params)
+    {
+        size_t param_index = 0;
+        for (int i = 0; i < stmt->fun_stmt.params->count; i++)
+        {
+            AstNode *param = stmt->fun_stmt.params->items[i];
+            if (param->param_stmt.is_variadic)
+                continue;
+            Symbol *param_symbol      = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param->type, param);
+            param_symbol->param.index = param_index++;
+            symbol_add(func_scope, param_symbol);
+            param->symbol = param_symbol;
+        }
+    }
+
+    AstNode *previous_function = analyzer->current_function;
+    analyzer->current_function = stmt;
+
+    bool success = semantic_analyze_stmt(analyzer, stmt->fun_stmt.body);
+
+    if (return_type && !stmt_has_return(stmt->fun_stmt.body))
+    {
+        semantic_error(analyzer, stmt, "method '%s' with return type must have a return statement", stmt->fun_stmt.name);
+        success = false;
+    }
+
+    analyzer->current_function = previous_function;
+    scope_pop(&analyzer->symbol_table);
+
+    return success;
+}
+
 bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
+    if (stmt->fun_stmt.is_method)
+    {
+        return semantic_analyze_method_fun_stmt(analyzer, stmt);
+    }
+
     if (stmt->symbol && stmt->symbol->kind == SYMBOL_FUNC && stmt->symbol->func.is_specialized_instance)
     {
         return true;
@@ -3206,8 +3825,89 @@ Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     }
 }
 
+static bool semantic_prepare_method_call(SemanticAnalyzer *analyzer, AstNode *call_expr)
+{
+    if (!call_expr || call_expr->kind != AST_EXPR_CALL)
+        return true;
+
+    AstNode *func_expr = call_expr->call_expr.func;
+    if (!func_expr || func_expr->kind != AST_EXPR_FIELD)
+        return true;
+
+    if (!func_expr->field_expr.is_method)
+        return true;
+
+    Symbol *method_symbol = func_expr->symbol;
+    if (!method_symbol || method_symbol->kind != SYMBOL_FUNC)
+    {
+        semantic_error(analyzer, call_expr, "invalid method reference");
+        return false;
+    }
+
+    AstNode *receiver = func_expr->field_expr.object;
+    if (!receiver)
+    {
+        semantic_error(analyzer, call_expr, "method call requires an instance");
+        return false;
+    }
+
+    if (!call_expr->call_expr.args)
+    {
+        AstList *args = malloc(sizeof(AstList));
+        if (!args)
+        {
+            semantic_error(analyzer, call_expr, "out of memory while rewriting method call");
+            return false;
+        }
+        ast_list_init(args);
+        call_expr->call_expr.args = args;
+    }
+
+    ast_list_prepend(call_expr->call_expr.args, receiver);
+    func_expr->field_expr.object = NULL;
+
+    AstNode *ident = malloc(sizeof(AstNode));
+    if (!ident)
+    {
+        semantic_error(analyzer, call_expr, "out of memory while rewriting method call");
+        return false;
+    }
+    ast_node_init(ident, AST_EXPR_IDENT);
+
+    if (func_expr->token)
+    {
+        ident->token     = func_expr->token;
+        func_expr->token = NULL;
+    }
+
+    ident->ident_expr.name = method_symbol->name ? strdup(method_symbol->name) : NULL;
+    if (method_symbol->name && !ident->ident_expr.name)
+    {
+        ast_node_dnit(ident);
+        free(ident);
+        semantic_error(analyzer, call_expr, "out of memory while rewriting method call");
+        return false;
+    }
+    ident->symbol = method_symbol;
+    ident->type   = method_symbol->type;
+
+    call_expr->call_expr.func            = ident;
+    call_expr->call_expr.is_method_call = true;
+
+    ast_node_dnit(func_expr);
+    free(func_expr);
+
+    return true;
+}
+
 Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
+    if (expr->call_expr.func && expr->call_expr.func->kind == AST_EXPR_FIELD)
+    {
+        if (!semantic_prepare_method_call(analyzer, expr))
+            return NULL;
+    }
+
     // check for builtin/intrinsic functions first
     if (expr->call_expr.func->kind == AST_EXPR_IDENT)
     {
@@ -3479,7 +4179,7 @@ Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 
 Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
-    Type *object_type = semantic_analyze_expr(analyzer, expr->field_expr.object);
+    Type *evaluated_type = semantic_analyze_expr(analyzer, expr->field_expr.object);
 
     // check if this is module member access
     if (expr->field_expr.object->kind == AST_EXPR_IDENT)
@@ -3501,10 +4201,20 @@ Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         }
     }
 
-    if (!object_type)
+    if (!evaluated_type)
         return NULL;
 
-    object_type = type_resolve_alias(object_type);
+    bool receiver_is_pointer = false;
+    Type *method_type        = evaluated_type;
+    if (method_type && method_type->kind == TYPE_POINTER)
+    {
+        receiver_is_pointer = true;
+        method_type         = method_type->pointer.base;
+    }
+
+    Symbol *method_owner = semantic_find_type_symbol_from_type(analyzer, method_type);
+
+    Type *object_type = evaluated_type ? type_resolve_alias(evaluated_type) : NULL;
 
     if (object_type && object_type->kind == TYPE_POINTER)
     {
@@ -3549,6 +4259,18 @@ Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         }
     }
 
+    if (method_owner)
+    {
+        Symbol *method_symbol = type_find_method(method_owner, expr->field_expr.field, receiver_is_pointer);
+        if (method_symbol)
+        {
+            expr->field_expr.is_method = true;
+            expr->symbol               = method_symbol;
+            expr->type                 = method_symbol->type;
+            return method_symbol->type;
+        }
+    }
+
     semantic_error(analyzer, expr, "no member named '%s'", expr->field_expr.field);
     return NULL;
 }
@@ -3584,6 +4306,12 @@ Type *semantic_analyze_cast_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 
 Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 {
+    if (expr->symbol && expr->symbol->kind == SYMBOL_FUNC && expr->symbol->func.is_method)
+    {
+        expr->type = expr->symbol->type;
+        return expr->symbol->type;
+    }
+
     const char *name   = expr->ident_expr.name;
     Symbol     *symbol = symbol_lookup(&analyzer->symbol_table, name);
 

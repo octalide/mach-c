@@ -81,12 +81,18 @@ void scope_pop(SymbolTable *table)
 Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *decl)
 {
     Symbol *symbol = malloc(sizeof(Symbol));
+    if (!symbol)
+        return NULL;
+
+    memset(symbol, 0, sizeof(Symbol));
+
     symbol->kind   = kind;
     symbol->name   = name ? strdup(name) : NULL;
     symbol->type   = type;
     symbol->decl   = decl;
     symbol->home_scope = NULL;
     symbol->next   = NULL;
+    symbol->method_next = NULL;
     symbol->is_imported    = false;
     symbol->is_public      = false;
     symbol->has_const_i64 = false;
@@ -117,10 +123,16 @@ Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *de
         symbol->func.generic_param_names = NULL;
         symbol->func.generic_specializations = NULL;
         symbol->func.is_specialized_instance = false;
+        symbol->func.is_method = false;
+        symbol->func.method_owner = NULL;
+        symbol->func.method_forwarded_generic_count = 0;
+        symbol->func.method_receiver_is_pointer = false;
+        symbol->func.method_receiver_name = NULL;
         break;
 
     case SYMBOL_TYPE:
         symbol->type_def.is_alias = false;
+        symbol->type_def.methods  = NULL;
         break;
 
     case SYMBOL_FIELD:
@@ -168,6 +180,8 @@ void symbol_destroy(Symbol *symbol)
         symbol->func.extern_name = NULL;
         symbol->func.convention  = NULL;
         symbol->func.mangled_name = NULL;
+        free(symbol->func.method_receiver_name);
+        symbol->func.method_receiver_name = NULL;
 
         if (symbol->func.generic_param_names)
         {
@@ -195,6 +209,30 @@ void symbol_destroy(Symbol *symbol)
     {
         free(symbol->var.mangled_name);
         symbol->var.mangled_name = NULL;
+    }
+    else if (symbol->kind == SYMBOL_TYPE)
+    {
+        if (symbol->type_def.generic_param_names)
+        {
+            for (size_t i = 0; i < symbol->type_def.generic_param_count; i++)
+            {
+                free(symbol->type_def.generic_param_names[i]);
+            }
+            free(symbol->type_def.generic_param_names);
+            symbol->type_def.generic_param_names = NULL;
+        }
+        if (!symbol->is_imported && symbol->type_def.methods)
+        {
+            Symbol *method = symbol->type_def.methods;
+            while (method)
+            {
+                Symbol *next_method = method->method_next;
+                method->method_next = NULL;
+                symbol_destroy(method);
+                method = next_method;
+            }
+        }
+        symbol->type_def.methods = NULL;
     }
 
     free(symbol);
@@ -311,6 +349,41 @@ Symbol *symbol_find_field(Symbol *composite_symbol, const char *field_name)
         {
             return field;
         }
+    }
+
+    return NULL;
+}
+
+void type_add_method(Symbol *type_symbol, Symbol *method_symbol)
+{
+    if (!type_symbol || !method_symbol)
+        return;
+    if (type_symbol->kind != SYMBOL_TYPE || method_symbol->kind != SYMBOL_FUNC)
+        return;
+
+    method_symbol->method_next        = type_symbol->type_def.methods;
+    type_symbol->type_def.methods     = method_symbol;
+    method_symbol->func.is_method     = true;
+    method_symbol->func.method_owner  = type_symbol;
+
+    if (!method_symbol->home_scope && type_symbol->home_scope)
+    {
+        method_symbol->home_scope = type_symbol->home_scope;
+    }
+}
+
+Symbol *type_find_method(Symbol *type_symbol, const char *method_name, bool receiver_is_pointer)
+{
+    if (!type_symbol || type_symbol->kind != SYMBOL_TYPE || !method_name)
+        return NULL;
+
+    for (Symbol *method = type_symbol->type_def.methods; method; method = method->method_next)
+    {
+        if (!method->name || strcmp(method->name, method_name) != 0)
+            continue;
+        if (method->func.method_receiver_is_pointer != receiver_is_pointer)
+            continue;
+        return method;
     }
 
     return NULL;

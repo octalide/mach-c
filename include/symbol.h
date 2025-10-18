@@ -40,6 +40,7 @@ typedef struct Symbol
     AstNode       *decl; // declaration node
     struct Scope  *home_scope; // scope where the symbol is registered
     struct Symbol *next; // for linked list in scope
+    struct Symbol *method_next; // linked list for type methods
     bool           is_imported; // true if this symbol was imported from another module
     bool           is_public;   // true if symbol should be exported from module
     bool           has_const_i64; // semantic constant folding result (integer/bool)
@@ -72,8 +73,12 @@ typedef struct Symbol
             char **generic_param_names;
             GenericSpecialization *generic_specializations;
             bool  is_specialized_instance;
+            bool  is_method;
+            struct Symbol *method_owner;
+            size_t method_forwarded_generic_count;
+            bool   method_receiver_is_pointer;
+            char  *method_receiver_name;
         } func;
-
         // SYMBOL_TYPE
         struct
         {
@@ -83,6 +88,7 @@ typedef struct Symbol
             char **generic_param_names;
             GenericSpecialization *generic_specializations;
             bool is_specialized_instance;
+            struct Symbol *methods;
         } type_def;
 
         // SYMBOL_FIELD
@@ -146,6 +152,10 @@ Symbol *symbol_add_field(Symbol *composite_symbol, const char *field_name, Type 
 Symbol *symbol_find_field(Symbol *composite_symbol, const char *field_name);
 size_t  symbol_calculate_struct_layout(Symbol *struct_symbol);
 size_t  symbol_calculate_union_layout(Symbol *union_symbol);
+
+// method operations for types
+void    type_add_method(Symbol *type_symbol, Symbol *method_symbol);
+Symbol *type_find_method(Symbol *type_symbol, const char *method_name, bool receiver_is_pointer);
 
 // module operations
 Symbol *symbol_create_module(const char *name, const char *path);

@@ -6,6 +6,7 @@
 #include <string.h>
 
 // helper functions
+static bool parser_is_method_decl(Parser *parser);
 static AstNode *parser_alloc_node(Parser *parser, AstKind kind, Token *token)
 {
     AstNode *node = malloc(sizeof(AstNode));
@@ -268,6 +269,147 @@ static AstNode *parser_parse_stmt_asm(Parser *parser);
 static bool parser_should_parse_type_args(Parser *parser);
 static AstList *parser_parse_type_arguments(Parser *parser);
 static AstList *parser_parse_generic_param_list(Parser *parser);
+
+static Token *parser_next_non_comment(Parser *parser, Token ***storage, size_t *count, size_t *capacity)
+{
+    if (!parser || !parser->lexer || !storage || !count || !capacity)
+    {
+        return NULL;
+    }
+
+    for (;;)
+    {
+        Token *tok = lexer_next(parser->lexer);
+        if (!tok)
+        {
+            return NULL;
+        }
+
+        if (tok->kind == TOKEN_COMMENT)
+        {
+            token_dnit(tok);
+            free(tok);
+            continue;
+        }
+
+        if (*count >= *capacity)
+        {
+            size_t   new_capacity = (*capacity) ? (*capacity) * 2 : 8;
+            Token   **tmp         = realloc(*storage, new_capacity * sizeof(Token *));
+            if (!tmp)
+            {
+                token_dnit(tok);
+                free(tok);
+                return NULL;
+            }
+            *storage  = tmp;
+            *capacity = new_capacity;
+        }
+
+        (*storage)[(*count)++] = tok;
+        return tok;
+    }
+}
+
+static bool parser_is_method_decl(Parser *parser)
+{
+    if (!parser || !parser->current)
+    {
+        return false;
+    }
+
+    int     saved_pos     = parser->lexer->pos;
+    Token **peeked_tokens = NULL;
+    size_t  peek_count    = 0;
+    size_t  peek_capacity = 0;
+    bool    result        = false;
+
+    Token *token = parser->current;
+
+    while (token && token->kind == TOKEN_STAR)
+    {
+        token = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
+        if (!token)
+            goto cleanup;
+    }
+
+    if (!token || token->kind != TOKEN_IDENTIFIER)
+    {
+        goto cleanup;
+    }
+
+    Token *look = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
+    if (!look)
+        goto cleanup;
+
+    if (look->kind == TOKEN_LESS)
+    {
+        int depth = 1;
+        while (depth > 0)
+        {
+            Token *g = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
+            if (!g)
+                goto cleanup;
+            if (g->kind == TOKEN_LESS)
+                depth++;
+            else if (g->kind == TOKEN_GREATER)
+                depth--;
+        }
+        look = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
+        if (!look)
+            goto cleanup;
+    }
+
+    if (look->kind != TOKEN_DOT)
+    {
+        goto cleanup;
+    }
+
+    Token *method_tok = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
+    if (!method_tok || method_tok->kind != TOKEN_IDENTIFIER)
+    {
+        goto cleanup;
+    }
+
+    Token *after = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
+    if (!after)
+        goto cleanup;
+
+    if (after->kind == TOKEN_LESS)
+    {
+        int depth = 1;
+        while (depth > 0)
+        {
+            Token *g = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
+            if (!g)
+                goto cleanup;
+            if (g->kind == TOKEN_LESS)
+                depth++;
+            else if (g->kind == TOKEN_GREATER)
+                depth--;
+        }
+        after = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
+        if (!after)
+            goto cleanup;
+    }
+
+    if (after->kind == TOKEN_L_PAREN)
+    {
+        result = true;
+    }
+
+cleanup:
+    parser->lexer->pos = saved_pos;
+
+    for (size_t i = 0; i < peek_count; i++)
+    {
+        token_dnit(peeked_tokens[i]);
+        free(peeked_tokens[i]);
+    }
+    free(peeked_tokens);
+
+    return result;
+}
 
 // parser lifecycle
 void parser_init(Parser *parser, Lexer *lexer)
@@ -1327,13 +1469,48 @@ AstNode *parser_parse_stmt_fun(Parser *parser, bool is_public)
 
     node->fun_stmt.mangle_name = parser_take_pending_mangle(parser);
 
-    node->fun_stmt.name = parser_parse_identifier(parser);
-    if (!node->fun_stmt.name)
+    bool is_method = parser_is_method_decl(parser);
+    if (is_method)
     {
-        parser_error_at_current(parser, "expected identifier after 'fun'");
-        ast_node_dnit(node);
-        free(node);
-        return NULL;
+        AstNode *receiver = parser_parse_type(parser);
+        if (!receiver)
+        {
+            parser_error_at_current(parser, "expected method receiver type after 'fun'");
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+
+        if (!parser_consume(parser, TOKEN_DOT, "expected '.' after method receiver type"))
+        {
+            ast_node_dnit(receiver);
+            free(receiver);
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+
+        node->fun_stmt.method_receiver = receiver;
+        node->fun_stmt.is_method       = true;
+        node->fun_stmt.name            = parser_parse_identifier(parser);
+        if (!node->fun_stmt.name)
+        {
+            parser_error_at_current(parser, "expected method name after receiver type");
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
+    }
+    else
+    {
+        node->fun_stmt.name = parser_parse_identifier(parser);
+        if (!node->fun_stmt.name)
+        {
+            parser_error_at_current(parser, "expected identifier after 'fun'");
+            ast_node_dnit(node);
+            free(node);
+            return NULL;
+        }
     }
 
     if (parser_match(parser, TOKEN_LESS))

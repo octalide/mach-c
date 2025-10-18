@@ -26,21 +26,93 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
 static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
 static void  semantic_register_builtin_types(SemanticAnalyzer *analyzer);
 static void  semantic_register_error_variable(SemanticAnalyzer *analyzer, AstNode *stmt, const char *name, bool is_val);
+static bool  semantic_predeclare_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
 
 static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count);
 static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count);
 static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count);
+static void semantic_remove_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol);
 static char *semantic_build_method_mangle_name(const char *module_name, const char *type_name, const char *method_name, bool receiver_is_pointer);
+bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
 static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
 static bool semantic_compare_type_ast(const AstNode *a, const AstNode *b);
 static Symbol *semantic_find_type_symbol_from_type(SemanticAnalyzer *analyzer, Type *type);
 static bool semantic_prepare_method_call(SemanticAnalyzer *analyzer, AstNode *call_expr);
 
+static bool semantic_predeclare_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+{
+    if (!analyzer || !stmt)
+        return false;
+
+    if (stmt->kind != AST_STMT_FUN)
+        return true;
+
+    if (stmt->fun_stmt.is_method)
+        return true;
+
+    if (stmt->symbol && stmt->symbol->kind == SYMBOL_FUNC && stmt->symbol->func.is_specialized_instance)
+        return true;
+
+    if (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
+    {
+        AstNode *saved_body = stmt->fun_stmt.body;
+        stmt->fun_stmt.body = NULL;
+
+        bool success = semantic_register_generic_fun_stmt(analyzer, stmt);
+
+        if (stmt->symbol)
+        {
+            stmt->symbol->func.is_defined = false;
+        }
+
+        stmt->fun_stmt.body = saved_body;
+        return success;
+    }
+
+    AstNode *saved_body = stmt->fun_stmt.body;
+    stmt->fun_stmt.body = NULL;
+
+    size_t error_mark = analyzer->errors.count;
+    bool   had_error   = analyzer->has_errors;
+    bool   had_fatal   = analyzer->has_fatal_error;
+
+    bool success = semantic_analyze_fun_stmt(analyzer, stmt);
+
+    if (stmt->symbol)
+    {
+        stmt->symbol->func.is_defined = false;
+        stmt->symbol->decl            = stmt;
+    }
+
+    stmt->fun_stmt.body = saved_body;
+
+    if (!success)
+    {
+        while ((size_t)analyzer->errors.count > error_mark)
+        {
+            analyzer->errors.count--;
+            SemanticError *err = &analyzer->errors.errors[analyzer->errors.count];
+            if (err->token)
+            {
+                token_dnit(err->token);
+                free(err->token);
+            }
+            free(err->message);
+            free(err->file_path);
+        }
+
+        stmt->symbol = NULL;
+        stmt->type   = NULL;
+        analyzer->has_errors      = had_error;
+        analyzer->has_fatal_error = had_fatal;
+        return true;
+    }
+
+    return success;
+}
+
 static void instantiation_queue_init(InstantiationQueue *queue);
 static void instantiation_queue_dnit(InstantiationQueue *queue);
-static char *instantiation_request_create_id(Symbol *generic_symbol, Type **type_args, size_t type_arg_count);
-static bool instantiation_queue_contains(InstantiationQueue *queue, const char *unique_id);
-static bool instantiation_queue_enqueue(InstantiationQueue *queue, InstantiationKind kind, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, AstNode *call_site);
 static InstantiationRequest *instantiation_queue_dequeue(InstantiationQueue *queue);
 static void instantiation_request_destroy(InstantiationRequest *req);
 
@@ -614,6 +686,8 @@ static Type *semantic_lookup_generic_binding(SemanticAnalyzer *analyzer, const c
         }
     }
 
+    fprintf(stderr, "debug: missing generic binding for %s\n", name ? name : "<null>");
+    fflush(stderr);
     return NULL;
 }
 
@@ -680,95 +754,6 @@ static void instantiation_queue_dnit(InstantiationQueue *queue)
     queue->head  = NULL;
     queue->tail  = NULL;
     queue->count = 0;
-}
-
-static char *instantiation_request_create_id(Symbol *generic_symbol, Type **type_args, size_t type_arg_count)
-{
-    if (!generic_symbol || !generic_symbol->name)
-        return NULL;
-
-    return semantic_mangle_generic_function(generic_symbol, type_args, type_arg_count);
-}
-
-static bool instantiation_queue_contains(InstantiationQueue *queue, const char *unique_id)
-{
-    if (!queue || !unique_id)
-        return false;
-
-    for (InstantiationRequest *req = queue->head; req; req = req->next)
-    {
-        if (req->unique_id && strcmp(req->unique_id, unique_id) == 0)
-            return true;
-    }
-
-    return false;
-}
-
-static bool instantiation_queue_enqueue(InstantiationQueue *queue, InstantiationKind kind, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, AstNode *call_site)
-{
-    if (!queue || !generic_symbol)
-        return false;
-
-    char *unique_id = instantiation_request_create_id(generic_symbol, type_args, type_arg_count);
-    if (!unique_id)
-        return false;
-
-    if (instantiation_queue_contains(queue, unique_id))
-    {
-        free(unique_id);
-        return true;
-    }
-
-    Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, type_arg_count);
-    if (existing)
-    {
-        free(unique_id);
-        return true;
-    }
-
-    InstantiationRequest *req = malloc(sizeof(InstantiationRequest));
-    if (!req)
-    {
-        free(unique_id);
-        return false;
-    }
-
-    req->kind           = kind;
-    req->generic_symbol = generic_symbol;
-    req->type_arg_count = type_arg_count;
-    req->call_site      = call_site;
-    req->unique_id      = unique_id;
-    req->next           = NULL;
-
-    if (type_arg_count > 0)
-    {
-        req->type_args = malloc(sizeof(Type *) * type_arg_count);
-        if (!req->type_args)
-        {
-            free(unique_id);
-            free(req);
-            return false;
-        }
-        memcpy(req->type_args, type_args, sizeof(Type *) * type_arg_count);
-    }
-    else
-    {
-        req->type_args = NULL;
-    }
-
-    if (!queue->head)
-    {
-        queue->head = req;
-        queue->tail = req;
-    }
-    else
-    {
-        queue->tail->next = req;
-        queue->tail       = req;
-    }
-
-    queue->count++;
-    return true;
 }
 
 static InstantiationRequest *instantiation_queue_dequeue(InstantiationQueue *queue)
@@ -842,8 +827,37 @@ static char *semantic_sanitize_type_token(const char *input)
 
 static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count)
 {
-    const char *base_name = generic_symbol->name ? generic_symbol->name : "fun";
-    size_t      base_len  = strlen(base_name);
+    const char *raw_base_name = generic_symbol->name ? generic_symbol->name : "fun";
+    char       *method_prefix = NULL;
+
+    if (generic_symbol->kind == SYMBOL_FUNC && generic_symbol->func.is_method && generic_symbol->func.method_owner &&
+        generic_symbol->func.method_owner->name)
+    {
+        char *owner_sanitized = semantic_sanitize_type_token(generic_symbol->func.method_owner->name);
+        if (!owner_sanitized)
+            return NULL;
+
+        size_t owner_len  = strlen(owner_sanitized);
+        size_t method_len = strlen(raw_base_name);
+
+        method_prefix = malloc(owner_len + 2 + method_len + 1);
+        if (!method_prefix)
+        {
+            free(owner_sanitized);
+            return NULL;
+        }
+
+        memcpy(method_prefix, owner_sanitized, owner_len);
+        method_prefix[owner_len]     = '_';
+        method_prefix[owner_len + 1] = '_';
+        memcpy(method_prefix + owner_len + 2, raw_base_name, method_len);
+        method_prefix[owner_len + 2 + method_len] = '\0';
+
+        free(owner_sanitized);
+        raw_base_name = method_prefix;
+    }
+
+    size_t base_len = strlen(raw_base_name);
 
     char **parts = NULL;
     size_t total_len = base_len;
@@ -886,10 +900,11 @@ static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **typ
                 free(parts[i]);
             free(parts);
         }
+        free(method_prefix);
         return NULL;
     }
 
-    strcpy(mangled, base_name);
+    strcpy(mangled, raw_base_name);
     size_t offset = base_len;
     for (size_t i = 0; i < arg_count; i++)
     {
@@ -906,6 +921,8 @@ static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **typ
             free(parts[i]);
         free(parts);
     }
+
+    free(method_prefix);
 
     return mangled;
 }
@@ -940,6 +957,11 @@ static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type
         {
             if (!type_equals(spec->type_args[i], type_args[i]))
             {
+                char *a_str = type_to_string(spec->type_args[i]);
+                char *b_str = type_to_string(type_args[i]);
+                fprintf(stderr, "debug: specialization mismatch %s vs %s\n", a_str ? a_str : "<null>", b_str ? b_str : "<null>");
+                free(a_str);
+                free(b_str);
                 match = false;
                 break;
             }
@@ -947,6 +969,8 @@ static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type
 
         if (match)
         {
+            fprintf(stderr, "debug: found existing specialization for %s\n", generic_symbol->name ? generic_symbol->name : "<anon>");
+            fflush(stderr);
             return spec->symbol;
         }
     }
@@ -1003,6 +1027,48 @@ static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbo
     }
 }
 
+static void semantic_remove_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol)
+{
+    if (!generic_symbol || !specialized_symbol)
+        return;
+
+    Symbol *origin = semantic_generic_origin(generic_symbol);
+    if (!origin)
+        origin = generic_symbol;
+
+    GenericSpecialization **head = NULL;
+    if (origin->kind == SYMBOL_FUNC)
+    {
+        head = &origin->func.generic_specializations;
+    }
+    else if (origin->kind == SYMBOL_TYPE)
+    {
+        head = &origin->type_def.generic_specializations;
+    }
+    else
+    {
+        return;
+    }
+
+    GenericSpecialization *prev = NULL;
+    GenericSpecialization *curr = head ? *head : NULL;
+    while (curr)
+    {
+        if (curr->symbol == specialized_symbol)
+        {
+            if (prev)
+                prev->next = curr->next;
+            else
+                *head = curr->next;
+            free(curr->type_args);
+            free(curr);
+            return;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+}
+
 static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request)
 {
     if (!analyzer || !request || !request->generic_symbol)
@@ -1032,6 +1098,11 @@ static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyz
         return NULL;
     }
 
+    if (generic_symbol->func.is_method)
+    {
+        clone->fun_stmt.is_method = true;
+    }
+
     char *mangled_name = semantic_mangle_generic_function(generic_symbol, type_args, type_arg_count);
     if (!mangled_name)
     {
@@ -1042,8 +1113,18 @@ static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyz
         return NULL;
     }
 
-    free(clone->fun_stmt.name);
-    clone->fun_stmt.name = mangled_name;
+    bool is_method_instantiation = (generic_symbol->kind == SYMBOL_FUNC && generic_symbol->func.is_method);
+
+    if (!is_method_instantiation)
+    {
+        free(clone->fun_stmt.name);
+        clone->fun_stmt.name = mangled_name;
+    }
+    else
+    {
+        free(mangled_name);
+        mangled_name = NULL;
+    }
 
     if (clone->fun_stmt.generics)
     {
@@ -1063,6 +1144,13 @@ static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyz
         {
             binding_ok = false;
             break;
+        }
+        else
+        {
+            char *tmp = type_to_string(type_args[i]);
+            fprintf(stderr, "debug: pushed binding %s -> %s\n", param_name ? param_name : "<null>", tmp ? tmp : "<type>");
+            free(tmp);
+            fflush(stderr);
         }
     }
 
@@ -1150,6 +1238,12 @@ static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyz
     if (!origin_module && analyzer->symbol_table.module_scope)
         origin_module = semantic_find_module_for_scope(&analyzer->module_manager, analyzer->symbol_table.module_scope);
 
+    if (clone->fun_stmt.is_method && !clone->fun_stmt.method_receiver)
+    {
+        fprintf(stderr, "debug: method clone missing receiver for %s\n", generic_symbol->name ? generic_symbol->name : "<anon>");
+        fflush(stderr);
+    }
+
     bool success = semantic_analyze_fun_stmt(analyzer, clone);
 
     analyzer->symbol_table.current_scope = saved_scope;
@@ -1181,6 +1275,8 @@ static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyz
     }
 
     semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
+    fprintf(stderr, "debug: recorded struct specialization %s\n", clone->symbol->name ? clone->symbol->name : "<anon>");
+    fflush(stderr);
 
     AstNode *target_program = NULL;
     if (origin_module && origin_module->ast && origin_module->ast->kind == AST_PROGRAM)
@@ -1203,6 +1299,9 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
     Type  **type_args      = request->type_args;
     size_t  type_arg_count = request->type_arg_count;
     AstNode *call_site     = request->call_site;
+
+    printf("debug: instantiate struct %s with %zu args\n", generic_symbol->name ? generic_symbol->name : "<anon>", type_arg_count);
+    fflush(stdout);
 
     Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, type_arg_count);
     if (existing)
@@ -1298,6 +1397,8 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
     }
 
     bool success = semantic_analyze_str_stmt(analyzer, clone);
+    printf("debug: analyze struct %s success=%d\n", clone->str_stmt.name ? clone->str_stmt.name : "<anon>", success ? 1 : 0);
+    fflush(stdout);
 
     analyzer->symbol_table.current_scope = saved_scope;
     analyzer->symbol_table.module_scope  = saved_module_scope;
@@ -1315,12 +1416,17 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
     // verify it's a struct type
     if (!clone->symbol->type || clone->symbol->type->kind != TYPE_STRUCT)
     {
+        printf("debug: struct %s invalid type\n", clone->str_stmt.name ? clone->str_stmt.name : "<anon>");
+        fflush(stdout);
         if (call_site)
             semantic_error(analyzer, call_site, "instantiated struct '%s' has invalid type", generic_symbol->name);
         ast_node_dnit(clone);
         free(clone);
         return NULL;
     }
+
+    semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
+    bool recorded_specialization = true;
 
     clone->symbol->type_def.is_specialized_instance = true;
     clone->symbol->type_def.is_generic = false;
@@ -1329,6 +1435,8 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
     bool methods_ok = true;
     for (Symbol *method = generic_symbol->type_def.methods; methods_ok && method; method = method->method_next)
     {
+        printf("debug: instantiate method %s\n", method->name ? method->name : "<anon>");
+        fflush(stdout);
         size_t method_generic_count = method->func.generic_param_count;
         if (method_generic_count > 0 && method_generic_count != type_arg_count)
         {
@@ -1351,6 +1459,8 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
 
         if (!specialized_method)
         {
+            printf("debug: method %s instantiation failed\n", method->name ? method->name : "<anon>");
+            fflush(stdout);
             methods_ok = false;
             break;
         }
@@ -1375,12 +1485,12 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
 
     if (!methods_ok)
     {
+        if (recorded_specialization)
+            semantic_remove_generic_specialization(generic_symbol, clone->symbol);
         ast_node_dnit(clone);
         free(clone);
         return NULL;
     }
-
-    semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
 
     AstNode *target_program = analyzer->program_root;
     if (target_program && target_program->kind == AST_PROGRAM)
@@ -1507,11 +1617,20 @@ static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer 
         return NULL;
     }
 
+    if (!clone->symbol->type || clone->symbol->type->kind != TYPE_UNION)
+    {
+        if (call_site)
+            semantic_error(analyzer, call_site, "instantiated union '%s' has invalid type", generic_symbol->name);
+        ast_node_dnit(clone);
+        free(clone);
+        return NULL;
+    }
+
+    semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
+
     clone->symbol->type_def.is_specialized_instance = true;
     clone->symbol->type_def.is_generic = false;
     clone->symbol->type_def.generic_param_count = 0;
-
-    semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
 
     AstNode *target_program = analyzer->program_root;
     if (target_program && target_program->kind == AST_PROGRAM)
@@ -1582,9 +1701,29 @@ bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
         // third pass: analyze the current module statements
         // note: only analyze original statements, not instantiated generics which get appended during analysis
         int original_stmt_count = root->program.stmts->count;
+
         for (int i = 0; i < original_stmt_count; i++)
         {
-            if (!semantic_analyze_stmt(analyzer, root->program.stmts->items[i]))
+            AstNode *stmt = root->program.stmts->items[i];
+            switch (stmt->kind)
+            {
+            case AST_STMT_FUN:
+                if (!semantic_predeclare_fun_stmt(analyzer, stmt))
+                {
+                    analyzer->has_errors = true;
+                }
+                break;
+            default:
+                break;
+            }
+            if (analyzer->has_fatal_error)
+                return false;
+        }
+
+        for (int i = 0; i < original_stmt_count; i++)
+        {
+            AstNode *stmt = root->program.stmts->items[i];
+            if (!semantic_analyze_stmt(analyzer, stmt))
             {
                 analyzer->has_errors = true;
             }
@@ -1723,6 +1862,26 @@ static void format_type_name(Type *type, char *buffer, size_t buffer_size)
     }
 }
 
+static size_t semantic_align_to(size_t value, size_t alignment)
+{
+    if (alignment == 0)
+        return value;
+    size_t remainder = value % alignment;
+    if (remainder == 0)
+        return value;
+    return value + (alignment - remainder);
+}
+
+static void semantic_free_field_list(Symbol *field)
+{
+    while (field)
+    {
+        Symbol *next = field->next;
+        symbol_destroy(field);
+        field = next;
+    }
+}
+
 // helper function to resolve types with current symbol table
 static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
 {
@@ -1742,6 +1901,17 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
         {
             type_node->type = bound;
             return bound;
+        }
+        else if (analyzer->generic_binding_count > 0 && type_node->type_name.name && strcmp(type_node->type_name.name, "T") == 0)
+        {
+            if (type_node->token)
+            {
+                fprintf(stderr, "debug: failed to bind T at pos %d len %d\n", type_node->token->pos, type_node->token->len);
+            }
+            else
+            {
+                fprintf(stderr, "debug: failed to bind T with no token info\n");
+            }
         }
 
         // check for generic type instantiation
@@ -1894,6 +2064,147 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
         free(param_types);
         type_node->type = func_type;
         return func_type;
+    }
+    case AST_TYPE_STR:
+    {
+        if (type_node->type_str.name)
+        {
+            break;
+        }
+
+        Type   *struct_type = type_struct_create(NULL);
+        Symbol *head        = NULL;
+        Symbol *tail        = NULL;
+        size_t  offset      = 0;
+        size_t  max_align   = 1;
+        size_t  field_count = 0;
+
+        if (type_node->type_str.fields)
+        {
+            for (int i = 0; i < type_node->type_str.fields->count; i++)
+            {
+                AstNode *field_node = type_node->type_str.fields->items[i];
+                Type    *field_type = resolve_type(analyzer, field_node->field_stmt.type);
+                if (!field_type)
+                {
+                    semantic_free_field_list(head);
+                    free(struct_type->name);
+                    free(struct_type);
+                    return NULL;
+                }
+
+                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+                if (!field_symbol)
+                {
+                    semantic_free_field_list(head);
+                    free(struct_type->name);
+                    free(struct_type);
+                    return NULL;
+                }
+
+                size_t field_align = type_alignof(field_type);
+                offset             = semantic_align_to(offset, field_align ? field_align : 1);
+                field_symbol->field.offset = offset;
+
+                if (!head)
+                {
+                    head = tail = field_symbol;
+                }
+                else
+                {
+                    tail->next = field_symbol;
+                    tail       = field_symbol;
+                }
+
+                offset += type_sizeof(field_type);
+                if (field_align > max_align)
+                {
+                    max_align = field_align;
+                }
+                field_count++;
+            }
+        }
+
+        size_t final_align = max_align ? max_align : 1;
+        offset             = semantic_align_to(offset, final_align);
+
+        struct_type->size                  = offset;
+        struct_type->alignment             = final_align;
+        struct_type->composite.fields      = head;
+        struct_type->composite.field_count = field_count;
+
+        type_node->type = struct_type;
+        return struct_type;
+    }
+    case AST_TYPE_UNI:
+    {
+        if (type_node->type_uni.name)
+        {
+            break;
+        }
+
+        Type   *union_type = type_union_create(NULL);
+        Symbol *head       = NULL;
+        Symbol *tail       = NULL;
+        size_t  max_size   = 0;
+        size_t  max_align  = 1;
+        size_t  field_count = 0;
+
+        if (type_node->type_uni.fields)
+        {
+            for (int i = 0; i < type_node->type_uni.fields->count; i++)
+            {
+                AstNode *field_node = type_node->type_uni.fields->items[i];
+                Type    *field_type = resolve_type(analyzer, field_node->field_stmt.type);
+                if (!field_type)
+                {
+                    semantic_free_field_list(head);
+                    free(union_type->name);
+                    free(union_type);
+                    return NULL;
+                }
+
+                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+                if (!field_symbol)
+                {
+                    semantic_free_field_list(head);
+                    free(union_type->name);
+                    free(union_type);
+                    return NULL;
+                }
+
+                field_symbol->field.offset = 0;
+
+                if (!head)
+                {
+                    head = tail = field_symbol;
+                }
+                else
+                {
+                    tail->next = field_symbol;
+                    tail       = field_symbol;
+                }
+
+                size_t field_size  = type_sizeof(field_type);
+                size_t field_align = type_alignof(field_type);
+                if (field_size > max_size)
+                    max_size = field_size;
+                if (field_align > max_align)
+                    max_align = field_align;
+                field_count++;
+            }
+        }
+
+        size_t final_align = max_align ? max_align : 1;
+        size_t final_size  = semantic_align_to(max_size, final_align);
+
+        union_type->size                  = final_size;
+        union_type->alignment             = final_align;
+        union_type->composite.fields      = head;
+        union_type->composite.field_count = field_count;
+
+        type_node->type = union_type;
+        return union_type;
     }
     default:
         break;
@@ -2455,6 +2766,22 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
                 }
             }
 
+            if (success)
+            {
+                int module_stmt_count = module->ast->program.stmts->count;
+                for (int i = 0; i < module_stmt_count && success; i++)
+                {
+                    AstNode *stmt = module->ast->program.stmts->items[i];
+                    if (stmt->kind == AST_STMT_FUN)
+                    {
+                        if (!semantic_predeclare_fun_stmt(&module_analyzer, stmt))
+                            success = false;
+                    }
+                    if (module_analyzer.has_fatal_error)
+                        success = false;
+                }
+            }
+
             for (int i = 0; success && i < module->ast->program.stmts->count; i++)
             {
                 AstNode *stmt = module->ast->program.stmts->items[i];
@@ -2819,13 +3146,6 @@ static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode
 
     const char *owner_name = base_receiver_ast->type_name.name;
 
-    Type   *resolved_receiver_type = resolve_type(analyzer, stmt->fun_stmt.method_receiver);
-    Symbol *resolved_owner_symbol  = NULL;
-    if (resolved_receiver_type)
-    {
-        resolved_owner_symbol = semantic_find_type_symbol_from_type(analyzer, resolved_receiver_type);
-    }
-
     Symbol *declared_owner_symbol = symbol_lookup(&analyzer->symbol_table, owner_name);
     if (!declared_owner_symbol || declared_owner_symbol->kind != SYMBOL_TYPE)
     {
@@ -2842,7 +3162,56 @@ static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode
     bool owner_is_generic = declared_owner_symbol->type_def.is_generic && declared_owner_symbol->type_def.generic_param_count > 0;
     bool binding_active   = analyzer->generic_binding_count > 0;
 
-    bool treat_as_generic_definition = owner_is_generic && !binding_active && !resolved_owner_symbol;
+    bool   treat_as_generic_definition = owner_is_generic && !binding_active;
+    Type  *resolved_receiver_type      = NULL;
+    Type  *owner_candidate             = NULL;
+    Symbol *resolved_owner_symbol      = NULL;
+
+    if (!treat_as_generic_definition)
+    {
+        resolved_receiver_type = resolve_type(analyzer, stmt->fun_stmt.method_receiver);
+        if (resolved_receiver_type)
+        {
+            resolved_owner_symbol = semantic_find_type_symbol_from_type(analyzer, resolved_receiver_type);
+
+            owner_candidate = resolved_receiver_type;
+            if (owner_candidate->kind == TYPE_POINTER)
+                owner_candidate = owner_candidate->pointer.base;
+            owner_candidate = type_resolve_alias(owner_candidate);
+        }
+
+        if (!resolved_owner_symbol && owner_candidate && declared_owner_symbol->type_def.generic_specializations)
+        {
+            for (GenericSpecialization *spec = declared_owner_symbol->type_def.generic_specializations; spec; spec = spec->next)
+            {
+                if (spec->symbol && spec->symbol->type == owner_candidate)
+                {
+                    resolved_owner_symbol = spec->symbol;
+                    break;
+                }
+            }
+
+            if (!resolved_owner_symbol)
+            {
+                if (resolved_receiver_type && resolved_receiver_type->name)
+                {
+                    Symbol *debug_lookup = symbol_lookup(&analyzer->symbol_table, resolved_receiver_type->name);
+                    fprintf(stderr, "debug: lookup owner type name=%s found=%s\n",
+                            resolved_receiver_type->name,
+                            debug_lookup && debug_lookup->name ? debug_lookup->name : (debug_lookup ? "<noname>" : "<null>"));
+                }
+                else
+                {
+                    fprintf(stderr, "debug: resolved receiver type has no name\n");
+                }
+            }
+        }
+    }
+
+    fprintf(stderr, "debug: method analysis owner=%s generic=%d binding=%zu resolved_owner=%s\n",
+            declared_owner_symbol->name ? declared_owner_symbol->name : "<anon>", owner_is_generic ? 1 : 0,
+            analyzer->generic_binding_count,
+            resolved_owner_symbol && resolved_owner_symbol->name ? resolved_owner_symbol->name : (resolved_owner_symbol ? "<noname>" : "<null>"));
 
     if (!stmt->fun_stmt.params || stmt->fun_stmt.params->count == 0)
     {
@@ -2940,6 +3309,7 @@ static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode
         Symbol *existing = type_find_method(declared_owner_symbol, stmt->fun_stmt.name, receiver_is_pointer);
         if (existing)
         {
+            fprintf(stderr, "debug: generic method collision existing=%s generic=%d\n", existing->name ? existing->name : "<anon>", existing->func.is_generic ? 1 : 0);
             semantic_error(analyzer, stmt, "method '%s' already defined for type '%s'", stmt->fun_stmt.name, owner_name);
             return false;
         }
@@ -3040,6 +3410,9 @@ static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode
     Symbol *existing_method = type_find_method(target_owner_symbol, stmt->fun_stmt.name, receiver_is_pointer);
     if (existing_method && !existing_method->func.is_generic)
     {
+        fprintf(stderr, "debug: method duplicate target=%s existing_generic=%d\n",
+                target_owner_symbol->name ? target_owner_symbol->name : owner_name,
+                existing_method->func.is_generic ? 1 : 0);
         semantic_error(analyzer, stmt, "method '%s' already defined for type '%s'", stmt->fun_stmt.name, target_owner_symbol->name ? target_owner_symbol->name : owner_name);
         return false;
     }
@@ -4219,28 +4592,29 @@ Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         Symbol *existing = semantic_find_generic_specialization(target_symbol, type_args, expected_count);
         if (!existing)
         {
-            bool enqueued = instantiation_queue_enqueue(&analyzer->instantiation_queue, INSTANTIATION_FUNCTION, target_symbol, type_args, expected_count, expr);
-            if (!enqueued)
+            InstantiationRequest request = {
+                .kind = INSTANTIATION_FUNCTION,
+                .generic_symbol = target_symbol,
+                .type_args = type_args,
+                .type_arg_count = expected_count,
+                .call_site = expr,
+                .unique_id = NULL,
+                .next = NULL
+            };
+
+            existing = semantic_instantiate_generic_function_from_request(analyzer, &request);
+            if (!existing)
             {
-                semantic_error(analyzer, expr, "failed to queue generic instantiation for '%s'", target_symbol->name);
                 free(type_args);
                 return NULL;
             }
         }
 
         free(type_args);
-        
-        if (existing)
-        {
-            expr->call_expr.func->symbol = existing;
-            expr->call_expr.func->type   = existing->type;
-            func_type                   = existing->type;
-        }
-        else
-        {
-            expr->type = type_ptr();
-            return expr->type;
-        }
+
+        expr->call_expr.func->symbol = existing;
+        expr->call_expr.func->type   = existing->type;
+        func_type                   = existing->type;
     }
 
     // resolve aliases to get the underlying type
@@ -4398,6 +4772,16 @@ Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             expr->type                 = method_symbol->type;
             return method_symbol->type;
         }
+    }
+
+    if (object_type && (object_type->kind == TYPE_STRUCT || object_type->kind == TYPE_UNION))
+    {
+        size_t field_count = object_type->composite.field_count;
+        fprintf(stderr, "debug: no member named %s on type %s (fields=%zu)\n",
+                expr->field_expr.field,
+                object_type->name ? object_type->name : "<anon>",
+                field_count);
+        fflush(stderr);
     }
 
     semantic_error(analyzer, expr, "no member named '%s'", expr->field_expr.field);

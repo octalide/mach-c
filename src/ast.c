@@ -586,6 +586,8 @@ static AstNode *ast_clone_checked(const AstNode *node)
         clone->fun_stmt.is_variadic = node->fun_stmt.is_variadic;
         clone->fun_stmt.is_public   = node->fun_stmt.is_public;
         clone->fun_stmt.mangle_name = ast_strdup(node->fun_stmt.mangle_name);
+        clone->fun_stmt.is_method   = node->fun_stmt.is_method;
+        clone->fun_stmt.method_receiver = ast_clone_checked(node->fun_stmt.method_receiver);
         break;
 
     case AST_STMT_STR:

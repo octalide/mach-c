@@ -80,41 +80,41 @@ void scope_pop(SymbolTable *table)
 
 Symbol *symbol_create(SymbolKind kind, const char *name, Type *type, AstNode *decl)
 {
-    Symbol *symbol = malloc(sizeof(Symbol));
-    symbol->kind   = kind;
-    symbol->name   = name ? strdup(name) : NULL;
-    symbol->type   = type;
-    symbol->decl   = decl;
-    symbol->home_scope = NULL;
-    symbol->next   = NULL;
-    symbol->is_imported    = false;
-    symbol->is_public      = false;
+    Symbol *symbol        = malloc(sizeof(Symbol));
+    symbol->kind          = kind;
+    symbol->name          = name ? strdup(name) : NULL;
+    symbol->type          = type;
+    symbol->decl          = decl;
+    symbol->home_scope    = NULL;
+    symbol->next          = NULL;
+    symbol->is_imported   = false;
+    symbol->is_public     = false;
     symbol->has_const_i64 = false;
-    symbol->const_i64 = 0;
+    symbol->const_i64     = 0;
     symbol->import_module = NULL;
-    symbol->module_name    = NULL;
-    symbol->import_origin  = NULL;
+    symbol->module_name   = NULL;
+    symbol->import_origin = NULL;
 
     // initialize kind-specific data
     switch (kind)
     {
     case SYMBOL_VAR:
     case SYMBOL_VAL:
-        symbol->var.is_global = false;
-        symbol->var.is_const  = (kind == SYMBOL_VAL);
+        symbol->var.is_global    = false;
+        symbol->var.is_const     = (kind == SYMBOL_VAL);
         symbol->var.mangled_name = NULL;
         break;
 
     case SYMBOL_FUNC:
-        symbol->func.is_external = false;
-        symbol->func.is_defined  = false;
-        symbol->func.uses_mach_varargs = false;
-        symbol->func.extern_name = NULL;
-        symbol->func.convention  = NULL;
-        symbol->func.mangled_name = NULL;
-        symbol->func.is_generic  = false;
-        symbol->func.generic_param_count = 0;
-        symbol->func.generic_param_names = NULL;
+        symbol->func.is_external             = false;
+        symbol->func.is_defined              = false;
+        symbol->func.uses_mach_varargs       = false;
+        symbol->func.extern_name             = NULL;
+        symbol->func.convention              = NULL;
+        symbol->func.mangled_name            = NULL;
+        symbol->func.is_generic              = false;
+        symbol->func.generic_param_count     = 0;
+        symbol->func.generic_param_names     = NULL;
         symbol->func.generic_specializations = NULL;
         symbol->func.is_specialized_instance = false;
         break;
@@ -156,17 +156,17 @@ void symbol_destroy(Symbol *symbol)
             scope_destroy(symbol->module.scope);
             symbol->module.scope = NULL;
         }
-    free(symbol->module.path);
-    symbol->module.path = NULL;
-    // non-imported module scopes are managed separately
+        free(symbol->module.path);
+        symbol->module.path = NULL;
+        // non-imported module scopes are managed separately
     }
     else if (symbol->kind == SYMBOL_FUNC)
     {
         free(symbol->func.extern_name);
         free(symbol->func.convention);
         free(symbol->func.mangled_name);
-        symbol->func.extern_name = NULL;
-        symbol->func.convention  = NULL;
+        symbol->func.extern_name  = NULL;
+        symbol->func.convention   = NULL;
         symbol->func.mangled_name = NULL;
 
         if (symbol->func.generic_param_names)

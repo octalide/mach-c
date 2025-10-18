@@ -25,11 +25,11 @@ typedef struct GenericSpecialization GenericSpecialization;
 
 struct GenericSpecialization
 {
-    size_t                  arg_count;
-    Type                   **type_args;
-    struct Symbol          *generic_symbol; // owning generic symbol
-    struct Symbol          *symbol;
-    GenericSpecialization  *next;
+    size_t                 arg_count;
+    Type                 **type_args;
+    struct Symbol         *generic_symbol; // owning generic symbol
+    struct Symbol         *symbol;
+    GenericSpecialization *next;
 };
 
 typedef struct Symbol
@@ -37,11 +37,11 @@ typedef struct Symbol
     SymbolKind     kind;
     char          *name;
     Type          *type;
-    AstNode       *decl; // declaration node
-    struct Scope  *home_scope; // scope where the symbol is registered
-    struct Symbol *next; // for linked list in scope
-    bool           is_imported; // true if this symbol was imported from another module
-    bool           is_public;   // true if symbol should be exported from module
+    AstNode       *decl;          // declaration node
+    struct Scope  *home_scope;    // scope where the symbol is registered
+    struct Symbol *next;          // for linked list in scope
+    bool           is_imported;   // true if this symbol was imported from another module
+    bool           is_public;     // true if symbol should be exported from module
     bool           has_const_i64; // semantic constant folding result (integer/bool)
     int64_t        const_i64;
     const char    *import_module; // source module for imported symbols
@@ -53,36 +53,36 @@ typedef struct Symbol
         // SYMBOL_VAR, SYMBOL_VAL
         struct
         {
-            bool is_global;
-            bool is_const; // true for val
+            bool  is_global;
+            bool  is_const; // true for val
             char *mangled_name;
         } var;
 
         // SYMBOL_FUNC
         struct
         {
-            bool is_external;
-            bool is_defined; // false for forward declarations
-            bool uses_mach_varargs; // true when Mach compiler handles variadics (vs C ABI)
-            char *extern_name;      // c-level symbol name for externs (defaults to mach name)
-            char *convention;       // calling convention hint (e.g. "C")
-            char *mangled_name;     // cached mangled name for codegen
-            bool  is_generic;
-            size_t generic_param_count;
-            char **generic_param_names;
+            bool                   is_external;
+            bool                   is_defined;        // false for forward declarations
+            bool                   uses_mach_varargs; // true when Mach compiler handles variadics (vs C ABI)
+            char                  *extern_name;       // c-level symbol name for externs (defaults to mach name)
+            char                  *convention;        // calling convention hint (e.g. "C")
+            char                  *mangled_name;      // cached mangled name for codegen
+            bool                   is_generic;
+            size_t                 generic_param_count;
+            char                 **generic_param_names;
             GenericSpecialization *generic_specializations;
-            bool  is_specialized_instance;
+            bool                   is_specialized_instance;
         } func;
 
         // SYMBOL_TYPE
         struct
         {
-            bool is_alias;
-            bool is_generic;
-            size_t generic_param_count;
-            char **generic_param_names;
+            bool                   is_alias;
+            bool                   is_generic;
+            size_t                 generic_param_count;
+            char                 **generic_param_names;
             GenericSpecialization *generic_specializations;
-            bool is_specialized_instance;
+            bool                   is_specialized_instance;
         } type_def;
 
         // SYMBOL_FIELD

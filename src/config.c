@@ -7,6 +7,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#include <windows.h>
+#define mkdir(p, m) _mkdir(p)
+#endif
+
 // simple toml parser for configuration
 typedef struct TomlParser
 {
@@ -300,8 +306,8 @@ TargetConfig *target_config_create(const char *name, const char *target_triple)
 void config_init(ProjectConfig *config)
 {
     memset(config, 0, sizeof(ProjectConfig));
-    config->module_aliases       = NULL;
-    config->module_alias_count   = 0;
+    config->module_aliases        = NULL;
+    config->module_alias_count    = 0;
     config->module_alias_capacity = 0;
 }
 

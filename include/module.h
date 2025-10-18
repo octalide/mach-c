@@ -15,9 +15,9 @@ typedef struct SymbolTable SymbolTable;
 // represents a loaded module
 struct Module
 {
-    char        *name;            // module name
-    char        *file_path;       // absolute file path
-    char        *object_path;     // compiled object file path
+    char        *name;          // module name
+    char        *file_path;     // absolute file path
+    char        *object_path;   // compiled object file path
     AstNode     *ast;           // parsed AST
     SymbolTable *symbols;       // module's symbol table
     bool         is_parsed;     // parsing complete
@@ -45,17 +45,17 @@ typedef struct ModuleErrorList
 // manages module loading and dependency resolution
 struct ModuleManager
 {
-    Module        **modules;      // hash table of loaded modules
-    int             capacity;     // hash table size
-    int             count;        // number of loaded modules
-    char          **search_paths; // directories to search for modules
-    int             search_count; // number of search paths
+    Module **modules;      // hash table of loaded modules
+    int      capacity;     // hash table size
+    int      count;        // number of loaded modules
+    char   **search_paths; // directories to search for modules
+    int      search_count; // number of search paths
     // simple alias map for config-less resolution: name -> base directory
     char          **alias_names;
     char          **alias_paths;
     int             alias_count;
-    ModuleErrorList errors;       // accumulated errors during loading
-    bool            had_error;    // true if any module failed to load/parse
+    ModuleErrorList errors;    // accumulated errors during loading
+    bool            had_error; // true if any module failed to load/parse
 
     // configuration for dependency resolution
     void       *config;      // ProjectConfig* (void* to avoid circular includes)
@@ -70,9 +70,9 @@ void module_manager_init(ModuleManager *manager);
 void module_manager_dnit(ModuleManager *manager);
 
 // search path management
-void module_manager_add_search_path(ModuleManager *manager, const char *path);
-void module_manager_add_alias(ModuleManager *manager, const char *name, const char *base_dir);
-void module_manager_set_config(ModuleManager *manager, void *config, const char *project_dir);
+void   module_manager_add_search_path(ModuleManager *manager, const char *path);
+void   module_manager_add_alias(ModuleManager *manager, const char *name, const char *base_dir);
+void   module_manager_set_config(ModuleManager *manager, void *config, const char *project_dir);
 size_t module_manager_collect_constants(ModuleManager *manager, PreprocessorConstant *out, size_t max_count);
 
 // module loading

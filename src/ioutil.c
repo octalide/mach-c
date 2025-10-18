@@ -1,15 +1,17 @@
 #include "ioutil.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
+#include <direct.h>
 #include <windows.h>
+#define mkdir(p, m) _mkdir(p)
 #else
-#include <sys/stat.h>
-#include <unistd.h>
 #include <dirent.h>
+#include <unistd.h>
 #endif
 
 bool is_directory(char *path)
@@ -68,7 +70,7 @@ char *path_dirname(char *path)
         return ".";
     }
 
-    int len = last_slash - path;
+    int   len     = last_slash - path;
     char *dirname = malloc(len + 1);
     strncpy(dirname, path, len);
     dirname[len] = '\0';
@@ -93,8 +95,8 @@ char *path_lastname(char *path)
 
 char *path_join(char *a, char *b)
 {
-    int len_a = strlen(a);
-    int len_b = strlen(b);
+    int   len_a  = strlen(a);
+    int   len_b  = strlen(b);
     char *joined = malloc(len_a + len_b + 2);
     strcpy(joined, a);
 
@@ -153,6 +155,30 @@ char *path_get_extension(char *path)
     return last_dot + 1;
 }
 
+char *get_full_path(const char *path)
+{
+    char resolved[PATH_MAX];
+#ifdef _WIN32
+    DWORD len = GetFullPathNameA(path, PATH_MAX, resolved, NULL);
+    if (len == 0 || len >= PATH_MAX)
+        return _strdup(path);
+    return _strdup(resolved);
+#else
+    if (realpath(path, resolved))
+        return strdup(resolved);
+    return strdup(path);
+#endif
+}
+
+void ensure_dir(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+        return;
+
+    mkdir(path, 0777);
+}
+
 char *read_file(char *path)
 {
     FILE *file = fopen(path, "r");
@@ -176,16 +202,16 @@ char *read_file(char *path)
 char **list_files(char *path)
 {
     char **file_list = NULL;
-    int count = 0;
+    int    count     = 0;
 
 #ifdef _WIN32
     WIN32_FIND_DATAW find_file_data;
-    HANDLE h_find = INVALID_HANDLE_VALUE;
-    wchar_t search_path[MAX_PATH];
+    HANDLE           h_find = INVALID_HANDLE_VALUE;
+    wchar_t          search_path[MAX_PATH];
 
     // Convert the input path to a wide character string
-    size_t path_len = strlen(path) + 1;
-    wchar_t *wpath = malloc(path_len * sizeof(wchar_t));
+    size_t   path_len = strlen(path) + 1;
+    wchar_t *wpath    = malloc(path_len * sizeof(wchar_t));
     mbstowcs(wpath, path, path_len);
 
     // Append the wildcard to the path
@@ -194,23 +220,28 @@ char **list_files(char *path)
 
     h_find = FindFirstFileW(search_path, &find_file_data);
 
-    if (h_find == INVALID_HANDLE_VALUE) {
+    if (h_find == INVALID_HANDLE_VALUE)
+    {
         fprintf(stderr, "FindFirstFileW failed with error code %lu\n", GetLastError());
         return NULL;
     }
 
-    do {
-        if (wcscmp(find_file_data.cFileName, L".") != 0 && wcscmp(find_file_data.cFileName, L"..") != 0) {
+    do
+    {
+        if (wcscmp(find_file_data.cFileName, L".") != 0 && wcscmp(find_file_data.cFileName, L"..") != 0)
+        {
             file_list = realloc(file_list, sizeof(char *) * (count + 1));
-            if (file_list == NULL) {
+            if (file_list == NULL)
+            {
                 perror("realloc");
                 FindClose(h_find);
                 return NULL;
             }
 
-            size_t len = wcslen(find_file_data.cFileName) + 1;
+            size_t len       = wcslen(find_file_data.cFileName) + 1;
             file_list[count] = malloc(len * sizeof(char));
-            if (file_list[count] == NULL) {
+            if (file_list[count] == NULL)
+            {
                 perror("malloc");
                 FindClose(h_find);
                 return NULL;
@@ -224,9 +255,11 @@ char **list_files(char *path)
 
     FindClose(h_find);
 
-    if (GetLastError() != ERROR_NO_MORE_FILES) {
+    if (GetLastError() != ERROR_NO_MORE_FILES)
+    {
         fprintf(stderr, "FindNextFileW failed with error code %lu\n", GetLastError());
-        for (int i = 0; i < count; i++) {
+        for (int i = 0; i < count; i++)
+        {
             free(file_list[i]);
         }
         free(file_list);
@@ -234,7 +267,7 @@ char **list_files(char *path)
     }
 
 #else
-    DIR *dir;
+    DIR           *dir;
     struct dirent *entry;
 
     dir = opendir(path);
@@ -286,30 +319,37 @@ char **list_files_recursive(char *path, char **file_list, int count)
 {
 #ifdef _WIN32
     WIN32_FIND_DATAA find_file_data;
-    HANDLE h_find = NULL;
-    char search_path[MAX_PATH];
+    HANDLE           h_find = NULL;
+    char             search_path[MAX_PATH];
 
     snprintf(search_path, MAX_PATH, "%s\\*", path);
 
     h_find = FindFirstFileA(search_path, &find_file_data);
-    if (h_find == INVALID_HANDLE_VALUE) {
+    if (h_find == INVALID_HANDLE_VALUE)
+    {
         fprintf(stderr, "FindFirstFile failed with error code %lu\n", GetLastError());
         return NULL;
     }
 
-    do {
-        if (strcmp(find_file_data.cFileName, ".") != 0 && strcmp(find_file_data.cFileName, "..") != 0) {
+    do
+    {
+        if (strcmp(find_file_data.cFileName, ".") != 0 && strcmp(find_file_data.cFileName, "..") != 0)
+        {
             char *full_path = path_join(path, find_file_data.cFileName);
-            if (is_directory(full_path)) {
+            if (is_directory(full_path))
+            {
                 char **subdir_files = list_files_recursive(full_path, NULL, 0);
-                if (subdir_files == NULL) {
+                if (subdir_files == NULL)
+                {
                     FindClose(h_find);
                     return NULL;
                 }
 
-                for (int i = 0; subdir_files[i] != NULL; i++) {
+                for (int i = 0; subdir_files[i] != NULL; i++)
+                {
                     file_list = realloc(file_list, sizeof(char *) * (count + 1));
-                    if (file_list == NULL) {
+                    if (file_list == NULL)
+                    {
                         perror("realloc");
                         FindClose(h_find);
                         return NULL;
@@ -320,16 +360,20 @@ char **list_files_recursive(char *path, char **file_list, int count)
                     file_list[count] = full_subdir_path;
                     count++;
                 }
-            } else {
+            }
+            else
+            {
                 file_list = realloc(file_list, sizeof(char *) * (count + 1));
-                if (file_list == NULL) {
+                if (file_list == NULL)
+                {
                     perror("realloc");
                     FindClose(h_find);
                     return NULL;
                 }
 
                 file_list[count] = strdup(find_file_data.cFileName);
-                if (file_list[count] == NULL) {
+                if (file_list[count] == NULL)
+                {
                     perror("strdup");
                     FindClose(h_find);
                     return NULL;
@@ -344,9 +388,11 @@ char **list_files_recursive(char *path, char **file_list, int count)
 
     FindClose(h_find);
 
-    if (GetLastError() != ERROR_NO_MORE_FILES) {
+    if (GetLastError() != ERROR_NO_MORE_FILES)
+    {
         fprintf(stderr, "FindNextFileW failed with error code %lu\n", GetLastError());
-        for (int i = 0; i < count; i++) {
+        for (int i = 0; i < count; i++)
+        {
             free(file_list[i]);
         }
         free(file_list);
@@ -354,7 +400,7 @@ char **list_files_recursive(char *path, char **file_list, int count)
     }
 
 #else
-    DIR *dir;
+    DIR           *dir;
     struct dirent *entry;
 
     dir = opendir(path);

@@ -39,12 +39,12 @@ typedef enum InstantiationKind
 
 typedef struct InstantiationRequest
 {
-    InstantiationKind kind;
-    Symbol           *generic_symbol;
-    Type            **type_args;
-    size_t            type_arg_count;
-    AstNode          *call_site;
-    char             *unique_id;
+    InstantiationKind            kind;
+    Symbol                      *generic_symbol;
+    Type                       **type_args;
+    size_t                       type_arg_count;
+    AstNode                     *call_site;
+    char                        *unique_id;
     struct InstantiationRequest *next;
 } InstantiationRequest;
 
@@ -57,19 +57,19 @@ typedef struct InstantiationQueue
 
 typedef struct SemanticAnalyzer
 {
-    SymbolTable            symbol_table;
-    ModuleManager          module_manager;
-    SemanticErrorList      errors;
-    AstNode               *current_function;
-    AstNode               *program_root;
-    int                    loop_depth;
-    bool                   has_errors;
-    bool                   has_fatal_error;
-    const char            *current_module_name;
-    GenericBinding        *generic_bindings;
-    size_t                 generic_binding_count;
-    size_t                 generic_binding_capacity;
-    InstantiationQueue     instantiation_queue;
+    SymbolTable        symbol_table;
+    ModuleManager      module_manager;
+    SemanticErrorList  errors;
+    AstNode           *current_function;
+    AstNode           *program_root;
+    int                loop_depth;
+    bool               has_errors;
+    bool               has_fatal_error;
+    const char        *current_module_name;
+    GenericBinding    *generic_bindings;
+    size_t             generic_binding_count;
+    size_t             generic_binding_capacity;
+    InstantiationQueue instantiation_queue;
 } SemanticAnalyzer;
 
 // semantic analyzer operations

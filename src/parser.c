@@ -62,8 +62,8 @@ static char *parser_take_pending_mangle(Parser *parser)
         return NULL;
     }
 
-    char *value             = parser->pending_mangle;
-    parser->pending_mangle  = NULL;
+    char *value            = parser->pending_mangle;
+    parser->pending_mangle = NULL;
     return value;
 }
 
@@ -149,12 +149,24 @@ static void parser_handle_comment(Parser *parser, Token *token)
                 char esc = *cursor++;
                 switch (esc)
                 {
-                case 'n': ch = '\n'; break;
-                case 'r': ch = '\r'; break;
-                case 't': ch = '\t'; break;
-                case '\\': ch = '\\'; break;
-                case '"': ch = '"'; break;
-                default: ch = esc; break;
+                case 'n':
+                    ch = '\n';
+                    break;
+                case 'r':
+                    ch = '\r';
+                    break;
+                case 't':
+                    ch = '\t';
+                    break;
+                case '\\':
+                    ch = '\\';
+                    break;
+                case '"':
+                    ch = '"';
+                    break;
+                default:
+                    ch = esc;
+                    break;
                 }
             }
 
@@ -229,18 +241,18 @@ static void parser_handle_comment(Parser *parser, Token *token)
 // forward for asm stmt
 static AstNode *parser_parse_stmt_asm(Parser *parser);
 
-static bool parser_should_parse_type_args(Parser *parser);
+static bool     parser_should_parse_type_args(Parser *parser);
 static AstList *parser_parse_type_arguments(Parser *parser);
 static AstList *parser_parse_generic_param_list(Parser *parser);
 
 // parser lifecycle
 void parser_init(Parser *parser, Lexer *lexer)
 {
-    parser->lexer      = lexer;
-    parser->current    = NULL;
-    parser->previous   = NULL;
-    parser->panic_mode = false;
-    parser->had_error  = false;
+    parser->lexer          = lexer;
+    parser->current        = NULL;
+    parser->previous       = NULL;
+    parser->panic_mode     = false;
+    parser->had_error      = false;
     parser->pending_mangle = NULL;
     parser_error_list_init(&parser->errors);
 
@@ -906,7 +918,7 @@ AstNode *parser_parse_stmt_use(Parser *parser)
 
     if (parser_match(parser, TOKEN_COLON))
     {
-        alias = first;
+        alias      = first;
         char *head = parser_parse_identifier(parser);
         if (!head)
         {
@@ -1121,7 +1133,7 @@ static AstNode *parser_parse_var_decl(Parser *parser, bool is_val, bool is_publi
 
     node->var_stmt.is_val    = is_val;
     node->var_stmt.is_public = is_public;
-    node->var_stmt.name   = parser_parse_identifier(parser);
+    node->var_stmt.name      = parser_parse_identifier(parser);
     if (!node->var_stmt.name)
     {
         parser_error_at_current(parser, "expected identifier after keyword");
@@ -1839,12 +1851,12 @@ static AstNode *parser_parse_stmt_asm(Parser *parser)
         return NULL;
     }
 
-    Token       *open_token = parser->current;
-    const char  *source     = parser->lexer->source;
-    int          source_len = (int)strlen(source);
-    int          start_pos  = open_token->pos + open_token->len;
-    int          pos        = start_pos;
-    int          depth      = 1;
+    Token      *open_token = parser->current;
+    const char *source     = parser->lexer->source;
+    int         source_len = (int)strlen(source);
+    int         start_pos  = open_token->pos + open_token->len;
+    int         pos        = start_pos;
+    int         depth      = 1;
 
     while (pos < source_len && depth > 0)
     {
@@ -2857,8 +2869,8 @@ AstList *parser_parse_parameter_list(Parser *parser)
             return NULL;
         }
 
-    param->param_stmt.type        = parser_parse_type(parser);
-    param->param_stmt.is_variadic = false;
+        param->param_stmt.type        = parser_parse_type(parser);
+        param->param_stmt.is_variadic = false;
         if (!param->param_stmt.type)
         {
             ast_node_dnit(param);

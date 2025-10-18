@@ -503,13 +503,27 @@ char *lexer_eval_lit_string(Lexer *lexer, Token *token)
             char e = lexer->source[token->pos + 1 + i + 1];
             switch (e)
             {
-            case '\'': value[j++] = '\''; break;
-            case '"':  value[j++] = '"';  break;
-            case '\\': value[j++] = '\\'; break;
-            case 'n':   value[j++] = '\n'; break;
-            case 't':   value[j++] = '\t'; break;
-            case 'r':   value[j++] = '\r'; break;
-            case '0':   value[j++] = '\0'; break;
+            case '\'':
+                value[j++] = '\'';
+                break;
+            case '"':
+                value[j++] = '"';
+                break;
+            case '\\':
+                value[j++] = '\\';
+                break;
+            case 'n':
+                value[j++] = '\n';
+                break;
+            case 't':
+                value[j++] = '\t';
+                break;
+            case 'r':
+                value[j++] = '\r';
+                break;
+            case '0':
+                value[j++] = '\0';
+                break;
             default:
                 // unknown escape: preserve as-is (common behavior)
                 value[j++] = e;

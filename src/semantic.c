@@ -11,31 +11,44 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+FILE *fmemopen(void *buf, size_t size, const char *mode)
+{
+    FILE *f = tmpfile();
+    if (!f)
+        return NULL;
+    if (strchr(mode, 'w') == NULL && buf && size > 0)
+        fwrite(buf, 1, size, f);
+    rewind(f);
+    return f;
+}
+#endif
+
 // forward declarations
-static Type *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNode *expr, Type *specified_type, Type *resolved_type);
-static Type *semantic_analyze_null_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
-static bool semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-static bool semantic_register_generic_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-static bool semantic_register_generic_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node);
-static Type *semantic_lookup_generic_binding(SemanticAnalyzer *analyzer, const char *name);
-static bool semantic_push_generic_binding(SemanticAnalyzer *analyzer, const char *name, Type *type);
-static void semantic_pop_generic_bindings(SemanticAnalyzer *analyzer, size_t count);
+static Type   *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNode *expr, Type *specified_type, Type *resolved_type);
+static Type   *semantic_analyze_null_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
+static bool    semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+static bool    semantic_register_generic_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+static bool    semantic_register_generic_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+static Type   *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node);
+static Type   *semantic_lookup_generic_binding(SemanticAnalyzer *analyzer, const char *name);
+static bool    semantic_push_generic_binding(SemanticAnalyzer *analyzer, const char *name, Type *type);
+static void    semantic_pop_generic_bindings(SemanticAnalyzer *analyzer, size_t count);
 static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
 static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
 static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
 
-static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count);
+static char   *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count);
 static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count);
-static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count);
+static void    semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count);
 
-static void instantiation_queue_init(InstantiationQueue *queue);
-static void instantiation_queue_dnit(InstantiationQueue *queue);
-static char *instantiation_request_create_id(Symbol *generic_symbol, Type **type_args, size_t type_arg_count);
-static bool instantiation_queue_contains(InstantiationQueue *queue, const char *unique_id);
-static bool instantiation_queue_enqueue(InstantiationQueue *queue, InstantiationKind kind, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, AstNode *call_site);
+static void                  instantiation_queue_init(InstantiationQueue *queue);
+static void                  instantiation_queue_dnit(InstantiationQueue *queue);
+static char                 *instantiation_request_create_id(Symbol *generic_symbol, Type **type_args, size_t type_arg_count);
+static bool                  instantiation_queue_contains(InstantiationQueue *queue, const char *unique_id);
+static bool                  instantiation_queue_enqueue(InstantiationQueue *queue, InstantiationKind kind, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, AstNode *call_site);
 static InstantiationRequest *instantiation_queue_dequeue(InstantiationQueue *queue);
-static void instantiation_request_destroy(InstantiationRequest *req);
+static void                  instantiation_request_destroy(InstantiationRequest *req);
 
 static Module *semantic_find_module_for_scope(ModuleManager *manager, Scope *scope);
 static Symbol *semantic_generic_origin(Symbol *symbol)
@@ -84,9 +97,9 @@ static char *semantic_build_export_name(const char *module_name, const char *sym
     if (!symbol_name || !symbol_name[0])
         return NULL;
 
-    const char *module = (module_name && module_name[0]) ? module_name : NULL;
-    size_t       module_len = module ? strlen(module) : 0;
-    size_t       symbol_len = strlen(symbol_name);
+    const char *module     = (module_name && module_name[0]) ? module_name : NULL;
+    size_t      module_len = module ? strlen(module) : 0;
+    size_t      symbol_len = strlen(symbol_name);
 
     size_t total = module_len ? (module_len + 2 + symbol_len) : symbol_len;
     char  *out   = malloc(total + 1);
@@ -143,15 +156,15 @@ static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module
         clone->var.mangled_name = source->var.mangled_name ? strdup(source->var.mangled_name) : NULL;
         break;
     case SYMBOL_FUNC:
-        clone->func.is_external            = source->func.is_external;
-        clone->func.is_defined             = source->func.is_defined;
-        clone->func.uses_mach_varargs      = source->func.uses_mach_varargs;
-        clone->func.extern_name            = source->func.extern_name ? strdup(source->func.extern_name) : NULL;
-        clone->func.convention             = source->func.convention ? strdup(source->func.convention) : NULL;
-        clone->func.mangled_name           = source->func.mangled_name ? strdup(source->func.mangled_name) : NULL;
+        clone->func.is_external       = source->func.is_external;
+        clone->func.is_defined        = source->func.is_defined;
+        clone->func.uses_mach_varargs = source->func.uses_mach_varargs;
+        clone->func.extern_name       = source->func.extern_name ? strdup(source->func.extern_name) : NULL;
+        clone->func.convention        = source->func.convention ? strdup(source->func.convention) : NULL;
+        clone->func.mangled_name      = source->func.mangled_name ? strdup(source->func.mangled_name) : NULL;
         // preserve generic information for imported generics
-        clone->func.is_generic             = source->func.is_generic;
-        clone->func.generic_param_count    = source->func.generic_param_count;
+        clone->func.is_generic          = source->func.is_generic;
+        clone->func.generic_param_count = source->func.generic_param_count;
         if (source->func.generic_param_count > 0 && source->func.generic_param_names)
         {
             clone->func.generic_param_names = malloc(sizeof(char *) * source->func.generic_param_count);
@@ -166,7 +179,7 @@ static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module
             {
                 // allocation failed, mark as non-generic
                 clone->func.generic_param_count = 0;
-                clone->func.is_generic = false;
+                clone->func.is_generic          = false;
             }
         }
         else
@@ -301,14 +314,14 @@ void semantic_analyzer_init(SemanticAnalyzer *analyzer)
     symbol_table_init(&analyzer->symbol_table);
     module_manager_init(&analyzer->module_manager);
     semantic_error_list_init(&analyzer->errors);
-    analyzer->current_function = NULL;
-    analyzer->program_root     = NULL;
-    analyzer->loop_depth       = 0;
-    analyzer->has_errors       = false;
-    analyzer->has_fatal_error  = false;
-    analyzer->current_module_name = NULL;
-    analyzer->generic_bindings        = NULL;
-    analyzer->generic_binding_count   = 0;
+    analyzer->current_function         = NULL;
+    analyzer->program_root             = NULL;
+    analyzer->loop_depth               = 0;
+    analyzer->has_errors               = false;
+    analyzer->has_fatal_error          = false;
+    analyzer->current_module_name      = NULL;
+    analyzer->generic_bindings         = NULL;
+    analyzer->generic_binding_count    = 0;
     analyzer->generic_binding_capacity = 0;
     instantiation_queue_init(&analyzer->instantiation_queue);
 }
@@ -321,8 +334,8 @@ void semantic_analyzer_dnit(SemanticAnalyzer *analyzer)
     analyzer->current_module_name = NULL;
     analyzer->program_root        = NULL;
     free(analyzer->generic_bindings);
-    analyzer->generic_bindings        = NULL;
-    analyzer->generic_binding_count   = 0;
+    analyzer->generic_bindings         = NULL;
+    analyzer->generic_binding_count    = 0;
     analyzer->generic_binding_capacity = 0;
     instantiation_queue_dnit(&analyzer->instantiation_queue);
 }
@@ -399,11 +412,11 @@ static bool semantic_push_generic_binding(SemanticAnalyzer *analyzer, const char
 
     if (analyzer->generic_binding_count >= analyzer->generic_binding_capacity)
     {
-        size_t new_capacity = analyzer->generic_binding_capacity ? analyzer->generic_binding_capacity * 2 : 8;
+        size_t          new_capacity = analyzer->generic_binding_capacity ? analyzer->generic_binding_capacity * 2 : 8;
         GenericBinding *new_bindings = realloc(analyzer->generic_bindings, new_capacity * sizeof(GenericBinding));
         if (!new_bindings)
             return false;
-        analyzer->generic_bindings        = new_bindings;
+        analyzer->generic_bindings         = new_bindings;
         analyzer->generic_binding_capacity = new_capacity;
     }
 
@@ -601,7 +614,10 @@ static char *semantic_sanitize_type_token(const char *input)
         {
             out[j++] = 'a';
         }
-        else if (c == '.'){ out[j++] = '_'; }
+        else if (c == '.')
+        {
+            out[j++] = '_';
+        }
         else
         {
             out[j++] = '_';
@@ -620,7 +636,7 @@ static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **typ
     const char *base_name = generic_symbol->name ? generic_symbol->name : "fun";
     size_t      base_len  = strlen(base_name);
 
-    char **parts = NULL;
+    char **parts     = NULL;
     size_t total_len = base_len;
 
     if (arg_count > 0)
@@ -647,7 +663,7 @@ static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **typ
                 free(parts);
                 return NULL;
             }
-            parts[i]   = sanitized;
+            parts[i] = sanitized;
             total_len += 1 + strlen(sanitized);
         }
     }
@@ -739,9 +755,9 @@ static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbo
     if (!spec)
         return;
 
-    spec->arg_count = arg_count;
+    spec->arg_count      = arg_count;
     spec->generic_symbol = origin;
-    spec->symbol    = specialized_symbol;
+    spec->symbol         = specialized_symbol;
 
     if (arg_count > 0)
     {
@@ -763,12 +779,12 @@ static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbo
 
     if (origin->kind == SYMBOL_FUNC)
     {
-        spec->next = origin->func.generic_specializations;
+        spec->next                           = origin->func.generic_specializations;
         origin->func.generic_specializations = spec;
     }
     else if (origin->kind == SYMBOL_TYPE)
     {
-        spec->next = origin->type_def.generic_specializations;
+        spec->next                               = origin->type_def.generic_specializations;
         origin->type_def.generic_specializations = spec;
     }
     else
@@ -783,10 +799,10 @@ static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyz
     if (!analyzer || !request || !request->generic_symbol)
         return NULL;
 
-    Symbol *generic_symbol = request->generic_symbol;
-    Type  **type_args      = request->type_args;
-    size_t  type_arg_count = request->type_arg_count;
-    AstNode *call_site     = request->call_site;
+    Symbol  *generic_symbol = request->generic_symbol;
+    Type   **type_args      = request->type_args;
+    size_t   type_arg_count = request->type_arg_count;
+    AstNode *call_site      = request->call_site;
 
     Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, type_arg_count);
     if (existing)
@@ -864,7 +880,7 @@ static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyz
             module_scope = module_scope->parent;
         if (module_scope)
         {
-            origin_module = semantic_find_module_for_scope(&analyzer->module_manager, module_scope);
+            origin_module                       = semantic_find_module_for_scope(&analyzer->module_manager, module_scope);
             analyzer->symbol_table.module_scope = module_scope;
         }
 
@@ -883,7 +899,7 @@ static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyz
         import_module = module_manager_find_module(&analyzer->module_manager, generic_symbol->import_module);
         if (import_module && import_module->symbols)
         {
-            home_scope = import_module->symbols->module_scope ? import_module->symbols->module_scope : import_module->symbols->global_scope;
+            home_scope                           = import_module->symbols->module_scope ? import_module->symbols->module_scope : import_module->symbols->global_scope;
             analyzer->symbol_table.current_scope = home_scope ? home_scope : analyzer->symbol_table.current_scope;
             if (home_scope)
             {
@@ -974,10 +990,10 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
     if (!analyzer || !request || !request->generic_symbol)
         return NULL;
 
-    Symbol *generic_symbol = request->generic_symbol;
-    Type  **type_args      = request->type_args;
-    size_t  type_arg_count = request->type_arg_count;
-    AstNode *call_site     = request->call_site;
+    Symbol  *generic_symbol = request->generic_symbol;
+    Type   **type_args      = request->type_args;
+    size_t   type_arg_count = request->type_arg_count;
+    AstNode *call_site      = request->call_site;
 
     Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, type_arg_count);
     if (existing)
@@ -1098,8 +1114,8 @@ static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer
     }
 
     clone->symbol->type_def.is_specialized_instance = true;
-    clone->symbol->type_def.is_generic = false;
-    clone->symbol->type_def.generic_param_count = 0;
+    clone->symbol->type_def.is_generic              = false;
+    clone->symbol->type_def.generic_param_count     = 0;
 
     semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
 
@@ -1115,10 +1131,10 @@ static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer 
     if (!analyzer || !request || !request->generic_symbol)
         return NULL;
 
-    Symbol *generic_symbol = request->generic_symbol;
-    Type  **type_args      = request->type_args;
-    size_t  type_arg_count = request->type_arg_count;
-    AstNode *call_site     = request->call_site;
+    Symbol  *generic_symbol = request->generic_symbol;
+    Type   **type_args      = request->type_args;
+    size_t   type_arg_count = request->type_arg_count;
+    AstNode *call_site      = request->call_site;
 
     Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, type_arg_count);
     if (existing)
@@ -1229,8 +1245,8 @@ static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer 
     }
 
     clone->symbol->type_def.is_specialized_instance = true;
-    clone->symbol->type_def.is_generic = false;
-    clone->symbol->type_def.generic_param_count = 0;
+    clone->symbol->type_def.is_generic              = false;
+    clone->symbol->type_def.generic_param_count     = 0;
 
     semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
 
@@ -1418,6 +1434,20 @@ Type *semantic_analyze_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr,
     }
 }
 
+// helper function to print a type to an output buf instead of directly to stdout
+void type_print_to(Type *type, FILE *out)
+{
+    if (!out)
+        return;
+
+    char *str = type_to_string(type);
+    if (str)
+    {
+        fprintf(out, "%s", str);
+        free(str);
+    }
+}
+
 // helper function to format type names for error messages
 static void format_type_name(Type *type, char *buffer, size_t buffer_size)
 {
@@ -1431,12 +1461,10 @@ static void format_type_name(Type *type, char *buffer, size_t buffer_size)
     FILE *tmp = fmemopen(buffer, buffer_size - 1, "w");
     if (tmp)
     {
-        FILE *old_stdout = stdout;
-        stdout           = tmp;
-        type_print(type);
-        stdout = old_stdout;
+        type_print_to(type, tmp);
         fclose(tmp);
-        buffer[buffer_size - 1] = '\0'; // ensure null termination
+
+        buffer[buffer_size - 1] = '\0';
     }
     else
     {
@@ -1486,8 +1514,7 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
 
             if (provided_count != expected_count)
             {
-                semantic_error(analyzer, type_node, "generic type '%s' expects %zu type arguments (got %zu)", 
-                    type_node->type_name.name, expected_count, provided_count);
+                semantic_error(analyzer, type_node, "generic type '%s' expects %zu type arguments (got %zu)", type_node->type_name.name, expected_count, provided_count);
                 return NULL;
             }
 
@@ -1514,16 +1541,14 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
             if (!existing)
             {
                 // instantiate immediately - types are needed synchronously for variables
-                InstantiationRequest request = {
-                    .kind = (type_symbol->type->kind == TYPE_STRUCT) ? INSTANTIATION_STRUCT : INSTANTIATION_UNION,
-                    .generic_symbol = type_symbol,
-                    .type_args = type_args,
-                    .type_arg_count = expected_count,
-                    .call_site = type_node,
-                    .unique_id = NULL,
-                    .next = NULL
-                };
-                
+                InstantiationRequest request = {.kind           = (type_symbol->type->kind == TYPE_STRUCT) ? INSTANTIATION_STRUCT : INSTANTIATION_UNION,
+                                                .generic_symbol = type_symbol,
+                                                .type_args      = type_args,
+                                                .type_arg_count = expected_count,
+                                                .call_site      = type_node,
+                                                .unique_id      = NULL,
+                                                .next           = NULL};
+
                 if (request.kind == INSTANTIATION_STRUCT)
                 {
                     existing = semantic_instantiate_generic_struct_from_request(analyzer, &request);
@@ -1532,7 +1557,7 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
                 {
                     existing = semantic_instantiate_generic_union_from_request(analyzer, &request);
                 }
-                
+
                 if (!existing)
                 {
                     free(type_args);
@@ -1562,7 +1587,7 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
         Type *base = resolve_type(analyzer, type_node->type_ptr.base);
         if (!base)
             return NULL;
-        Type *ptr_type = type_pointer_create(base);
+        Type *ptr_type  = type_pointer_create(base);
         type_node->type = ptr_type;
         return ptr_type;
     }
@@ -1575,7 +1600,7 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
             return NULL;
         }
         Type *array_type = type_array_create(elem_type);
-        type_node->type = array_type;
+        type_node->type  = array_type;
         return array_type;
     }
     case AST_TYPE_FUN:
@@ -1652,7 +1677,7 @@ static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
 
 static bool semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    const char *name = stmt->fun_stmt.name;
+    const char *name          = stmt->fun_stmt.name;
     size_t      generic_count = stmt->fun_stmt.generics ? (size_t)stmt->fun_stmt.generics->count : 0;
 
     Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
@@ -1687,8 +1712,8 @@ static bool semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNo
         return true;
     }
 
-    Type *placeholder_type = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
-    Symbol *symbol         = symbol_create(SYMBOL_FUNC, name, placeholder_type, stmt);
+    Type   *placeholder_type             = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
+    Symbol *symbol                       = symbol_create(SYMBOL_FUNC, name, placeholder_type, stmt);
     symbol->func.is_external             = false;
     symbol->func.is_defined              = (stmt->fun_stmt.body != NULL);
     symbol->func.uses_mach_varargs       = stmt->fun_stmt.is_variadic;
@@ -1737,7 +1762,7 @@ static bool semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNo
 
 static bool semantic_register_generic_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    const char *name = stmt->str_stmt.name;
+    const char *name          = stmt->str_stmt.name;
     size_t      generic_count = stmt->str_stmt.generics ? (size_t)stmt->str_stmt.generics->count : 0;
 
     Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
@@ -1747,11 +1772,11 @@ static bool semantic_register_generic_str_stmt(SemanticAnalyzer *analyzer, AstNo
         return false;
     }
 
-    Type   *struct_type   = type_struct_create(name);
-    Symbol *struct_symbol = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
-    struct_symbol->type_def.is_alias = false;
-    struct_symbol->type_def.is_generic = true;
-    struct_symbol->type_def.generic_param_count = generic_count;
+    Type   *struct_type                             = type_struct_create(name);
+    Symbol *struct_symbol                           = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
+    struct_symbol->type_def.is_alias                = false;
+    struct_symbol->type_def.is_generic              = true;
+    struct_symbol->type_def.generic_param_count     = generic_count;
     struct_symbol->type_def.generic_specializations = NULL;
     struct_symbol->type_def.is_specialized_instance = false;
 
@@ -1796,7 +1821,7 @@ static bool semantic_register_generic_str_stmt(SemanticAnalyzer *analyzer, AstNo
 
 static bool semantic_register_generic_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 {
-    const char *name = stmt->uni_stmt.name;
+    const char *name          = stmt->uni_stmt.name;
     size_t      generic_count = stmt->uni_stmt.generics ? (size_t)stmt->uni_stmt.generics->count : 0;
 
     Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
@@ -1806,11 +1831,11 @@ static bool semantic_register_generic_uni_stmt(SemanticAnalyzer *analyzer, AstNo
         return false;
     }
 
-    Type   *union_type   = type_union_create(name);
-    Symbol *union_symbol = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
-    union_symbol->type_def.is_alias = false;
-    union_symbol->type_def.is_generic = true;
-    union_symbol->type_def.generic_param_count = generic_count;
+    Type   *union_type                             = type_union_create(name);
+    Symbol *union_symbol                           = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
+    union_symbol->type_def.is_alias                = false;
+    union_symbol->type_def.is_generic              = true;
+    union_symbol->type_def.generic_param_count     = generic_count;
     union_symbol->type_def.generic_specializations = NULL;
     union_symbol->type_def.is_specialized_instance = false;
 
@@ -1915,7 +1940,7 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
 
     if (module_path)
     {
-        raw_path = strdup(module_path);
+        raw_path                 = strdup(module_path);
         ProjectConfig *pc        = (ProjectConfig *)analyzer->module_manager.config;
         char          *canonical = config_expand_module_path(pc, module_path);
         if (!canonical)
@@ -1957,10 +1982,10 @@ bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
             semantic_mark_fatal(analyzer);
             return false;
         }
-        module_symbol->is_imported                = true;
-        module_symbol->import_module              = module->name;
-        module_symbol->module.scope->parent       = analyzer->symbol_table.current_scope;
-        module_symbol->module.scope->is_module    = true;
+        module_symbol->is_imported             = true;
+        module_symbol->import_module           = module->name;
+        module_symbol->module.scope->parent    = analyzer->symbol_table.current_scope;
+        module_symbol->module.scope->is_module = true;
         symbol_add(analyzer->symbol_table.current_scope, module_symbol);
         stmt->symbol = module_symbol;
     }
@@ -2000,8 +2025,8 @@ static bool semantic_import_public_symbols(SemanticAnalyzer *analyzer, Module *m
             alias_symbol = NULL;
         }
     }
-    Scope  *alias_scope  = alias_symbol ? alias_symbol->module.scope : NULL;
-    bool    import_into_current_scope = (alias_scope == NULL);
+    Scope *alias_scope               = alias_symbol ? alias_symbol->module.scope : NULL;
+    bool   import_into_current_scope = (alias_scope == NULL);
 
     for (Symbol *sym = export_scope->symbols; sym; sym = sym->next)
     {
@@ -2110,7 +2135,7 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
                 }
             }
 
-            *module->symbols = tmp.symbol_table;
+            *module->symbols               = tmp.symbol_table;
             tmp.symbol_table.global_scope  = NULL;
             tmp.symbol_table.current_scope = NULL;
             tmp.symbol_table.module_scope  = NULL;
@@ -2194,8 +2219,8 @@ bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_s
             symbol_table_dnit(module->symbols);
             free(module->symbols);
         }
-        module->symbols  = malloc(sizeof(SymbolTable));
-        *module->symbols = module_analyzer.symbol_table;
+        module->symbols                            = malloc(sizeof(SymbolTable));
+        *module->symbols                           = module_analyzer.symbol_table;
         module_analyzer.symbol_table.global_scope  = NULL;
         module_analyzer.symbol_table.current_scope = NULL;
         module_analyzer.symbol_table.module_scope  = NULL;
@@ -2572,11 +2597,11 @@ bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
     else
     {
         // create new symbol
-        Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, func_type, stmt);
-        symbol->func.is_external         = false;
-        symbol->func.is_defined          = (stmt->fun_stmt.body != NULL);
-        symbol->func.uses_mach_varargs   = is_variadic;
-        symbol->import_origin            = symbol;
+        Symbol *symbol                 = symbol_create(SYMBOL_FUNC, name, func_type, stmt);
+        symbol->func.is_external       = false;
+        symbol->func.is_defined        = (stmt->fun_stmt.body != NULL);
+        symbol->func.uses_mach_varargs = is_variadic;
+        symbol->import_origin          = symbol;
         if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
         {
             symbol->is_public = true;
@@ -2647,8 +2672,8 @@ bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
                 AstNode *param = stmt->fun_stmt.params->items[i];
                 if (param->param_stmt.is_variadic)
                     continue; // variadic sentinel has no symbol
-                Symbol *param_symbol         = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param->type, param);
-                param_symbol->param.index    = param_index++;
+                Symbol *param_symbol      = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param->type, param);
+                param_symbol->param.index = param_index++;
                 symbol_add(func_scope, param_symbol);
                 param->symbol = param_symbol;
             }
@@ -2698,15 +2723,15 @@ bool semantic_analyze_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         return false;
     }
 
-    Type   *struct_type   = type_struct_create(name);
-    Symbol *struct_symbol = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
-    struct_symbol->type_def.is_alias = false;
-    struct_symbol->type_def.is_generic = false;
-    struct_symbol->type_def.generic_param_count = 0;
-    struct_symbol->type_def.generic_param_names = NULL;
+    Type   *struct_type                             = type_struct_create(name);
+    Symbol *struct_symbol                           = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
+    struct_symbol->type_def.is_alias                = false;
+    struct_symbol->type_def.is_generic              = false;
+    struct_symbol->type_def.generic_param_count     = 0;
+    struct_symbol->type_def.generic_param_names     = NULL;
     struct_symbol->type_def.generic_specializations = NULL;
     struct_symbol->type_def.is_specialized_instance = false;
-    
+
     if (semantic_in_top_level_scope(analyzer) && stmt->str_stmt.is_public)
     {
         struct_symbol->is_public = true;
@@ -2758,15 +2783,15 @@ bool semantic_analyze_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
         return false;
     }
 
-    Type   *union_type   = type_union_create(name);
-    Symbol *union_symbol = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
-    union_symbol->type_def.is_alias = false;
-    union_symbol->type_def.is_generic = false;
-    union_symbol->type_def.generic_param_count = 0;
-    union_symbol->type_def.generic_param_names = NULL;
+    Type   *union_type                             = type_union_create(name);
+    Symbol *union_symbol                           = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
+    union_symbol->type_def.is_alias                = false;
+    union_symbol->type_def.is_generic              = false;
+    union_symbol->type_def.generic_param_count     = 0;
+    union_symbol->type_def.generic_param_names     = NULL;
     union_symbol->type_def.generic_specializations = NULL;
     union_symbol->type_def.is_specialized_instance = false;
-    
+
     if (semantic_in_top_level_scope(analyzer) && stmt->uni_stmt.is_public)
     {
         union_symbol->is_public = true;
@@ -3400,12 +3425,12 @@ Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         }
 
         free(type_args);
-        
+
         if (existing)
         {
             expr->call_expr.func->symbol = existing;
             expr->call_expr.func->type   = existing->type;
-            func_type                   = existing->type;
+            func_type                    = existing->type;
         }
         else
         {
@@ -4133,7 +4158,7 @@ bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, A
     bool   is_variadic  = func_type->function.is_variadic;
 
     bool   forwards_varargs = false;
-    size_t forward_index     = SIZE_MAX;
+    size_t forward_index    = SIZE_MAX;
 
     if (args)
     {
@@ -4201,7 +4226,7 @@ bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, A
             return false;
         }
 
-        Symbol *callee_symbol = (node && node->call_expr.func) ? node->call_expr.func->symbol : NULL;
+        Symbol *callee_symbol            = (node && node->call_expr.func) ? node->call_expr.func->symbol : NULL;
         bool    callee_uses_mach_varargs = is_variadic;
         if (callee_symbol && callee_symbol->kind == SYMBOL_FUNC)
         {
@@ -4380,7 +4405,7 @@ static bool semantic_fetch_file_context(const char *file_path, int pos, int *lin
     while (line_end < read && buffer[line_end] != '\n' && buffer[line_end] != '\r')
         line_end++;
 
-    size_t len = line_end > line_start ? (line_end - line_start) : 0;
+    size_t len       = line_end > line_start ? (line_end - line_start) : 0;
     char  *line_text = malloc(len + 1);
     if (!line_text)
     {
@@ -4436,8 +4461,8 @@ void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char
             }
             else
             {
-                int   line_num = 0;
-                int   col_num  = 0;
+                int   line_num  = 0;
+                int   col_num   = 0;
                 char *line_text = NULL;
 
                 if (semantic_fetch_file_context(error_file_path, token->pos, &line_num, &col_num, &line_text))

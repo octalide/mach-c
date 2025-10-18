@@ -2,8 +2,8 @@
 #define CODEGEN_H
 
 #include "ast.h"
-#include "semantic.h"
 #include "lexer.h"
+#include "semantic.h"
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/Target.h>
@@ -74,13 +74,13 @@ struct CodegenContext
     int   opt_level;
     bool  debug_info;
     bool  debug_finalized;
-    bool  no_pie;       // disable position independent executable
+    bool  no_pie; // disable position independent executable
     char *debug_full_path;
     char *debug_dir;
     char *debug_file;
 
     // source context for diagnostics
-    const char *source_file; // current file being compiled
+    const char *source_file;  // current file being compiled
     Lexer      *source_lexer; // lexer for mapping pos->line/column
 
     // variadic function support (Mach ABI)

@@ -64,7 +64,7 @@ typedef struct ProjectConfig
     char *stdlib_path;    // standard library path
 
     // module alias configuration
-    ModuleAlias *module_aliases;    // alias table for module path prefixes
+    ModuleAlias *module_aliases; // alias table for module path prefixes
     int          module_alias_count;
     int          module_alias_capacity;
 } ProjectConfig;

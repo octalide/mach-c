@@ -133,7 +133,7 @@ struct AstNode
         {
             char    *name;
             AstList *params;
-            AstList *generics;   // optional generic parameters
+            AstList *generics;    // optional generic parameters
             AstNode *return_type; // null for no return
             AstNode *body;        // null for external functions
             bool     is_variadic; // true if function has variadic arguments
@@ -286,8 +286,8 @@ struct AstNode
         // array literal
         struct
         {
-            AstNode *type;  // element type
-            AstList *elems; // elements
+            AstNode *type;             // element type
+            AstList *elems;            // elements
             bool     is_slice_literal; // true when expressed as pointer+length literal
         } array_expr;
 

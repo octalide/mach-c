@@ -644,6 +644,86 @@ static AstList *parser_parse_generic_param_list(Parser *parser)
     return params;
 }
 
+static AstNode *parser_parse_anonymous_composite_literal(Parser *parser, bool is_union)
+{
+    if (!parser_consume(parser, TOKEN_L_BRACE, "expected '{' to start composite literal"))
+    {
+        return NULL;
+    }
+
+    AstNode *literal = parser_alloc_node(parser, AST_EXPR_STRUCT, parser->previous);
+    if (!literal)
+    {
+        return NULL;
+    }
+
+    literal->struct_expr.type                 = NULL;
+    literal->struct_expr.fields               = parser_alloc_list(parser);
+    literal->struct_expr.is_union_literal     = is_union;
+    literal->struct_expr.is_anonymous_literal = true;
+    if (!literal->struct_expr.fields)
+    {
+        ast_node_dnit(literal);
+        free(literal);
+        return NULL;
+    }
+
+    if (!parser_check(parser, TOKEN_R_BRACE))
+    {
+        do
+        {
+            char *field_name = parser_parse_identifier(parser);
+            if (!field_name)
+            {
+                ast_node_dnit(literal);
+                free(literal);
+                return NULL;
+            }
+
+            if (!parser_consume(parser, TOKEN_COLON, "expected ':' after field name"))
+            {
+                free(field_name);
+                ast_node_dnit(literal);
+                free(literal);
+                return NULL;
+            }
+
+            AstNode *init = parser_parse_expr(parser);
+            if (!init)
+            {
+                free(field_name);
+                ast_node_dnit(literal);
+                free(literal);
+                return NULL;
+            }
+
+            AstNode *field = parser_alloc_node(parser, AST_EXPR_FIELD, parser->previous);
+            if (!field)
+            {
+                free(field_name);
+                ast_node_dnit(init);
+                free(init);
+                ast_node_dnit(literal);
+                free(literal);
+                return NULL;
+            }
+
+            field->field_expr.field  = field_name;
+            field->field_expr.object = init;
+            ast_list_append(literal->struct_expr.fields, field);
+        } while (parser_match(parser, TOKEN_COMMA));
+    }
+
+    if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after composite fields"))
+    {
+        ast_node_dnit(literal);
+        free(literal);
+        return NULL;
+    }
+
+    return literal;
+}
+
 static AstNode *parser_finish_call(Parser *parser, AstNode *callee, AstList *type_args)
 {
     AstNode *call = parser_alloc_node(parser, AST_EXPR_CALL, parser->previous);
@@ -2297,6 +2377,14 @@ AstNode *parser_parse_expr_atom(Parser *parser)
         parser_advance(parser);
         return pack;
     }
+
+    case TOKEN_KW_STR:
+        parser_advance(parser);
+        return parser_parse_anonymous_composite_literal(parser, false);
+
+    case TOKEN_KW_UNI:
+        parser_advance(parser);
+        return parser_parse_anonymous_composite_literal(parser, true);
 
     case TOKEN_IDENTIFIER:
     {

@@ -296,6 +296,8 @@ struct AstNode
         {
             AstNode *type;   // struct type
             AstList *fields; // field initializers
+            bool     is_union_literal;      // true when literal uses 'uni' keyword without explicit type
+            bool     is_anonymous_literal; // true when literal omits explicit type name
         } struct_expr;
 
         // type expressions

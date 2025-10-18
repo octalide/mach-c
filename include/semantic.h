@@ -112,7 +112,7 @@ Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr);
 Type *semantic_analyze_lit_expr(SemanticAnalyzer *analyzer, AstNode *expr);
 Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
 Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr);
+Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
 
 // type checking utilities
 bool semantic_check_assignment(SemanticAnalyzer *analyzer, Type *target, Type *source, AstNode *node);

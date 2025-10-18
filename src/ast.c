@@ -689,6 +689,8 @@ static AstNode *ast_clone_checked(const AstNode *node)
     case AST_EXPR_STRUCT:
         clone->struct_expr.type   = ast_clone_checked(node->struct_expr.type);
         clone->struct_expr.fields = ast_list_clone(node->struct_expr.fields);
+        clone->struct_expr.is_union_literal      = node->struct_expr.is_union_literal;
+        clone->struct_expr.is_anonymous_literal  = node->struct_expr.is_anonymous_literal;
         break;
 
     case AST_TYPE_NAME:

@@ -1389,7 +1389,7 @@ Type *semantic_analyze_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr,
     case AST_EXPR_ARRAY:
         return semantic_analyze_array_expr(analyzer, expr);
     case AST_EXPR_STRUCT:
-        return semantic_analyze_struct_expr(analyzer, expr);
+        return semantic_analyze_struct_expr(analyzer, expr, expected_type);
     case AST_EXPR_VARARGS:
         if (!analyzer->current_function || !analyzer->current_function->symbol)
         {
@@ -3779,41 +3779,7 @@ Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     {
         // for []T{...} or alias{...} syntax where alias resolves to array, use it directly
         // but validate that all elements match the element type
-        Type *elem_type  = resolved_type->array.elem_type;
-        int   elem_count = expr->array_expr.elems ? expr->array_expr.elems->count : 0;
-
-        if (elem_count == 2)
-        {
-            AstNode *data_node = expr->array_expr.elems->items[0];
-            AstNode *cap_node  = expr->array_expr.elems->items[1];
-
-            Type *data_type = semantic_analyze_expr(analyzer, data_node);
-            if (!data_type)
-                return NULL;
-
-            Type *cap_type = semantic_analyze_expr(analyzer, cap_node);
-            if (!cap_type)
-                return NULL;
-
-            if (type_is_pointer_like(data_type) && type_is_integer(cap_type))
-            {
-                Type *expected_ptr = type_pointer_create(elem_type);
-                if (!semantic_check_assignment(analyzer, expected_ptr, data_type, data_node))
-                {
-                    return NULL;
-                }
-
-                Type *expected_cap = type_u64();
-                if (!semantic_check_assignment(analyzer, expected_cap, cap_type, cap_node))
-                {
-                    return NULL;
-                }
-
-                expr->array_expr.is_slice_literal = true;
-                expr->type                        = specified_type;
-                return expr->type;
-            }
-        }
+        Type *elem_type = resolved_type->array.elem_type;
 
         if (expr->array_expr.elems)
         {
@@ -3910,19 +3876,43 @@ static Type *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNod
     return specified_type;
 }
 
-Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
+Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type)
 {
-    Type *struct_type = resolve_type(analyzer, expr->struct_expr.type);
-    if (!struct_type)
+    Type *struct_type   = NULL;
+    Type *resolved_type = NULL;
+
+    if (expr->struct_expr.type)
     {
-        semantic_error(analyzer, expr, "cannot resolve struct type");
-        return NULL;
+        struct_type = resolve_type(analyzer, expr->struct_expr.type);
+        if (!struct_type)
+        {
+            semantic_error(analyzer, expr, "cannot resolve struct type");
+            return NULL;
+        }
+
+        resolved_type = type_resolve_alias(struct_type);
+        if (!resolved_type)
+            resolved_type = struct_type;
+    }
+    else
+    {
+        if (!expected_type)
+        {
+            semantic_error(analyzer, expr, "cannot infer type for anonymous literal");
+            return NULL;
+        }
+
+        struct_type   = expected_type;
+        resolved_type = type_resolve_alias(struct_type);
+        if (!resolved_type)
+            resolved_type = struct_type;
     }
 
-    // resolve type aliases before checking the type
-    Type *resolved_type = type_resolve_alias(struct_type);
-    if (!resolved_type)
-        resolved_type = struct_type;
+    if (expr->struct_expr.is_union_literal && resolved_type->kind != TYPE_UNION)
+    {
+        semantic_error(analyzer, expr, "'uni' literal requires a union type");
+        return NULL;
+    }
 
     if (resolved_type->kind == TYPE_ARRAY)
     {
@@ -4007,58 +3997,103 @@ Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
         return NULL;
     }
 
-    // analyze field initializers
+    bool *initialized_fields = NULL;
+    if (resolved_type->kind == TYPE_STRUCT && resolved_type->composite.field_count > 0)
+    {
+        initialized_fields = calloc(resolved_type->composite.field_count, sizeof(bool));
+        if (!initialized_fields)
+        {
+            semantic_error(analyzer, expr, "failed to allocate struct field tracking");
+            return NULL;
+        }
+    }
+
+    bool union_field_set = false;
+
     if (expr->struct_expr.fields)
     {
         for (int i = 0; i < expr->struct_expr.fields->count; i++)
         {
             AstNode *field_init = expr->struct_expr.fields->items[i];
-
-            // field initializers should be field expressions or assignments
-            if (field_init->kind == AST_EXPR_FIELD)
+            if (!field_init || field_init->kind != AST_EXPR_FIELD)
             {
-                // find the field in the struct type
-                Symbol *field_sym = NULL;
-                for (Symbol *field = resolved_type->composite.fields; field; field = field->next)
+                const char *kind_str = (resolved_type->kind == TYPE_UNION) ? "union" : "struct";
+                semantic_error(analyzer, expr, "invalid %s field initializer", kind_str);
+                if (initialized_fields)
+                    free(initialized_fields);
+                return NULL;
+            }
+
+            const char *field_name = field_init->field_expr.field;
+
+            Symbol *field_sym     = NULL;
+            int     matched_index = -1;
+            int     cursor_index  = 0;
+            for (Symbol *field = resolved_type->composite.fields; field; field = field->next, cursor_index++)
+            {
+                if (field->name && strcmp(field->name, field_name) == 0)
                 {
-                    if (field->name && strcmp(field->name, field_init->field_expr.field) == 0)
+                    field_sym     = field;
+                    matched_index = cursor_index;
+                    break;
+                }
+            }
+
+            if (!field_sym)
+            {
+                const char *kind_str = (resolved_type->kind == TYPE_UNION) ? "union" : "struct";
+                semantic_error(analyzer, field_init, "no field named '%s' in %s", field_name, kind_str);
+                if (initialized_fields)
+                    free(initialized_fields);
+                return NULL;
+            }
+
+            Type *init_type = semantic_analyze_expr_with_hint(analyzer, field_init->field_expr.object, field_sym->type);
+            if (!init_type)
+            {
+                if (initialized_fields)
+                    free(initialized_fields);
+                return NULL;
+            }
+
+            if (!semantic_check_assignment(analyzer, field_sym->type, init_type, field_init))
+            {
+                if (initialized_fields)
+                    free(initialized_fields);
+                return NULL;
+            }
+
+            if (resolved_type->kind == TYPE_STRUCT)
+            {
+                if (matched_index >= 0 && matched_index < (int)resolved_type->composite.field_count)
+                {
+                    if (initialized_fields[matched_index])
                     {
-                        field_sym = field;
-                        break;
+                        semantic_error(analyzer, field_init, "duplicate initializer for field '%s'", field_name);
+                        if (initialized_fields)
+                            free(initialized_fields);
+                        return NULL;
                     }
-                }
-
-                if (!field_sym)
-                {
-                    semantic_error(analyzer, field_init, "no field named '%s' in struct", field_init->field_expr.field);
-                    return NULL;
-                }
-
-                // analyze the initializer value with field type as hint
-                Type *init_type = semantic_analyze_expr_with_hint(analyzer, field_init->field_expr.object, field_sym->type);
-                if (!init_type)
-                {
-                    return NULL;
-                }
-
-                // check type compatibility
-                if (!semantic_check_assignment(analyzer, field_sym->type, init_type, field_init))
-                {
-                    return NULL;
+                    initialized_fields[matched_index] = true;
                 }
             }
             else
             {
-                // for other expressions, just analyze them
-                if (!semantic_analyze_expr(analyzer, field_init))
+                if (union_field_set)
                 {
+                    semantic_error(analyzer, field_init, "multiple fields initialized in union literal");
+                    if (initialized_fields)
+                        free(initialized_fields);
                     return NULL;
                 }
+                union_field_set = true;
             }
         }
     }
 
-    // return the original type (preserving alias)
+    if (initialized_fields)
+        free(initialized_fields);
+
     expr->type = struct_type;
     return struct_type;
 }

@@ -3202,80 +3202,8 @@ LLVMValueRef codegen_expr_array(CodegenContext *ctx, AstNode *expr)
 
     if (expr->array_expr.is_slice_literal)
     {
-        LLVMTypeRef fat_ptr_type = codegen_get_llvm_type(ctx, array_type);
-        if (!fat_ptr_type)
-            return NULL;
-
-        LLVMValueRef fat_ptr = LLVMGetUndef(fat_ptr_type);
-
-        // data expression (pointer)
-        AstNode     *data_node  = expr->array_expr.elems->items[0];
-        LLVMValueRef data_value = codegen_expr(ctx, data_node);
-        if (!data_value)
-        {
-            codegen_error(ctx, data_node, "failed to generate slice data expression");
-            return NULL;
-        }
-    data_value = codegen_load_if_needed(ctx, data_value, data_node->type, data_node);
-
-        LLVMTypeRef data_field_type = LLVMPointerTypeInContext(ctx->context, 0);
-        LLVMTypeRef data_type_ref   = LLVMTypeOf(data_value);
-
-        if (LLVMGetTypeKind(data_type_ref) == LLVMStructTypeKind)
-        {
-            data_value    = LLVMBuildExtractValue(ctx->builder, data_value, 0, "slice_data_extract");
-            data_type_ref = LLVMTypeOf(data_value);
-        }
-
-        switch (LLVMGetTypeKind(data_type_ref))
-        {
-        case LLVMPointerTypeKind:
-            if (data_type_ref != data_field_type)
-            {
-                data_value = LLVMBuildBitCast(ctx->builder, data_value, data_field_type, "slice_data_cast");
-            }
-            break;
-        case LLVMIntegerTypeKind:
-            data_value = LLVMBuildIntToPtr(ctx->builder, data_value, data_field_type, "slice_data_inttoptr");
-            break;
-        default:
-            codegen_error(ctx, data_node, "slice data expression must be pointer-like");
-            return NULL;
-        }
-
-        fat_ptr = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_value, 0, "slice_data");
-
-        // length expression (u64)
-        AstNode     *len_node  = expr->array_expr.elems->items[1];
-        LLVMValueRef len_value = codegen_expr(ctx, len_node);
-        if (!len_value)
-        {
-            codegen_error(ctx, len_node, "failed to generate slice length expression");
-            return NULL;
-        }
-        len_value = codegen_load_if_needed(ctx, len_value, len_node->type, len_node);
-
-        LLVMTypeRef len_type_ref   = LLVMTypeOf(len_value);
-        LLVMTypeRef len_field_type = LLVMInt64TypeInContext(ctx->context);
-
-        if (LLVMGetTypeKind(len_type_ref) != LLVMIntegerTypeKind)
-        {
-            codegen_error(ctx, len_node, "slice length expression must be integer");
-            return NULL;
-        }
-
-        unsigned int len_width = LLVMGetIntTypeWidth(len_type_ref);
-        if (len_width < 64)
-        {
-            len_value = LLVMBuildZExt(ctx->builder, len_value, len_field_type, "slice_len_zext");
-        }
-        else if (len_width > 64)
-        {
-            len_value = LLVMBuildTrunc(ctx->builder, len_value, len_field_type, "slice_len_trunc");
-        }
-
-        fat_ptr = LLVMBuildInsertValue(ctx->builder, fat_ptr, len_value, 1, "slice_len");
-        return fat_ptr;
+        codegen_error(ctx, expr, "legacy slice literal syntax no longer supported; use named fields");
+        return NULL;
     }
 
     Type       *elem_type      = resolved_type->array.elem_type;
@@ -3441,6 +3369,62 @@ LLVMValueRef codegen_expr_struct(CodegenContext *ctx, AstNode *expr)
         fat_ptr               = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_value, 0, "slice_data");
         fat_ptr               = LLVMBuildInsertValue(ctx->builder, fat_ptr, len_value, 1, "slice_len");
         return fat_ptr;
+    }
+
+    if (struct_type->kind == TYPE_UNION)
+    {
+        LLVMTypeRef llvm_union_type = codegen_get_llvm_type(ctx, struct_type);
+        if (!llvm_union_type)
+        {
+            codegen_error(ctx, expr, "failed to materialize union type");
+            return NULL;
+        }
+
+        LLVMValueRef union_alloca = codegen_create_alloca(ctx, llvm_union_type, "union_lit");
+        LLVMBuildStore(ctx->builder, LLVMConstNull(llvm_union_type), union_alloca);
+
+        if (expr->struct_expr.fields && expr->struct_expr.fields->count > 0)
+        {
+            AstNode *field_init = expr->struct_expr.fields->items[0];
+            if (!field_init || field_init->kind != AST_EXPR_FIELD)
+            {
+                codegen_error(ctx, expr, "invalid union field initializer");
+                return NULL;
+            }
+
+            const char *field_name = field_init->field_expr.field;
+            AstNode    *init_value = field_init->field_expr.object;
+
+            Symbol *field_symbol = NULL;
+            for (Symbol *field = struct_type->composite.fields; field; field = field->next)
+            {
+                if (field->name && strcmp(field->name, field_name) == 0)
+                {
+                    field_symbol = field;
+                    break;
+                }
+            }
+
+            if (!field_symbol)
+            {
+                codegen_error(ctx, field_init, "no field named '%s'", field_name);
+                return NULL;
+            }
+
+            LLVMValueRef value = codegen_expr(ctx, init_value);
+            if (!value)
+            {
+                codegen_error(ctx, field_init, "failed to generate union field initializer");
+                return NULL;
+            }
+            value = codegen_load_if_needed(ctx, value, init_value->type, init_value);
+
+            LLVMTypeRef field_llvm_type = codegen_get_llvm_type(ctx, field_symbol->type);
+            LLVMValueRef field_ptr      = LLVMBuildBitCast(ctx->builder, union_alloca, LLVMPointerType(field_llvm_type, 0), "union_field_ptr");
+            LLVMBuildStore(ctx->builder, value, field_ptr);
+        }
+
+        return union_alloca;
     }
 
     if (struct_type->kind != TYPE_STRUCT)

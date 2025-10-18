@@ -2720,13 +2720,15 @@ static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode
     }
 
     AstNode *receiver_ast = stmt->fun_stmt.method_receiver;
-    bool     receiver_is_pointer = false;
-    AstNode *base_receiver_ast   = receiver_ast;
+    bool     declared_pointer_receiver = false;
+    AstNode *base_receiver_ast         = receiver_ast;
     while (base_receiver_ast && base_receiver_ast->kind == AST_TYPE_PTR)
     {
-        receiver_is_pointer = true;
-        base_receiver_ast   = base_receiver_ast->type_ptr.base;
+        declared_pointer_receiver = true;
+        base_receiver_ast         = base_receiver_ast->type_ptr.base;
     }
+
+    bool receiver_is_pointer = declared_pointer_receiver;
 
     if (!base_receiver_ast || base_receiver_ast->kind != AST_TYPE_NAME || !base_receiver_ast->type_name.name)
     {
@@ -2773,25 +2775,51 @@ static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode
         semantic_error(analyzer, receiver_param, "invalid receiver parameter");
         return false;
     }
+    bool inferred_pointer_receiver     = false;
+    bool receiver_param_is_pointer_ast = receiver_param->param_stmt.type && receiver_param->param_stmt.type->kind == AST_TYPE_PTR;
+
+    Type *param_receiver_type    = NULL;
+    Type *expected_receiver_type = NULL;
 
     if (treat_as_generic_definition)
     {
-        if (!semantic_compare_type_ast(receiver_param->param_stmt.type, stmt->fun_stmt.method_receiver))
+        bool matches_decl = semantic_compare_type_ast(receiver_param->param_stmt.type, stmt->fun_stmt.method_receiver);
+        if (!matches_decl)
         {
-            semantic_error(analyzer, receiver_param, "first parameter of method must match receiver type");
+            if (!declared_pointer_receiver && receiver_param_is_pointer_ast &&
+                semantic_compare_type_ast(receiver_param->param_stmt.type->type_ptr.base, stmt->fun_stmt.method_receiver))
+            {
+                inferred_pointer_receiver = true;
+            }
+            else if (declared_pointer_receiver && !receiver_param_is_pointer_ast)
+            {
+                semantic_error(analyzer, receiver_param, "receiver parameter must be pointer to declared receiver type");
+                return false;
+            }
+            else
+            {
+                semantic_error(analyzer, receiver_param, "first parameter of method must match receiver type");
+                return false;
+            }
+        }
+        else if (declared_pointer_receiver && !receiver_param_is_pointer_ast)
+        {
+            semantic_error(analyzer, receiver_param, "receiver parameter must be pointer to declared receiver type");
             return false;
         }
+
+        receiver_is_pointer = declared_pointer_receiver || inferred_pointer_receiver;
     }
     else
     {
-        Type *param_receiver_type = resolve_type(analyzer, receiver_param->param_stmt.type);
+        param_receiver_type = resolve_type(analyzer, receiver_param->param_stmt.type);
         if (!param_receiver_type)
         {
             semantic_error(analyzer, receiver_param, "cannot resolve receiver parameter type");
             return false;
         }
 
-        Type *expected_receiver_type = resolved_receiver_type ? resolved_receiver_type : resolve_type(analyzer, stmt->fun_stmt.method_receiver);
+        expected_receiver_type = resolved_receiver_type ? resolved_receiver_type : resolve_type(analyzer, stmt->fun_stmt.method_receiver);
         if (!expected_receiver_type)
         {
             semantic_error(analyzer, stmt, "cannot resolve receiver type");
@@ -2800,13 +2828,30 @@ static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode
 
         if (!type_equals(param_receiver_type, expected_receiver_type))
         {
-            char expected_str[128];
-            char actual_str[128];
-            format_type_name(expected_receiver_type, expected_str, sizeof(expected_str));
-            format_type_name(param_receiver_type, actual_str, sizeof(actual_str));
-            semantic_error(analyzer, receiver_param, "receiver parameter must be of type '%s' (got '%s')", expected_str, actual_str);
-            return false;
+            if (!declared_pointer_receiver && param_receiver_type->kind == TYPE_POINTER &&
+                type_equals(param_receiver_type->pointer.base, expected_receiver_type))
+            {
+                inferred_pointer_receiver = true;
+            }
+            else if (declared_pointer_receiver && param_receiver_type->kind != TYPE_POINTER)
+            {
+                char expected_str[128];
+                format_type_name(expected_receiver_type, expected_str, sizeof(expected_str));
+                semantic_error(analyzer, receiver_param, "receiver parameter must be pointer to type '%s'", expected_str);
+                return false;
+            }
+            else
+            {
+                char expected_str[128];
+                char actual_str[128];
+                format_type_name(expected_receiver_type, expected_str, sizeof(expected_str));
+                format_type_name(param_receiver_type, actual_str, sizeof(actual_str));
+                semantic_error(analyzer, receiver_param, "receiver parameter must be of type '%s' (got '%s')", expected_str, actual_str);
+                return false;
+            }
         }
+
+        receiver_is_pointer = declared_pointer_receiver || inferred_pointer_receiver;
     }
 
     if (treat_as_generic_definition)
@@ -2955,7 +3000,10 @@ static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode
         AstNode *param = stmt->fun_stmt.params->items[i];
         if (param->param_stmt.is_variadic)
             continue;
-        param_types[idx] = resolve_type(analyzer, param->param_stmt.type);
+        if (param == receiver_param && param_receiver_type)
+            param_types[idx] = param_receiver_type;
+        else
+            param_types[idx] = resolve_type(analyzer, param->param_stmt.type);
         if (!param_types[idx])
         {
             semantic_error(analyzer, param, "cannot resolve method parameter type '%s'", param->param_stmt.name);

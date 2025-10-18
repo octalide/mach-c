@@ -326,13 +326,6 @@ static bool parser_is_method_decl(Parser *parser)
 
     Token *token = parser->current;
 
-    while (token && token->kind == TOKEN_STAR)
-    {
-        token = parser_next_non_comment(parser, &peeked_tokens, &peek_count, &peek_capacity);
-        if (!token)
-            goto cleanup;
-    }
-
     if (!token || token->kind != TOKEN_IDENTIFIER)
     {
         goto cleanup;
@@ -1472,7 +1465,7 @@ AstNode *parser_parse_stmt_fun(Parser *parser, bool is_public)
     bool is_method = parser_is_method_decl(parser);
     if (is_method)
     {
-        AstNode *receiver = parser_parse_type(parser);
+        AstNode *receiver = parser_parse_type_name(parser);
         if (!receiver)
         {
             parser_error_at_current(parser, "expected method receiver type after 'fun'");

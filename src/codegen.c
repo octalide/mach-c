@@ -3336,6 +3336,113 @@ LLVMValueRef codegen_expr_struct(CodegenContext *ctx, AstNode *expr)
     Type *struct_type = expr->type;
     struct_type       = type_resolve_alias(struct_type);
 
+    if (struct_type->kind == TYPE_ARRAY)
+    {
+        LLVMTypeRef fat_ptr_type = codegen_get_llvm_type(ctx, expr->type);
+        if (!fat_ptr_type)
+        {
+            codegen_error(ctx, expr, "failed to materialize slice type");
+            return NULL;
+        }
+
+        LLVMTypeRef data_field_type = LLVMPointerTypeInContext(ctx->context, 0);
+        LLVMTypeRef len_field_type  = LLVMInt64TypeInContext(ctx->context);
+
+        LLVMValueRef data_value = LLVMConstNull(data_field_type);
+        LLVMValueRef len_value  = LLVMConstInt(len_field_type, 0, false);
+
+        if (expr->struct_expr.fields)
+        {
+            for (int i = 0; i < expr->struct_expr.fields->count; i++)
+            {
+                AstNode *field_init = expr->struct_expr.fields->items[i];
+                if (!field_init || field_init->kind != AST_EXPR_FIELD)
+                {
+                    codegen_error(ctx, expr, "invalid slice field initializer");
+                    return NULL;
+                }
+
+                const char *field_name = field_init->field_expr.field;
+                AstNode    *init_value = field_init->field_expr.object;
+
+                if (strcmp(field_name, "data") == 0)
+                {
+                    LLVMValueRef value = codegen_expr(ctx, init_value);
+                    if (!value)
+                    {
+                        codegen_error(ctx, init_value, "failed to generate slice data expression");
+                        return NULL;
+                    }
+                    value = codegen_load_if_needed(ctx, value, init_value->type, init_value);
+
+                    LLVMTypeRef value_type = LLVMTypeOf(value);
+                    if (LLVMGetTypeKind(value_type) == LLVMStructTypeKind)
+                    {
+                        value      = LLVMBuildExtractValue(ctx->builder, value, 0, "slice_data_extract");
+                        value_type = LLVMTypeOf(value);
+                    }
+
+                    switch (LLVMGetTypeKind(value_type))
+                    {
+                    case LLVMPointerTypeKind:
+                        if (value_type != data_field_type)
+                        {
+                            value = LLVMBuildBitCast(ctx->builder, value, data_field_type, "slice_data_cast");
+                        }
+                        break;
+                    case LLVMIntegerTypeKind:
+                        value = LLVMBuildIntToPtr(ctx->builder, value, data_field_type, "slice_data_inttoptr");
+                        break;
+                    default:
+                        codegen_error(ctx, init_value, "slice data expression must be pointer-like");
+                        return NULL;
+                    }
+
+                    data_value = value;
+                }
+                else if (strcmp(field_name, "len") == 0)
+                {
+                    LLVMValueRef value = codegen_expr(ctx, init_value);
+                    if (!value)
+                    {
+                        codegen_error(ctx, init_value, "failed to generate slice length expression");
+                        return NULL;
+                    }
+                    value = codegen_load_if_needed(ctx, value, init_value->type, init_value);
+
+                    LLVMTypeRef value_type = LLVMTypeOf(value);
+                    if (LLVMGetTypeKind(value_type) != LLVMIntegerTypeKind)
+                    {
+                        codegen_error(ctx, init_value, "slice length expression must be integer");
+                        return NULL;
+                    }
+
+                    unsigned int width = LLVMGetIntTypeWidth(value_type);
+                    if (width < 64)
+                    {
+                        value = LLVMBuildZExt(ctx->builder, value, len_field_type, "slice_len_zext");
+                    }
+                    else if (width > 64)
+                    {
+                        value = LLVMBuildTrunc(ctx->builder, value, len_field_type, "slice_len_trunc");
+                    }
+
+                    len_value = value;
+                }
+                else
+                {
+                    codegen_error(ctx, field_init, "unknown slice field '%s'", field_name);
+                    return NULL;
+                }
+            }
+        }
+
+        LLVMValueRef fat_ptr = LLVMGetUndef(fat_ptr_type);
+        fat_ptr               = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_value, 0, "slice_data");
+        fat_ptr               = LLVMBuildInsertValue(ctx->builder, fat_ptr, len_value, 1, "slice_len");
+        return fat_ptr;
+    }
+
     if (struct_type->kind != TYPE_STRUCT)
     {
         codegen_error(ctx, expr, "struct literal has non-struct type");

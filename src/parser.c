@@ -43,6 +43,42 @@ static AstList *parser_alloc_list(Parser *parser)
     return list;
 }
 
+static TokenKind parser_peek_next_kind(Parser *parser)
+{
+    if (!parser || !parser->lexer)
+    {
+        return TOKEN_EOF;
+    }
+
+    int       saved_pos = parser->lexer->pos;
+    TokenKind kind      = TOKEN_EOF;
+
+    for (;;)
+    {
+        Token *peek = lexer_next(parser->lexer);
+        if (!peek)
+        {
+            kind = TOKEN_EOF;
+            break;
+        }
+
+        kind = peek->kind;
+
+        bool skip = (kind == TOKEN_COMMENT);
+
+        token_dnit(peek);
+        free(peek);
+
+        if (!skip)
+        {
+            break;
+        }
+    }
+
+    parser->lexer->pos = saved_pos;
+    return kind;
+}
+
 static void parser_set_pending_mangle(Parser *parser, char *value)
 {
     if (!parser)
@@ -2881,6 +2917,91 @@ AstNode *parser_parse_typed_literal(Parser *parser, AstNode *type)
         ast_node_dnit(type);
         free(type);
         return NULL;
+    }
+
+    bool struct_syntax = false;
+    if (!parser_check(parser, TOKEN_R_BRACE) && parser_check(parser, TOKEN_IDENTIFIER))
+    {
+        TokenKind next_kind = parser_peek_next_kind(parser);
+        if (next_kind == TOKEN_COLON)
+        {
+            struct_syntax = true;
+        }
+    }
+
+    if (struct_syntax)
+    {
+        AstNode *literal = parser_alloc_node(parser, AST_EXPR_STRUCT, parser->previous);
+        if (!literal)
+        {
+            ast_node_dnit(type);
+            free(type);
+            return NULL;
+        }
+
+        literal->struct_expr.type   = type;
+        literal->struct_expr.fields = parser_alloc_list(parser);
+        if (!literal->struct_expr.fields)
+        {
+            ast_node_dnit(literal);
+            free(literal);
+            return NULL;
+        }
+
+        if (!parser_check(parser, TOKEN_R_BRACE))
+        {
+            do
+            {
+                char *field_name = parser_parse_identifier(parser);
+                if (!field_name)
+                {
+                    ast_node_dnit(literal);
+                    free(literal);
+                    return NULL;
+                }
+
+                if (!parser_consume(parser, TOKEN_COLON, "expected ':' after field name"))
+                {
+                    free(field_name);
+                    ast_node_dnit(literal);
+                    free(literal);
+                    return NULL;
+                }
+
+                AstNode *value = parser_parse_expr(parser);
+                if (!value)
+                {
+                    free(field_name);
+                    ast_node_dnit(literal);
+                    free(literal);
+                    return NULL;
+                }
+
+                AstNode *field_node = parser_alloc_node(parser, AST_EXPR_FIELD, parser->previous);
+                if (!field_node)
+                {
+                    free(field_name);
+                    ast_node_dnit(value);
+                    free(value);
+                    ast_node_dnit(literal);
+                    free(literal);
+                    return NULL;
+                }
+
+                field_node->field_expr.field  = field_name;
+                field_node->field_expr.object = value;
+                ast_list_append(literal->struct_expr.fields, field_node);
+            } while (parser_match(parser, TOKEN_COMMA));
+        }
+
+        if (!parser_consume(parser, TOKEN_R_BRACE, "expected '}' after literal fields"))
+        {
+            ast_node_dnit(literal);
+            free(literal);
+            return NULL;
+        }
+
+        return literal;
     }
 
     AstNode *literal = parser_alloc_node(parser, AST_EXPR_ARRAY, parser->previous);

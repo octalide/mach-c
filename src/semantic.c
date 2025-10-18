@@ -3516,7 +3516,7 @@ Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
 
     if (object_type->kind == TYPE_ARRAY)
     {
-        if (strcmp(expr->field_expr.field, "length") == 0)
+        if (strcmp(expr->field_expr.field, "len") == 0)
         {
             expr->type = type_u64();
             return expr->type;
@@ -3923,6 +3923,83 @@ Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr)
     Type *resolved_type = type_resolve_alias(struct_type);
     if (!resolved_type)
         resolved_type = struct_type;
+
+    if (resolved_type->kind == TYPE_ARRAY)
+    {
+        Type *elem_type     = resolved_type->array.elem_type;
+        Type *expected_data = type_pointer_create(elem_type);
+        Type *expected_len  = type_u64();
+
+        bool seen_data = false;
+        bool seen_len  = false;
+
+        if (expr->struct_expr.fields)
+        {
+            for (int i = 0; i < expr->struct_expr.fields->count; i++)
+            {
+                AstNode *field_init = expr->struct_expr.fields->items[i];
+                if (!field_init || field_init->kind != AST_EXPR_FIELD)
+                {
+                    semantic_error(analyzer, expr, "invalid slice field initializer");
+                    return NULL;
+                }
+
+                const char *field_name = field_init->field_expr.field;
+                AstNode    *value      = field_init->field_expr.object;
+
+                if (strcmp(field_name, "data") == 0)
+                {
+                    if (seen_data)
+                    {
+                        semantic_error(analyzer, field_init, "duplicate 'data' field in slice literal");
+                        return NULL;
+                    }
+
+                    Type *init_type = semantic_analyze_expr_with_hint(analyzer, value, expected_data);
+                    if (!init_type)
+                    {
+                        return NULL;
+                    }
+
+                    if (!semantic_check_assignment(analyzer, expected_data, init_type, value))
+                    {
+                        return NULL;
+                    }
+
+                    seen_data = true;
+                }
+                else if (strcmp(field_name, "len") == 0)
+                {
+                    if (seen_len)
+                    {
+                        semantic_error(analyzer, field_init, "duplicate 'len' field in slice literal");
+                        return NULL;
+                    }
+
+                    Type *init_type = semantic_analyze_expr_with_hint(analyzer, value, expected_len);
+                    if (!init_type)
+                    {
+                        return NULL;
+                    }
+
+                    if (!semantic_check_assignment(analyzer, expected_len, init_type, value))
+                    {
+                        return NULL;
+                    }
+
+                    seen_len = true;
+                }
+                else
+                {
+                    semantic_error(analyzer, field_init, "unknown slice field '%s'", field_name);
+                    return NULL;
+                }
+            }
+        }
+
+        expr->type = struct_type;
+        return struct_type;
+    }
 
     if (resolved_type->kind != TYPE_STRUCT && resolved_type->kind != TYPE_UNION)
     {

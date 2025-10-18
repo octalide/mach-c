@@ -177,7 +177,7 @@ AnalysisContext analysis_context_with_scope(const AnalysisContext *parent, Scope
 AnalysisContext analysis_context_with_bindings(const AnalysisContext *parent, GenericBindingCtx new_bindings);
 AnalysisContext analysis_context_with_function(const AnalysisContext *parent, Symbol *function);
 
-// type resolution with context
-Type *resolve_type_in_context(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *type_node);
+// main analysis entry point
+bool semantic_analyze_new(SemanticDriver *driver, AstNode *root, const char *entry_module_name);
 
 #endif // SEMANTIC_NEW_H

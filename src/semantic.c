@@ -291,10 +291,10 @@ static bool type_equals_strict(Type *a, Type *b)
         return true;
     if (!a || !b)
         return false;
-    
+
     if (a->kind != b->kind)
         return false;
-    
+
     switch (a->kind)
     {
     case TYPE_ALIAS:
@@ -302,19 +302,19 @@ static bool type_equals_strict(Type *a, Type *b)
         if (a->name && b->name && strcmp(a->name, b->name) == 0)
             return true;
         return type_equals_strict(a->alias.target, b->alias.target);
-        
+
     case TYPE_POINTER:
         return type_equals_strict(a->pointer.base, b->pointer.base);
-        
+
     case TYPE_ARRAY:
         return type_equals_strict(a->array.elem_type, b->array.elem_type);
-        
+
     case TYPE_STRUCT:
     case TYPE_UNION:
         if (a->name && b->name)
             return strcmp(a->name, b->name) == 0;
         return a == b;
-        
+
     default:
         return type_equals(a, b);
     }
@@ -3302,11 +3302,11 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                             // create address-of operation
                             AstNode *addr_of = malloc(sizeof(AstNode));
                             ast_node_init(addr_of, AST_EXPR_UNARY);
-                            addr_of->token          = receiver->token;
-                            addr_of->unary_expr.op  = TOKEN_QUESTION;
+                            addr_of->token           = receiver->token;
+                            addr_of->unary_expr.op   = TOKEN_QUESTION;
                             addr_of->unary_expr.expr = receiver;
-                            addr_of->type           = type_pointer_create(receiver_type);
-                            receiver_arg = addr_of;
+                            addr_of->type            = type_pointer_create(receiver_type);
+                            receiver_arg             = addr_of;
                         }
                     }
                 }
@@ -4234,13 +4234,7 @@ static bool analyze_ret_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
     {
         char *ret_type_str = type_to_string(ret_type);
         char *func_ret_str = type_to_string(func_ret);
-        diagnostic_emit(&driver->diagnostics,
-                        DIAG_ERROR,
-                        stmt,
-                        ctx->file_path,
-                        "incompatible return type (expected '%s', got '%s')",
-                        func_ret_str ? func_ret_str : "<unknown>",
-                        ret_type_str ? ret_type_str : "<unknown>");
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "incompatible return type (expected '%s', got '%s')", func_ret_str ? func_ret_str : "<unknown>", ret_type_str ? ret_type_str : "<unknown>");
         free(ret_type_str);
         free(func_ret_str);
         return false;

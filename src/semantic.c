@@ -284,6 +284,42 @@ static size_t hash_specialization_key(Symbol *generic_symbol, Type **type_args, 
     return hash;
 }
 
+// compare types for specialization cache - does NOT resolve aliases
+static bool type_equals_strict(Type *a, Type *b)
+{
+    if (a == b)
+        return true;
+    if (!a || !b)
+        return false;
+    
+    if (a->kind != b->kind)
+        return false;
+    
+    switch (a->kind)
+    {
+    case TYPE_ALIAS:
+        // for aliases, compare both name and target
+        if (a->name && b->name && strcmp(a->name, b->name) == 0)
+            return true;
+        return type_equals_strict(a->alias.target, b->alias.target);
+        
+    case TYPE_POINTER:
+        return type_equals_strict(a->pointer.base, b->pointer.base);
+        
+    case TYPE_ARRAY:
+        return type_equals_strict(a->array.elem_type, b->array.elem_type);
+        
+    case TYPE_STRUCT:
+    case TYPE_UNION:
+        if (a->name && b->name)
+            return strcmp(a->name, b->name) == 0;
+        return a == b;
+        
+    default:
+        return type_equals(a, b);
+    }
+}
+
 static bool keys_equal(const SpecializationKey *a, const SpecializationKey *b)
 {
     if (a->generic_symbol != b->generic_symbol)
@@ -292,7 +328,7 @@ static bool keys_equal(const SpecializationKey *a, const SpecializationKey *b)
         return false;
     for (size_t i = 0; i < a->type_arg_count; i++)
     {
-        if (!type_equals(a->type_args[i], b->type_args[i]))
+        if (!type_equals_strict(a->type_args[i], b->type_args[i]))
             return false;
     }
     return true;
@@ -458,11 +494,14 @@ static char *type_to_mangled_string(Type *type)
     if (!type)
         return strdup("unknown");
 
-    // if type has a name (like "string" alias), use it
-    if (type->name && strlen(type->name) > 0)
+    // for aliases with names, use the alias name directly for better readability
+    if (type->kind == TYPE_ALIAS && type->name && strlen(type->name) > 0)
         return sanitize_type_name(type->name);
 
-    char buffer[256];
+    // for named types (structs, unions), use the name
+    if ((type->kind == TYPE_STRUCT || type->kind == TYPE_UNION) && type->name && strlen(type->name) > 0)
+        return sanitize_type_name(type->name);
+
     switch (type->kind)
     {
     case TYPE_U8:
@@ -480,12 +519,22 @@ static char *type_to_mangled_string(Type *type)
         return strdup(type->name ? type->name : "type");
 
     case TYPE_POINTER:
-        snprintf(buffer, sizeof(buffer), "ptr_%s", type_to_mangled_string(type->pointer.base));
-        return strdup(buffer);
+    {
+        char *base_str = type_to_mangled_string(type->pointer.base);
+        char *result   = malloc(strlen("ptr_") + strlen(base_str) + 1);
+        sprintf(result, "ptr_%s", base_str);
+        free(base_str);
+        return result;
+    }
 
     case TYPE_ARRAY:
-        snprintf(buffer, sizeof(buffer), "arr_%s", type_to_mangled_string(type->array.elem_type));
-        return strdup(buffer);
+    {
+        char *elem_str = type_to_mangled_string(type->array.elem_type);
+        char *result   = malloc(strlen("arr_") + strlen(elem_str) + 1);
+        sprintf(result, "arr_%s", elem_str);
+        free(elem_str);
+        return result;
+    }
 
     case TYPE_STRUCT:
     case TYPE_UNION:
@@ -3166,31 +3215,36 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
             Symbol *method_sym        = NULL;
             char    mangled_name[512] = {0};
 
+            // dereference pointer types for method lookup (methods can be called on pointer receivers)
+            Type *lookup_type = receiver_type;
+            if (lookup_type->kind == TYPE_POINTER)
+                lookup_type = lookup_type->pointer.base;
+
             // try to find method on alias type before resolving (for types like string = []char)
-            if (receiver_type->kind == TYPE_ALIAS && receiver_type->name)
+            if (lookup_type->kind == TYPE_ALIAS && lookup_type->name)
             {
-                snprintf(mangled_name, sizeof(mangled_name), "%s__%s", receiver_type->name, method_name);
+                snprintf(mangled_name, sizeof(mangled_name), "%s__%s", lookup_type->name, method_name);
                 method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
             }
 
             // resolve aliases for further processing
-            receiver_type = type_resolve_alias(receiver_type);
+            lookup_type = type_resolve_alias(lookup_type);
 
             // try looking up methods on the resolved type
-            if (!method_sym && (receiver_type->kind == TYPE_STRUCT || receiver_type->kind == TYPE_UNION))
+            if (!method_sym && (lookup_type->kind == TYPE_STRUCT || lookup_type->kind == TYPE_UNION))
             {
-                if (receiver_type->name)
+                if (lookup_type->name)
                 {
                     // first try: look up fully specialized method
                     // "std_types_result__Result$string$string" -> "std_types_result__Result$string$string__is_err"
-                    snprintf(mangled_name, sizeof(mangled_name), "%s__%s", receiver_type->name, method_name);
+                    snprintf(mangled_name, sizeof(mangled_name), "%s__%s", lookup_type->name, method_name);
                     method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
 
                     // if not found and type is specialized, instantiate generic method
-                    if (!method_sym && receiver_type->generic_origin && receiver_type->type_arg_count > 0)
+                    if (!method_sym && lookup_type->generic_origin && lookup_type->type_arg_count > 0)
                     {
                         // use stored type arguments from the specialized type
-                        Symbol *generic_type_sym = receiver_type->generic_origin;
+                        Symbol *generic_type_sym = lookup_type->generic_origin;
 
                         // construct generic method name from the generic type
                         char generic_method_name[256];
@@ -3223,10 +3277,10 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                         }
 
                         // instantiate generic method with type arguments from the specialized type
-                        method_sym = instantiate_generic_function(driver, ctx, generic_method, receiver_type->type_args, receiver_type->type_arg_count);
+                        method_sym = instantiate_generic_function(driver, ctx, generic_method, lookup_type->type_args, lookup_type->type_arg_count);
                         if (!method_sym)
                         {
-                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to instantiate generic method '%s' with %zu type arguments", generic_method_name, receiver_type->type_arg_count);
+                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to instantiate generic method '%s' with %zu type arguments", generic_method_name, lookup_type->type_arg_count);
                             return NULL;
                         }
                     }
@@ -3235,6 +3289,28 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
 
             if (method_sym && method_sym->kind == SYMBOL_FUNC && method_sym->func.is_method)
             {
+                // check if method expects pointer receiver and coerce if needed
+                AstNode *receiver_arg = receiver;
+                if (method_sym->type && method_sym->type->kind == TYPE_FUNCTION && method_sym->type->function.param_count > 0)
+                {
+                    Type *first_param_type = method_sym->type->function.param_types[0];
+                    if (first_param_type && first_param_type->kind == TYPE_POINTER)
+                    {
+                        // method expects pointer receiver, but we have value type
+                        if (receiver_type->kind != TYPE_POINTER)
+                        {
+                            // create address-of operation
+                            AstNode *addr_of = malloc(sizeof(AstNode));
+                            ast_node_init(addr_of, AST_EXPR_UNARY);
+                            addr_of->token          = receiver->token;
+                            addr_of->unary_expr.op  = TOKEN_QUESTION;
+                            addr_of->unary_expr.expr = receiver;
+                            addr_of->type           = type_pointer_create(receiver_type);
+                            receiver_arg = addr_of;
+                        }
+                    }
+                }
+
                 // transform method call: prepend receiver as first argument
                 if (!expr->call_expr.args)
                 {
@@ -3243,7 +3319,7 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                 }
 
                 // insert receiver at the beginning
-                ast_list_prepend(expr->call_expr.args, receiver);
+                ast_list_prepend(expr->call_expr.args, receiver_arg);
 
                 // replace func with identifier pointing to method symbol
                 AstNode *ident = malloc(sizeof(AstNode));
@@ -3405,7 +3481,7 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                     if (!type_args[i])
                     {
                         free(type_args);
-                        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to resolve type argument for generic call");
+                        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to resolve type argument %zu for generic call", i + 1);
                         return NULL;
                     }
                 }
@@ -3462,7 +3538,18 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
         Type *param_type = func_type->function.param_types[i];
         if (!type_equals(arg_type, param_type) && !type_can_assign_to(arg_type, param_type))
         {
-            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr->call_expr.args->items[i], ctx->file_path, "argument %zu has incompatible type", i + 1);
+            char *arg_type_str   = type_to_string(arg_type);
+            char *param_type_str = type_to_string(param_type);
+            diagnostic_emit(&driver->diagnostics,
+                            DIAG_ERROR,
+                            expr->call_expr.args->items[i],
+                            ctx->file_path,
+                            "argument %zu has incompatible type (expected '%s', got '%s')",
+                            i + 1,
+                            param_type_str ? param_type_str : "<unknown>",
+                            arg_type_str ? arg_type_str : "<unknown>");
+            free(arg_type_str);
+            free(param_type_str);
             return NULL;
         }
     }
@@ -4145,7 +4232,17 @@ static bool analyze_ret_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
 
     if (!type_equals(ret_type, func_ret) && !type_can_assign_to(ret_type, func_ret))
     {
-        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "incompatible return type");
+        char *ret_type_str = type_to_string(ret_type);
+        char *func_ret_str = type_to_string(func_ret);
+        diagnostic_emit(&driver->diagnostics,
+                        DIAG_ERROR,
+                        stmt,
+                        ctx->file_path,
+                        "incompatible return type (expected '%s', got '%s')",
+                        func_ret_str ? func_ret_str : "<unknown>",
+                        ret_type_str ? ret_type_str : "<unknown>");
+        free(ret_type_str);
+        free(func_ret_str);
         return false;
     }
 

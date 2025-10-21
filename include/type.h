@@ -40,9 +40,9 @@ typedef struct Type
     char    *name;      // for named types (structs, unions, aliases)
 
     // generic specialization info
-    Symbol         *generic_origin; // the generic symbol this was instantiated from
-    struct Type   **type_args;      // type arguments used for specialization
-    size_t          type_arg_count; // number of type arguments
+    Symbol       *generic_origin; // the generic symbol this was instantiated from
+    struct Type **type_args;      // type arguments used for specialization
+    size_t        type_arg_count; // number of type arguments
 
     union
     {

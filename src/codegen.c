@@ -635,24 +635,24 @@ static void codegen_generate_specialized_functions_in_scope(CodegenContext *ctx,
 void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_pie)
 {
     ctx->context = LLVMContextCreate();
-    
+
     // normalize module name for LLVM module: replace dots and slashes with underscores
     char *normalized_name = NULL;
     if (module_name)
     {
-        size_t len = strlen(module_name);
+        size_t len      = strlen(module_name);
         normalized_name = malloc(len + 1);
         for (size_t i = 0; i < len; i++)
         {
-            char ch = module_name[i];
+            char ch            = module_name[i];
             normalized_name[i] = (ch == '.' || ch == '/') ? '_' : ch;
         }
         normalized_name[len] = '\0';
     }
-    
-    ctx->module  = LLVMModuleCreateWithNameInContext(normalized_name ? normalized_name : "module", ctx->context);
+
+    ctx->module = LLVMModuleCreateWithNameInContext(normalized_name ? normalized_name : "module", ctx->context);
     free(normalized_name);
-    
+
     ctx->builder = LLVMCreateBuilderInContext(ctx->context);
     ctx->no_pie  = no_pie;
 
@@ -3062,9 +3062,9 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
         // array is a fat pointer (struct with data and len fields)
         // if the object is a pointer-like value (alloca/global/gep), return GEP to field
         // otherwise, load the value and extract the field
-        
+
         bool can_gep = LLVMIsAAllocaInst(object) || LLVMIsAGlobalVariable(object) || LLVMIsAGetElementPtrInst(object);
-        
+
         if (!can_gep && !object_is_pointer)
         {
             // object is a value, need to spill to memory first
@@ -3074,7 +3074,7 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
             object  = tmp;
             can_gep = true;
         }
-        
+
         if (can_gep)
         {
             // return GEP to field (works for both reading and writing)
@@ -3084,13 +3084,13 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
             LLVMValueRef indices[] = {LLVMConstInt(llvm_i32, 0, false), LLVMConstInt(llvm_i32, field_idx, false)};
             return LLVMBuildGEP2(ctx->builder, array_ty, object, indices, 2, "array_field");
         }
-        
+
         // fallback: load and extract value (read-only)
         LLVMValueRef fat_ptr;
         if (object_is_pointer)
         {
-            LLVMTypeRef ptr_ty = codegen_get_llvm_type(ctx, original_type);
-            object             = LLVMBuildLoad2(ctx->builder, ptr_ty, object, "array_ptr");
+            LLVMTypeRef ptr_ty   = codegen_get_llvm_type(ctx, original_type);
+            object               = LLVMBuildLoad2(ctx->builder, ptr_ty, object, "array_ptr");
             LLVMTypeRef array_ty = codegen_get_llvm_type(ctx, object_type);
             fat_ptr              = LLVMBuildLoad2(ctx->builder, array_ty, object, "array_val");
         }

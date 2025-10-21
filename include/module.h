@@ -6,8 +6,8 @@
 #include "preprocessor.h"
 #include <stdbool.h>
 
-typedef struct Module               Module;
-typedef struct ModuleManager        ModuleManager;
+typedef struct Module              Module;
+typedef struct ModuleManager       ModuleManager;
 typedef struct SpecializationCache SpecializationCache;
 
 // forward statement

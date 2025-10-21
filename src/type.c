@@ -68,11 +68,11 @@ void type_system_init(void)
     // create builtin types
     for (size_t i = 0; i < sizeof(type_info_table) / sizeof(type_info_table[0]); i++)
     {
-        Type *type         = malloc(sizeof(Type));
-        type->kind         = type_info_table[i].kind;
-        type->size         = type_info_table[i].size;
-        type->alignment    = type_info_table[i].alignment;
-        type->name         = strdup(type_info_table[i].name);
+        Type *type           = malloc(sizeof(Type));
+        type->kind           = type_info_table[i].kind;
+        type->size           = type_info_table[i].size;
+        type->alignment      = type_info_table[i].alignment;
+        type->name           = strdup(type_info_table[i].name);
         type->generic_origin = NULL;
         type->type_args      = NULL;
         type->type_arg_count = 0;
@@ -82,11 +82,11 @@ void type_system_init(void)
 
     if (!g_error_type)
     {
-        g_error_type                = malloc(sizeof(Type));
-        g_error_type->kind          = TYPE_ERROR;
-        g_error_type->size          = 0;
-        g_error_type->alignment     = 1;
-        g_error_type->name          = strdup("<error>");
+        g_error_type                 = malloc(sizeof(Type));
+        g_error_type->kind           = TYPE_ERROR;
+        g_error_type->size           = 0;
+        g_error_type->alignment      = 1;
+        g_error_type->name           = strdup("<error>");
         g_error_type->generic_origin = NULL;
         g_error_type->type_args      = NULL;
         g_error_type->type_arg_count = 0;
@@ -202,15 +202,15 @@ Type *type_pointer_create(Type *base)
         }
     }
 
-    Type *type            = malloc(sizeof(Type));
-    type->generic_origin  = NULL;
-    type->type_args       = NULL;
-    type->type_arg_count  = 0;
-    type->kind         = TYPE_POINTER;
-    type->size         = 8; // 64-bit pointers
-    type->alignment    = 8;
-    type->name         = NULL;
-    type->pointer.base = base;
+    Type *type           = malloc(sizeof(Type));
+    type->generic_origin = NULL;
+    type->type_args      = NULL;
+    type->type_arg_count = 0;
+    type->kind           = TYPE_POINTER;
+    type->size           = 8; // 64-bit pointers
+    type->alignment      = 8;
+    type->name           = NULL;
+    type->pointer.base   = base;
 
     PointerCacheEntry *entry = malloc(sizeof(PointerCacheEntry));
     entry->base              = base;
@@ -294,15 +294,15 @@ Type *type_function_create(Type *return_type, Type **param_types, size_t param_c
 
 Type *type_alias_create(const char *name, Type *target)
 {
-    Type *type            = malloc(sizeof(Type));
-    type->kind            = TYPE_ALIAS;
-    type->size            = target ? target->size : 0;
-    type->alignment       = target ? target->alignment : 0;
-    type->name            = strdup(name);
-    type->generic_origin  = NULL;
-    type->type_args       = NULL;
-    type->type_arg_count  = 0;
-    type->alias.target    = target;
+    Type *type           = malloc(sizeof(Type));
+    type->kind           = TYPE_ALIAS;
+    type->size           = target ? target->size : 0;
+    type->alignment      = target ? target->alignment : 0;
+    type->name           = strdup(name);
+    type->generic_origin = NULL;
+    type->type_args      = NULL;
+    type->type_arg_count = 0;
+    type->alias.target   = target;
     return type;
 }
 

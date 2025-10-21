@@ -887,7 +887,31 @@ static Type *resolve_type_in_context(SemanticDriver *driver, const AnalysisConte
         Type *elem = resolve_type_in_context(driver, ctx, type_node->type_array.elem_type);
         if (!elem)
             return NULL;
-        Type *arr       = type_array_create(elem);
+
+        Type *arr = NULL;
+        if (type_node->type_array.size)
+        {
+            // fixed-size array [N]T - evaluate size
+            // for now, only support integer literals
+            if (type_node->type_array.size->kind != AST_EXPR_LIT || type_node->type_array.size->lit_expr.kind != TOKEN_LIT_INT)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "array size must be an integer literal");
+                return NULL;
+            }
+            int64_t size_val = type_node->type_array.size->lit_expr.int_val;
+            if (size_val <= 0)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "array size must be positive");
+                return NULL;
+            }
+            arr = type_fixed_array_create(elem, (size_t)size_val);
+        }
+        else
+        {
+            // slice/fat pointer []T
+            arr = type_array_create(elem);
+        }
+
         type_node->type = arr;
         return arr;
     }

@@ -953,8 +953,7 @@ LLVMTypeRef codegen_get_llvm_type(CodegenContext *ctx, Type *type)
         if (!reused_llvm)
         {
             Type *cached_type = ctx->type_cache.types[i];
-            if (type->name && cached_type && cached_type->name && type->kind == cached_type->kind &&
-                (type->kind == TYPE_STRUCT || type->kind == TYPE_UNION) && strcmp(type->name, cached_type->name) == 0)
+            if (type->name && cached_type && cached_type->name && type->kind == cached_type->kind && (type->kind == TYPE_STRUCT || type->kind == TYPE_UNION) && strcmp(type->name, cached_type->name) == 0)
             {
                 reused_llvm = ctx->type_cache.llvm_types[i];
             }
@@ -1023,12 +1022,21 @@ LLVMTypeRef codegen_get_llvm_type(CodegenContext *ctx, Type *type)
         break;
     case TYPE_ARRAY:
     {
-        // all arrays are fat pointers: {ptr data, u64 length}
-        LLVMTypeRef fat_ptr_fields[2] = {
-            LLVMPointerTypeInContext(ctx->context, 0), // data pointer
-            LLVMInt64TypeInContext(ctx->context)       // length (u64)
-        };
-        llvm_type = LLVMStructTypeInContext(ctx->context, fat_ptr_fields, 2, false);
+        if (type->array.is_slice)
+        {
+            // slice/fat pointer []T: {ptr data, u64 length}
+            LLVMTypeRef fat_ptr_fields[2] = {
+                LLVMPointerTypeInContext(ctx->context, 0), // data pointer
+                LLVMInt64TypeInContext(ctx->context)       // length (u64)
+            };
+            llvm_type = LLVMStructTypeInContext(ctx->context, fat_ptr_fields, 2, false);
+        }
+        else
+        {
+            // fixed-size array [N]T: actual LLVM array type
+            LLVMTypeRef elem_type = codegen_get_llvm_type(ctx, type->array.elem_type);
+            llvm_type             = LLVMArrayType(elem_type, (unsigned)type->array.size);
+        }
     }
     break;
     case TYPE_STRUCT:
@@ -2377,6 +2385,31 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
                 }
             }
 
+            // add bounds checking for vararg access
+            LLVMBasicBlockRef bounds_fail_block = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "bounds_fail");
+            LLVMBasicBlockRef bounds_ok_block   = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "success");
+
+            // check: index < 0 || index >= count
+            LLVMValueRef zero          = LLVMConstInt(i64_ty, 0, false);
+            LLVMValueRef is_negative   = LLVMBuildICmp(ctx->builder, LLVMIntSLT, idx_val, zero, "lt");
+            LLVMValueRef is_too_large  = LLVMBuildICmp(ctx->builder, LLVMIntSGE, idx_val, ctx->current_vararg_count_value, "ge");
+            LLVMValueRef out_of_bounds = LLVMBuildOr(ctx->builder, is_negative, is_too_large, "out_of_bounds");
+
+            LLVMBuildCondBr(ctx->builder, out_of_bounds, bounds_fail_block, bounds_ok_block);
+
+            // bounds fail: call abort
+            LLVMPositionBuilderAtEnd(ctx->builder, bounds_fail_block);
+            LLVMTypeRef  abort_type = LLVMFunctionType(LLVMVoidTypeInContext(ctx->context), NULL, 0, false);
+            LLVMValueRef abort_func = LLVMGetNamedFunction(ctx->module, "abort");
+            if (!abort_func)
+            {
+                abort_func = LLVMAddFunction(ctx->module, "abort", abort_type);
+            }
+            LLVMBuildCall2(ctx->builder, abort_type, abort_func, NULL, 0, "");
+            LLVMBuildUnreachable(ctx->builder);
+
+            // bounds ok: proceed with vararg access
+            LLVMPositionBuilderAtEnd(ctx->builder, bounds_ok_block);
             LLVMTypeRef  i8_ty      = LLVMInt8TypeInContext(ctx->context);
             LLVMTypeRef  i8_ptr_ty  = LLVMPointerType(i8_ty, 0);
             LLVMValueRef indices[1] = {idx_val};
@@ -2555,9 +2588,9 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
     }
 
     // account for varargs markers that will be skipped in actual arg emission
-    int actual_arg_count = arg_expr_count - varargs_markers;
-    int total_args       = uses_mach_varargs ? (int)fixed_param_count + 2 : actual_arg_count;
-    LLVMValueRef *args   = NULL;
+    int           actual_arg_count = arg_expr_count - varargs_markers;
+    int           total_args       = uses_mach_varargs ? (int)fixed_param_count + 2 : actual_arg_count;
+    LLVMValueRef *args             = NULL;
     if (total_args > 0)
         args = malloc(sizeof(LLVMValueRef) * total_args);
 
@@ -2567,7 +2600,7 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
     for (arg_src_index = 0; arg_src_index < arg_expr_count && fixed_emit < (int)fixed_param_count; arg_src_index++)
     {
         AstNode *arg_node = expr->call_expr.args->items[arg_src_index];
-        
+
         // skip varargs forwarding marker in fixed parameter positions
         if (arg_node->kind == AST_EXPR_VARARGS)
             continue;
@@ -2579,8 +2612,8 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
             codegen_error(ctx, expr, "failed to generate call argument %d", arg_src_index);
             return NULL;
         }
-        value                = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
-        args[fixed_emit]     = value;
+        value            = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
+        args[fixed_emit] = value;
 
         Type *param_type = func_type->function.param_types[fixed_emit];
         Type *pt         = type_resolve_alias(param_type);
@@ -2758,9 +2791,9 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
                 codegen_error(ctx, expr, "failed to generate call argument %d", i);
                 return NULL;
             }
-            value                  = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
-            args[arg_dst_index]    = value;
-            Type *at               = type_resolve_alias(arg_node->type);
+            value               = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
+            args[arg_dst_index] = value;
+            Type *at            = type_resolve_alias(arg_node->type);
 
             if (at && at->kind == TYPE_ARRAY)
             {
@@ -3251,47 +3284,58 @@ LLVMValueRef codegen_expr_index(CodegenContext *ctx, AstNode *expr)
 
     if (array_type->kind == TYPE_ARRAY)
     {
-        // runtime bounds checking for all arrays (fat pointer)
-        LLVMBasicBlockRef bounds_fail_block = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "bounds_fail");
-        LLVMBasicBlockRef bounds_ok_block   = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "bounds_ok");
-
-        // extract fat pointer fields
-        LLVMValueRef fat_ptr  = codegen_load_if_needed(ctx, array, array_type, expr->index_expr.array);
-        LLVMValueRef length   = LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
-        LLVMValueRef data_ptr = LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
-
-        LLVMValueRef bounds_violated;
-        if (type_is_signed(expr->index_expr.index->type))
+        if (array_type->array.is_slice)
         {
-            LLVMValueRef zero         = LLVMConstInt(LLVMTypeOf(index), 0, false);
-            LLVMValueRef is_negative  = LLVMBuildICmp(ctx->builder, LLVMIntSLT, index, zero, "is_negative");
-            LLVMValueRef index_ext    = LLVMBuildSExt(ctx->builder, index, LLVMTypeOf(length), "index_ext");
-            LLVMValueRef is_too_large = LLVMBuildICmp(ctx->builder, LLVMIntSGE, index_ext, length, "is_too_large");
-            bounds_violated           = LLVMBuildOr(ctx->builder, is_negative, is_too_large, "bounds_violated");
+            // slice/fat pointer []T - runtime bounds checking
+            LLVMBasicBlockRef bounds_fail_block = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "bounds_fail");
+            LLVMBasicBlockRef bounds_ok_block   = LLVMAppendBasicBlockInContext(ctx->context, ctx->current_function, "bounds_ok");
+
+            // extract fat pointer fields
+            LLVMValueRef fat_ptr  = codegen_load_if_needed(ctx, array, array_type, expr->index_expr.array);
+            LLVMValueRef length   = LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
+            LLVMValueRef data_ptr = LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
+
+            LLVMValueRef bounds_violated;
+            if (type_is_signed(expr->index_expr.index->type))
+            {
+                LLVMValueRef zero         = LLVMConstInt(LLVMTypeOf(index), 0, false);
+                LLVMValueRef is_negative  = LLVMBuildICmp(ctx->builder, LLVMIntSLT, index, zero, "is_negative");
+                LLVMValueRef index_ext    = LLVMBuildSExt(ctx->builder, index, LLVMTypeOf(length), "index_ext");
+                LLVMValueRef is_too_large = LLVMBuildICmp(ctx->builder, LLVMIntSGE, index_ext, length, "is_too_large");
+                bounds_violated           = LLVMBuildOr(ctx->builder, is_negative, is_too_large, "bounds_violated");
+            }
+            else
+            {
+                LLVMValueRef index_ext = LLVMBuildZExt(ctx->builder, index, LLVMTypeOf(length), "index_ext");
+                bounds_violated        = LLVMBuildICmp(ctx->builder, LLVMIntUGE, index_ext, length, "bounds_violated");
+            }
+
+            LLVMBuildCondBr(ctx->builder, bounds_violated, bounds_fail_block, bounds_ok_block);
+
+            // bounds fail: call abort
+            LLVMPositionBuilderAtEnd(ctx->builder, bounds_fail_block);
+            LLVMTypeRef  abort_type = LLVMFunctionType(LLVMVoidTypeInContext(ctx->context), NULL, 0, false);
+            LLVMValueRef abort_func = LLVMGetNamedFunction(ctx->module, "abort");
+            if (!abort_func)
+            {
+                abort_func = LLVMAddFunction(ctx->module, "abort", abort_type);
+            }
+            LLVMBuildCall2(ctx->builder, abort_type, abort_func, NULL, 0, "");
+            LLVMBuildUnreachable(ctx->builder);
+
+            // continue with bounds ok - do the actual indexing
+            LLVMPositionBuilderAtEnd(ctx->builder, bounds_ok_block);
+            LLVMTypeRef elem_type = codegen_get_llvm_type(ctx, array_type->array.elem_type);
+            return LLVMBuildGEP2(ctx->builder, elem_type, data_ptr, &index, 1, "index");
         }
         else
         {
-            LLVMValueRef index_ext = LLVMBuildZExt(ctx->builder, index, LLVMTypeOf(length), "index_ext");
-            bounds_violated        = LLVMBuildICmp(ctx->builder, LLVMIntUGE, index_ext, length, "bounds_violated");
+            // fixed-size array [N]T - use GEP with indices [0, index]
+            // no runtime bounds check needed for compile-time known sizes
+            LLVMValueRef zero       = LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false);
+            LLVMValueRef indices[2] = {zero, index};
+            return LLVMBuildGEP2(ctx->builder, codegen_get_llvm_type(ctx, array_type), array, indices, 2, "index");
         }
-
-        LLVMBuildCondBr(ctx->builder, bounds_violated, bounds_fail_block, bounds_ok_block);
-
-        // bounds fail: call abort
-        LLVMPositionBuilderAtEnd(ctx->builder, bounds_fail_block);
-        LLVMTypeRef  abort_type = LLVMFunctionType(LLVMVoidTypeInContext(ctx->context), NULL, 0, false);
-        LLVMValueRef abort_func = LLVMGetNamedFunction(ctx->module, "abort");
-        if (!abort_func)
-        {
-            abort_func = LLVMAddFunction(ctx->module, "abort", abort_type);
-        }
-        LLVMBuildCall2(ctx->builder, abort_type, abort_func, NULL, 0, "");
-        LLVMBuildUnreachable(ctx->builder);
-
-        // continue with bounds ok - do the actual indexing
-        LLVMPositionBuilderAtEnd(ctx->builder, bounds_ok_block);
-        LLVMTypeRef elem_type = codegen_get_llvm_type(ctx, array_type->array.elem_type);
-        return LLVMBuildGEP2(ctx->builder, elem_type, data_ptr, &index, 1, "index");
     }
     else if (array_type->kind == TYPE_POINTER || array_type->kind == TYPE_PTR)
     {

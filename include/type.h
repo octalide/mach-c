@@ -52,10 +52,12 @@ typedef struct Type
             struct Type *base;
         } pointer;
 
-        // TYPE_ARRAY (fat pointer: {data, len})
+        // TYPE_ARRAY
         struct
         {
             struct Type *elem_type;
+            size_t       size;     // 0 for slices/fat pointers, >0 for fixed-size arrays
+            bool         is_slice; // true for []T (fat pointer), false for [N]T (fixed-size)
         } array;
 
         // TYPE_STRUCT, TYPE_UNION
@@ -103,7 +105,8 @@ Type *type_error(void);
 
 // type constructors
 Type *type_pointer_create(Type *base);
-Type *type_array_create(Type *elem_type);
+Type *type_array_create(Type *elem_type);                    // creates slice/fat pointer []T
+Type *type_fixed_array_create(Type *elem_type, size_t size); // creates fixed-size [N]T
 Type *type_struct_create(const char *name);
 Type *type_union_create(const char *name);
 Type *type_function_create(Type *return_type, Type **param_types, size_t param_count, bool is_variadic);

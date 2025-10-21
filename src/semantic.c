@@ -356,6 +356,22 @@ void specialization_cache_insert(SpecializationCache *cache, Symbol *generic_sym
     cache->entry_count++;
 }
 
+void specialization_cache_foreach(SpecializationCache *cache, void (*callback)(Symbol *specialized, void *user_data), void *user_data)
+{
+    if (!cache || !callback)
+        return;
+
+    for (size_t i = 0; i < cache->bucket_count; i++)
+    {
+        SpecializationEntry *entry = cache->buckets[i];
+        while (entry)
+        {
+            callback(entry->specialized_symbol, user_data);
+            entry = entry->next;
+        }
+    }
+}
+
 void instantiation_queue_init(InstantiationQueue *queue)
 {
     queue->head  = NULL;
@@ -562,9 +578,21 @@ char *mangle_method(const char *module_name, const char *owner_name, const char 
     const char *mth        = method_name ? method_name : "method";
     const char *ptr_suffix = receiver_is_pointer ? "_ptr" : "";
 
-    size_t len    = strlen(mod) + 2 + strlen(own) + 2 + strlen(mth) + strlen(ptr_suffix) + 1;
+    // normalize module name: replace dots and slashes with underscores
+    size_t mod_len = strlen(mod);
+    char  *normalized_mod = malloc(mod_len + 1);
+    for (size_t i = 0; i < mod_len; i++)
+    {
+        char ch = mod[i];
+        normalized_mod[i] = (ch == '.' || ch == '/') ? '_' : ch;
+    }
+    normalized_mod[mod_len] = '\0';
+
+    size_t len    = strlen(normalized_mod) + 2 + strlen(own) + 2 + strlen(mth) + strlen(ptr_suffix) + 1;
     char  *result = malloc(len);
-    snprintf(result, len, "%s__%s__%s%s", mod, own, mth, ptr_suffix);
+    snprintf(result, len, "%s__%s__%s%s", normalized_mod, own, mth, ptr_suffix);
+    
+    free(normalized_mod);
     return result;
 }
 
@@ -573,9 +601,21 @@ char *mangle_global_symbol(const char *module_name, const char *symbol_name)
     const char *mod = module_name ? module_name : "mod";
     const char *sym = symbol_name ? symbol_name : "symbol";
 
-    size_t len    = strlen(mod) + 2 + strlen(sym) + 1;
+    // normalize module name: replace dots and slashes with underscores
+    size_t mod_len = strlen(mod);
+    char  *normalized_mod = malloc(mod_len + 1);
+    for (size_t i = 0; i < mod_len; i++)
+    {
+        char ch = mod[i];
+        normalized_mod[i] = (ch == '.' || ch == '/') ? '_' : ch;
+    }
+    normalized_mod[mod_len] = '\0';
+
+    size_t len    = strlen(normalized_mod) + 2 + strlen(sym) + 1;
     char  *result = malloc(len);
-    snprintf(result, len, "%s__%s", mod, sym);
+    snprintf(result, len, "%s__%s", normalized_mod, sym);
+    
+    free(normalized_mod);
     return result;
 }
 
@@ -863,6 +903,11 @@ static Type *resolve_type_in_context(SemanticDriver *driver, const AnalysisConte
                     return NULL;
                 }
 
+                // resolve alias to get actual type with proper size
+                Type *resolved_type = type_resolve_alias(field_type);
+                if (resolved_type)
+                    field_type = resolved_type;
+
                 Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
 
                 size_t field_align         = type_alignof(field_type);
@@ -941,6 +986,11 @@ static Type *resolve_type_in_context(SemanticDriver *driver, const AnalysisConte
                     free(union_type);
                     return NULL;
                 }
+
+                // resolve alias to get actual type with proper size
+                Type *resolved_type = type_resolve_alias(field_type);
+                if (resolved_type)
+                    field_type = resolved_type;
 
                 Symbol *field_symbol       = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
                 field_symbol->field.offset = 0; // all union fields start at offset 0
@@ -1434,11 +1484,12 @@ static bool declare_method_stmt(SemanticDriver *driver, const AnalysisContext *c
 
     Type   *placeholder      = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
     Symbol *symbol           = symbol_create(SYMBOL_FUNC, strdup(mangled), placeholder, stmt);
-    symbol->func.is_external = false;
-    symbol->func.is_method   = true;
-    symbol->func.is_defined  = (stmt->fun_stmt.body != NULL);
-    symbol->func.is_generic  = is_generic;
-    symbol->func.method_owner = owner_sym;
+    symbol->func.is_external       = false;
+    symbol->func.is_method         = true;
+    symbol->func.is_defined        = (stmt->fun_stmt.body != NULL);
+    symbol->func.is_generic        = is_generic;
+    symbol->func.uses_mach_varargs = stmt->fun_stmt.is_variadic; // mark variadic methods
+    symbol->func.method_owner      = owner_sym;
     symbol->func.method_forwarded_generic_count = owner_generic_count;
     
     // store all generic parameter names (owner params first, then method params)
@@ -1476,6 +1527,18 @@ static bool declare_method_stmt(SemanticDriver *driver, const AnalysisContext *c
     symbol->module_name = ctx->module_name ? strdup(ctx->module_name) : NULL;
     symbol->home_scope  = ctx->current_scope;
 
+    // set mangled name for methods: check for #@symbol directive, otherwise use module__Type__method
+    if (stmt->fun_stmt.mangle_name && stmt->fun_stmt.mangle_name[0])
+    {
+        // explicit symbol name from #@symbol directive
+        symbol->func.extern_name = strdup(stmt->fun_stmt.mangle_name);
+    }
+    else if (!is_generic && ctx->module_name && ctx->module_name[0])
+    {
+        // non-generic methods get mangled with module name and owner type
+        symbol->func.mangled_name = mangle_method(ctx->module_name, owner_name, method_name, false);
+    }
+
     // add to current scope with mangled name
     symbol_add(ctx->current_scope, symbol);
 
@@ -1511,9 +1574,10 @@ static bool declare_fun_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
     // create function symbol - signature resolved in pass B
     Type   *placeholder      = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
     Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, placeholder, stmt);
-    symbol->func.is_external = false; // regular functions are not external
-    symbol->func.is_defined  = (stmt->fun_stmt.body != NULL);
-    symbol->func.is_generic  = is_generic;
+    symbol->func.is_external       = false; // regular functions are not external
+    symbol->func.is_defined        = (stmt->fun_stmt.body != NULL);
+    symbol->func.is_generic        = is_generic;
+    symbol->func.uses_mach_varargs = stmt->fun_stmt.is_variadic; // mark variadic functions
     if (is_generic)
     {
         size_t generic_count             = (size_t)stmt->fun_stmt.generics->count;
@@ -1532,6 +1596,18 @@ static bool declare_fun_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
     symbol->is_public   = stmt->fun_stmt.is_public;
     symbol->module_name = ctx->module_name ? strdup(ctx->module_name) : NULL;
     symbol->home_scope  = ctx->current_scope;
+
+    // set mangled name: use #@symbol directive if present, otherwise mangle with module name
+    if (stmt->fun_stmt.mangle_name && stmt->fun_stmt.mangle_name[0])
+    {
+        // explicit symbol name from #@symbol directive
+        symbol->func.extern_name = strdup(stmt->fun_stmt.mangle_name);
+    }
+    else if (!is_generic && ctx->module_name && ctx->module_name[0])
+    {
+        // non-generic functions get mangled with module name
+        symbol->func.mangled_name = mangle_global_symbol(ctx->module_name, name);
+    }
 
     symbol_add(ctx->current_scope, symbol);
     stmt->symbol = symbol;
@@ -1561,6 +1637,12 @@ static bool declare_ext_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
     symbol->module_name      = ctx->module_name ? strdup(ctx->module_name) : NULL;
     symbol->home_scope       = ctx->current_scope;
 
+    // external functions use the explicit symbol name if provided
+    if (stmt->ext_stmt.symbol && stmt->ext_stmt.symbol[0])
+    {
+        symbol->func.extern_name = strdup(stmt->ext_stmt.symbol);
+    }
+
     symbol_add(ctx->current_scope, symbol);
     stmt->symbol = symbol;
     return true;
@@ -1586,6 +1668,12 @@ static bool declare_var_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
     symbol->is_public     = stmt->var_stmt.is_public;
     symbol->module_name   = ctx->module_name ? strdup(ctx->module_name) : NULL;
     symbol->home_scope    = ctx->current_scope;
+
+    // mangle global variable/constant names with module prefix to avoid collisions
+    if (ctx->module_name && ctx->module_name[0])
+    {
+        symbol->var.mangled_name = mangle_global_symbol(ctx->module_name, name);
+    }
 
     symbol_add(ctx->current_scope, symbol);
     stmt->symbol = symbol;
@@ -2294,6 +2382,11 @@ found_union_module:;
                 return NULL;
             }
 
+            // resolve aliases to get actual type with size
+            Type *resolved_field_type = type_resolve_alias(field_type);
+            if (resolved_field_type)
+                field_type = resolved_field_type;
+
             Symbol *field_sym       = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
             field_sym->field.offset = 0;
 
@@ -2454,17 +2547,20 @@ found_func_module:;
     free(param_types);
 
     // create specialized symbol
-    Symbol *specialized_sym           = symbol_create(SYMBOL_FUNC, specialized_name, func_type, generic_decl);
-    specialized_sym->func.is_external = generic_sym->func.is_external;
-    specialized_sym->func.is_defined  = generic_sym->func.is_defined;
-    specialized_sym->func.is_generic  = false;
-    specialized_sym->func.is_method   = generic_sym->func.is_method;
-    specialized_sym->func.method_owner = generic_sym->func.method_owner;
-    specialized_sym->is_public        = generic_sym->is_public;
-    specialized_sym->module_name      = module_name ? strdup(module_name) : NULL;
-    specialized_sym->home_scope       = generic_sym->home_scope;
+    Symbol *specialized_sym                      = symbol_create(SYMBOL_FUNC, specialized_name, func_type, generic_decl);
+    specialized_sym->func.is_external            = generic_sym->func.is_external;
+    specialized_sym->func.is_defined             = generic_sym->func.is_defined;
+    specialized_sym->func.is_generic             = false;
+    specialized_sym->func.is_specialized_instance = true;
+    specialized_sym->func.uses_mach_varargs      = generic_sym->func.uses_mach_varargs;
+    specialized_sym->func.is_method              = generic_sym->func.is_method;
+    specialized_sym->func.method_owner           = generic_sym->func.method_owner;
+    specialized_sym->is_public                   = generic_sym->is_public;
+    specialized_sym->module_name                 = module_name ? strdup(module_name) : NULL;
+    specialized_sym->home_scope                  = generic_sym->home_scope;
+    specialized_sym->func.mangled_name           = strdup(specialized_name);
 
-    // add specialized symbol to the appropriate scope so it can be looked up
+    // add specialized symbol to the generic's home scope (where it's defined)
     if (generic_sym->home_scope)
     {
         symbol_add(generic_sym->home_scope, specialized_sym);
@@ -2473,15 +2569,26 @@ found_func_module:;
     // cache the specialization
     specialization_cache_insert(&driver->spec_cache, generic_sym, type_args, arg_count, specialized_sym);
 
-    // if function has body, analyze it with specialized context
+    // if function has body, clone AST and analyze it with specialized context
     if (generic_decl->fun_stmt.body && generic_sym->func.is_defined)
     {
-        // create temporary AST node for specialized function (reuse generic_decl but with specialized symbol)
-        AstNode specialized_decl = *generic_decl;
-        specialized_decl.symbol  = specialized_sym;
-
-        if (!analyze_function_body(driver, &specialized_ctx, &specialized_decl))
+        // clone the generic template AST so this specialization has independent scope bindings
+        AstNode *specialized_decl = ast_clone(generic_decl);
+        if (!specialized_decl)
         {
+            free(specialized_name);
+            return NULL;
+        }
+
+        // set the specialized symbol and type on the cloned AST
+        specialized_decl->symbol = specialized_sym;
+        specialized_decl->type   = func_type; // set the specialized function type
+        specialized_sym->decl    = specialized_decl; // update symbol to point to cloned AST
+
+        if (!analyze_function_body(driver, &specialized_ctx, specialized_decl))
+        {
+            ast_node_dnit(specialized_decl);
+            free(specialized_decl);
             free(specialized_name);
             return NULL; // body analysis failed
         }
@@ -3361,6 +3468,18 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
         }
     }
 
+    // for variadic functions, analyze remaining arguments
+    if (func_type->function.is_variadic)
+    {
+        for (size_t i = expected; i < provided; i++)
+        {
+            AstNode *arg_node = expr->call_expr.args->items[i];
+            Type    *arg_type = analyze_expr(driver, ctx, arg_node);
+            if (!arg_type)
+                return NULL;
+        }
+    }
+
     expr->type = func_type->function.return_type;
     return expr->type;
 }
@@ -3397,8 +3516,9 @@ static Type *analyze_field_expr(SemanticDriver *driver, const AnalysisContext *c
                 member->const_i64     = member->import_origin->const_i64;
             }
 
-            expr->symbol = target;
-            expr->type   = target->type;
+            expr->field_expr.object->symbol = sym;
+            expr->symbol                    = target;
+            expr->type                      = target->type;
             return expr->type;
         }
     }
@@ -3819,9 +3939,15 @@ static Type *analyze_expr(SemanticDriver *driver, const AnalysisContext *ctx, As
     case AST_EXPR_ARRAY:
         return analyze_array_expr(driver, ctx, expr);
     case AST_EXPR_VARARGS:
-        // varargs forwarding - TODO: implement properly
-        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "varargs forwarding not yet implemented");
-        return NULL;
+        // varargs forwarding - only valid in variadic functions
+        if (!ctx->current_function || !ctx->current_function->type || !ctx->current_function->type->function.is_variadic)
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "varargs forwarding (...) can only be used in variadic functions");
+            return NULL;
+        }
+        // varargs forwarding is a special marker - give it a placeholder type
+        expr->type = type_u64();
+        return expr->type;
     case AST_EXPR_NULL:
         return analyze_null_expr_with_hint(driver, ctx, expr, NULL);
     default:
@@ -4158,6 +4284,7 @@ static bool analyze_function_body(SemanticDriver *driver, const AnalysisContext 
             // parameters behave like immutable locals
             Symbol *param_sym      = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param_type, param);
             param_sym->param.index = (size_t)i;
+            param->symbol          = param_sym;  // set symbol on parameter node
             symbol_add(func_ctx.current_scope, param_sym);
         }
     }
@@ -4386,10 +4513,15 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // Mark all modules as analyzed
+    // Mark all modules as analyzed and needing linking
     FOR_EACH_MODULE(&driver->module_manager, module)
     {
         module->is_analyzed = true;
+        // mark module for linking if it has an AST with statements
+        if (module->ast && module->ast->kind == AST_PROGRAM && module->ast->program.stmts && module->ast->program.stmts->count > 0)
+        {
+            module->needs_linking = true;
+        }
     }
 
     // ==== PHASE 6: PROCESS GENERIC INSTANTIATIONS ====

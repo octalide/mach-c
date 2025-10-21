@@ -428,7 +428,7 @@ bool compilation_compile_dependencies(CompilationContext *ctx)
     snprintf(dep_out_dir, sizeof(dep_out_dir), "%s/out/obj", ctx->project_root);
     fs_ensure_dir_recursive(dep_out_dir);
 
-    if (!module_manager_compile_dependencies(&ctx->driver->module_manager, dep_out_dir, ctx->options->opt_level, ctx->options->no_pie, ctx->options->debug_info))
+    if (!module_manager_compile_dependencies(&ctx->driver->module_manager, dep_out_dir, ctx->options->opt_level, ctx->options->no_pie, ctx->options->debug_info, &ctx->driver->spec_cache))
     {
         fprintf(stderr, "error: failed to compile dependencies\n");
         return false;

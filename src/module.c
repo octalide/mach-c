@@ -1199,7 +1199,7 @@ bool module_has_circular_dependency(ModuleManager *manager, Module *module, cons
 }
 
 // helper declarations
-static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info);
+static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info, SpecializationCache *spec_cache);
 
 char *module_make_object_path(const char *output_dir, const char *module_name)
 {
@@ -1241,7 +1241,7 @@ char *module_make_object_path(const char *output_dir, const char *module_name)
     return path;
 }
 
-bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie, bool debug_info)
+bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie, bool debug_info, SpecializationCache *spec_cache)
 {
     if (!manager)
         return false;
@@ -1279,7 +1279,7 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
 
             // no info output
 
-            if (!compile_module_to_object(manager, module, output_dir, opt_level, no_pie, debug_info))
+            if (!compile_module_to_object(manager, module, output_dir, opt_level, no_pie, debug_info, spec_cache))
             {
                 return false;
             }
@@ -1339,7 +1339,7 @@ bool module_manager_get_link_objects(ModuleManager *manager, char ***object_file
     return true;
 }
 
-static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info)
+static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info, SpecializationCache *spec_cache)
 {
     if (!module || !module->ast)
         return false;
@@ -1365,6 +1365,7 @@ static bool compile_module_to_object(ModuleManager *manager, Module *module, con
     ctx.debug_info   = debug_info;
     ctx.source_file  = module->file_path;
     ctx.source_lexer = NULL;
+    ctx.spec_cache   = spec_cache; // pass cache to codegen for generating specialized functions
 
     Lexer *debug_lexer_ptr = NULL;
     Lexer  debug_lexer;

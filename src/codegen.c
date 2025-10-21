@@ -525,6 +525,10 @@ static void codegen_declare_function_symbol(CodegenContext *ctx, Symbol *sym)
     if (sym->kind != SYMBOL_FUNC)
         return;
 
+    // skip generic templates - only declare concrete functions and specialized instances
+    if (sym->func.is_generic && !sym->func.is_specialized_instance)
+        return;
+
     if (codegen_get_symbol_value(ctx, sym))
         return;
 
@@ -595,10 +599,60 @@ static void codegen_declare_functions_in_scope(CodegenContext *ctx, Scope *scope
     }
 }
 
+static void codegen_generate_specialized_function(Symbol *sym, void *user_data)
+{
+    CodegenContext *ctx = (CodegenContext *)user_data;
+
+    // only generate specialized functions
+    if (sym->kind != SYMBOL_FUNC || !sym->func.is_specialized_instance || !sym->func.is_defined || !sym->decl)
+        return;
+
+    // check if function has already been declared (we'll generate the body anyway if it's just a declaration)
+    LLVMValueRef existing = codegen_get_symbol_value(ctx, sym);
+    if (existing && !LLVMIsDeclaration(existing))
+    {
+        // already has a body, skip
+        return;
+    }
+
+    // generate the function using its own cloned, analyzed AST
+    // (each specialization has its own AST with correct scope bindings)
+    codegen_stmt_fun(ctx, sym->decl);
+}
+
+static void codegen_generate_specialized_functions_in_scope(CodegenContext *ctx, Scope *scope)
+{
+    if (!scope)
+        return;
+
+    // walk all symbols and generate bodies for specialized function instances
+    for (Symbol *sym = scope->symbols; sym; sym = sym->next)
+    {
+        codegen_generate_specialized_function(sym, ctx);
+    }
+}
+
 void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_pie)
 {
     ctx->context = LLVMContextCreate();
-    ctx->module  = LLVMModuleCreateWithNameInContext(module_name, ctx->context);
+    
+    // normalize module name for LLVM module: replace dots and slashes with underscores
+    char *normalized_name = NULL;
+    if (module_name)
+    {
+        size_t len = strlen(module_name);
+        normalized_name = malloc(len + 1);
+        for (size_t i = 0; i < len; i++)
+        {
+            char ch = module_name[i];
+            normalized_name[i] = (ch == '.' || ch == '/') ? '_' : ch;
+        }
+        normalized_name[len] = '\0';
+    }
+    
+    ctx->module  = LLVMModuleCreateWithNameInContext(normalized_name ? normalized_name : "module", ctx->context);
+    free(normalized_name);
+    
     ctx->builder = LLVMCreateBuilderInContext(ctx->context);
     ctx->no_pie  = no_pie;
 
@@ -703,6 +757,8 @@ void codegen_context_dnit(CodegenContext *ctx)
     // no heap state for varargs
 }
 
+static void codegen_generate_specialized_functions_in_scope(CodegenContext *ctx, Scope *scope);
+
 bool codegen_generate(CodegenContext *ctx, AstNode *root, SymbolTable *symbols)
 {
     if (root->kind != AST_PROGRAM)
@@ -725,6 +781,22 @@ bool codegen_generate(CodegenContext *ctx, AstNode *root, SymbolTable *symbols)
     {
         AstNode *stmt = root->program.stmts->items[i];
         codegen_stmt(ctx, stmt);
+    }
+
+    // generate specialized generic function instances from local scopes
+    if (symbols)
+    {
+        codegen_generate_specialized_functions_in_scope(ctx, symbols->global_scope);
+        codegen_generate_specialized_functions_in_scope(ctx, symbols->module_scope);
+    }
+
+    // generate ALL specialized functions from global cache
+    // Each specialization has its own cloned AST with proper scope bindings,
+    // so we can safely generate them in any module. The linker will deduplicate
+    // via linkonce_odr linkage (standard C++ template model)
+    if (ctx->spec_cache)
+    {
+        specialization_cache_foreach(ctx->spec_cache, codegen_generate_specialized_function, ctx);
     }
 
     if (ctx->debug_info)
@@ -1380,14 +1452,25 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
 
 LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
 {
-    if (!stmt->symbol || !stmt->type)
+    // skip generic function templates (they're instantiated on demand)
+    // specialized instances have their own cloned ASTs and should be generated
+    if (stmt->symbol)
     {
-        codegen_error(ctx, stmt, "function declaration missing symbol or type info");
+        if (stmt->symbol->func.is_generic && !stmt->symbol->func.is_specialized_instance)
+        {
+            // this is a generic template - skip it
+            return NULL;
+        }
+    }
+    else if (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
+    {
+        // AST has generics but no symbol - skip it
         return NULL;
     }
 
-    if ((stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0) || (stmt->symbol && stmt->symbol->func.is_generic))
+    if (!stmt->symbol || !stmt->type)
     {
+        codegen_error(ctx, stmt, "function declaration missing symbol or type info");
         return NULL;
     }
 
@@ -2976,16 +3059,38 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
 
     if (object_type->kind == TYPE_ARRAY)
     {
+        // array is a fat pointer (struct with data and len fields)
+        // if the object is a pointer-like value (alloca/global/gep), return GEP to field
+        // otherwise, load the value and extract the field
+        
+        bool can_gep = LLVMIsAAllocaInst(object) || LLVMIsAGlobalVariable(object) || LLVMIsAGetElementPtrInst(object);
+        
+        if (!can_gep && !object_is_pointer)
+        {
+            // object is a value, need to spill to memory first
+            LLVMTypeRef  array_ty = codegen_get_llvm_type(ctx, object_type);
+            LLVMValueRef tmp      = codegen_create_alloca(ctx, array_ty, "tmp_array");
+            LLVMBuildStore(ctx->builder, object, tmp);
+            object  = tmp;
+            can_gep = true;
+        }
+        
+        if (can_gep)
+        {
+            // return GEP to field (works for both reading and writing)
+            LLVMTypeRef  llvm_i32  = LLVMInt32TypeInContext(ctx->context);
+            LLVMTypeRef  array_ty  = codegen_get_llvm_type(ctx, object_type);
+            int          field_idx = strcmp(expr->field_expr.field, "data") == 0 ? 0 : 1;
+            LLVMValueRef indices[] = {LLVMConstInt(llvm_i32, 0, false), LLVMConstInt(llvm_i32, field_idx, false)};
+            return LLVMBuildGEP2(ctx->builder, array_ty, object, indices, 2, "array_field");
+        }
+        
+        // fallback: load and extract value (read-only)
         LLVMValueRef fat_ptr;
-
         if (object_is_pointer)
         {
             LLVMTypeRef ptr_ty = codegen_get_llvm_type(ctx, original_type);
-            if (LLVMIsAAllocaInst(object) || LLVMIsAGlobalVariable(object) || LLVMIsAGetElementPtrInst(object))
-            {
-                object = LLVMBuildLoad2(ctx->builder, ptr_ty, object, "array_ptr");
-            }
-
+            object             = LLVMBuildLoad2(ctx->builder, ptr_ty, object, "array_ptr");
             LLVMTypeRef array_ty = codegen_get_llvm_type(ctx, object_type);
             fat_ptr              = LLVMBuildLoad2(ctx->builder, array_ty, object, "array_val");
         }

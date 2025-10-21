@@ -87,6 +87,9 @@ struct CodegenContext
     LLVMValueRef current_vararg_count_value; // u64 count parameter passed to current function (null if none)
     LLVMValueRef current_vararg_array;       // i8** pointing to packed variadic argument slots
     size_t       current_fixed_param_count;  // number of fixed parameters in current function
+
+    // specialization cache for cross-module generic instantiation
+    struct SpecializationCache *spec_cache;
 };
 
 // context lifecycle

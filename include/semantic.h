@@ -170,6 +170,7 @@ void    specialization_cache_init(SpecializationCache *cache);
 void    specialization_cache_dnit(SpecializationCache *cache);
 Symbol *specialization_cache_find(SpecializationCache *cache, Symbol *generic_symbol, Type **type_args, size_t type_arg_count);
 void    specialization_cache_insert(SpecializationCache *cache, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, Symbol *specialized);
+void    specialization_cache_foreach(SpecializationCache *cache, void (*callback)(Symbol *specialized, void *user_data), void *user_data);
 
 // instantiation queue
 void                  instantiation_queue_init(InstantiationQueue *queue);

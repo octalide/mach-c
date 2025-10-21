@@ -157,7 +157,7 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
 void diagnostic_sink_init(DiagnosticSink *sink);
 void diagnostic_sink_dnit(DiagnosticSink *sink);
 void diagnostic_emit(DiagnosticSink *sink, DiagnosticLevel level, AstNode *node, const char *file_path, const char *fmt, ...);
-void diagnostic_print_all(DiagnosticSink *sink);
+void diagnostic_print_all(DiagnosticSink *sink, ModuleManager *module_manager);
 
 // generic bindings
 GenericBindingCtx generic_binding_ctx_create(void);

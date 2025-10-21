@@ -84,6 +84,7 @@ size_t module_manager_collect_constants(ModuleManager *manager, PreprocessorCons
 // module loading
 Module *module_manager_load_module(ModuleManager *manager, const char *module_path);
 Module *module_manager_find_module(ModuleManager *manager, const char *name);
+Module *module_manager_find_by_file_path(ModuleManager *manager, const char *file_path);
 
 // dependency compilation and linking
 bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie, bool debug_info);

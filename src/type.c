@@ -68,22 +68,28 @@ void type_system_init(void)
     // create builtin types
     for (size_t i = 0; i < sizeof(type_info_table) / sizeof(type_info_table[0]); i++)
     {
-        Type *type      = malloc(sizeof(Type));
-        type->kind      = type_info_table[i].kind;
-        type->size      = type_info_table[i].size;
-        type->alignment = type_info_table[i].alignment;
-        type->name      = strdup(type_info_table[i].name);
+        Type *type         = malloc(sizeof(Type));
+        type->kind         = type_info_table[i].kind;
+        type->size         = type_info_table[i].size;
+        type->alignment    = type_info_table[i].alignment;
+        type->name         = strdup(type_info_table[i].name);
+        type->generic_origin = NULL;
+        type->type_args      = NULL;
+        type->type_arg_count = 0;
 
         g_builtin_types[type->kind] = type;
     }
 
     if (!g_error_type)
     {
-        g_error_type            = malloc(sizeof(Type));
-        g_error_type->kind      = TYPE_ERROR;
-        g_error_type->size      = 0;
-        g_error_type->alignment = 1;
-        g_error_type->name      = strdup("<error>");
+        g_error_type                = malloc(sizeof(Type));
+        g_error_type->kind          = TYPE_ERROR;
+        g_error_type->size          = 0;
+        g_error_type->alignment     = 1;
+        g_error_type->name          = strdup("<error>");
+        g_error_type->generic_origin = NULL;
+        g_error_type->type_args      = NULL;
+        g_error_type->type_arg_count = 0;
     }
 }
 
@@ -196,7 +202,10 @@ Type *type_pointer_create(Type *base)
         }
     }
 
-    Type *type         = malloc(sizeof(Type));
+    Type *type            = malloc(sizeof(Type));
+    type->generic_origin  = NULL;
+    type->type_args       = NULL;
+    type->type_arg_count  = 0;
     type->kind         = TYPE_POINTER;
     type->size         = 8; // 64-bit pointers
     type->alignment    = 8;
@@ -219,6 +228,9 @@ Type *type_array_create(Type *elem_type)
     type->size            = 16; // fat pointer: {void *data, u64 len}
     type->alignment       = 8;
     type->name            = NULL;
+    type->generic_origin  = NULL;
+    type->type_args       = NULL;
+    type->type_arg_count  = 0;
     type->array.elem_type = elem_type;
     return type;
 }
@@ -230,6 +242,9 @@ Type *type_struct_create(const char *name)
     type->size                  = 0; // calculated later
     type->alignment             = 1; // calculated later
     type->name                  = name ? strdup(name) : NULL;
+    type->generic_origin        = NULL;
+    type->type_args             = NULL;
+    type->type_arg_count        = 0;
     type->composite.fields      = NULL;
     type->composite.field_count = 0;
     return type;
@@ -242,6 +257,9 @@ Type *type_union_create(const char *name)
     type->size                  = 0; // calculated later
     type->alignment             = 1; // calculated later
     type->name                  = name ? strdup(name) : NULL;
+    type->generic_origin        = NULL;
+    type->type_args             = NULL;
+    type->type_arg_count        = 0;
     type->composite.fields      = NULL;
     type->composite.field_count = 0;
     return type;
@@ -254,6 +272,9 @@ Type *type_function_create(Type *return_type, Type **param_types, size_t param_c
     type->size                 = 8; // function pointers are 8 bytes
     type->alignment            = 8;
     type->name                 = NULL;
+    type->generic_origin       = NULL;
+    type->type_args            = NULL;
+    type->type_arg_count       = 0;
     type->function.return_type = return_type;
     type->function.param_count = param_count;
     type->function.is_variadic = is_variadic;
@@ -273,12 +294,15 @@ Type *type_function_create(Type *return_type, Type **param_types, size_t param_c
 
 Type *type_alias_create(const char *name, Type *target)
 {
-    Type *type         = malloc(sizeof(Type));
-    type->kind         = TYPE_ALIAS;
-    type->size         = target ? target->size : 0;
-    type->alignment    = target ? target->alignment : 0;
-    type->name         = strdup(name);
-    type->alias.target = target;
+    Type *type            = malloc(sizeof(Type));
+    type->kind            = TYPE_ALIAS;
+    type->size            = target ? target->size : 0;
+    type->alignment       = target ? target->alignment : 0;
+    type->name            = strdup(name);
+    type->generic_origin  = NULL;
+    type->type_args       = NULL;
+    type->type_arg_count  = 0;
+    type->alias.target    = target;
     return type;
 }
 

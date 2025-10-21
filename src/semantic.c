@@ -120,7 +120,7 @@ static unsigned int hash_file_path(const char *path)
     return hash;
 }
 
-static char *get_cached_source(DiagnosticSink *sink, const char *file_path)
+static char *get_cached_source(DiagnosticSink *sink, ModuleManager *module_manager, const char *file_path)
 {
     if (!sink->source_cache || !file_path)
         return NULL;
@@ -135,21 +135,37 @@ static char *get_cached_source(DiagnosticSink *sink, const char *file_path)
         entry = entry->next;
     }
 
-    // not cached, read and cache it
-    char *source = read_file((char *)file_path);
+    // try to get preprocessed source from module manager first
+    char *source = NULL;
+    if (module_manager)
+    {
+        Module *module = module_manager_find_by_file_path(module_manager, file_path);
+        if (module && module->source)
+        {
+            source = module->source;
+        }
+    }
+    
+    // fallback: read original file from disk
+    if (!source)
+    {
+        source = read_file((char *)file_path);
+    }
+
     if (source)
     {
         entry                    = malloc(sizeof(SourceCacheEntry));
         entry->file_path         = strdup(file_path);
-        entry->source            = source;
+        entry->source            = strdup(source); // always strdup for consistent memory management
         entry->next              = sink->source_cache[hash];
         sink->source_cache[hash] = entry;
+        return entry->source;
     }
 
-    return source;
+    return NULL;
 }
 
-void diagnostic_print_all(DiagnosticSink *sink)
+void diagnostic_print_all(DiagnosticSink *sink, ModuleManager *module_manager)
 {
     for (size_t i = 0; i < sink->count; i++)
     {
@@ -165,8 +181,8 @@ void diagnostic_print_all(DiagnosticSink *sink)
         // if we have token and file info, calculate and display location
         if (diag->token && diag->file_path)
         {
-            // use cached source
-            char *source = get_cached_source(sink, diag->file_path);
+            // use cached source (preprocessed if available)
+            char *source = get_cached_source(sink, module_manager, diag->file_path);
             if (source)
             {
                 // create a temporary lexer for this file to calculate position
@@ -677,33 +693,35 @@ static Type *resolve_type_in_context(SemanticDriver *driver, const AnalysisConte
     {
         const char *name = type_node->type_name.name;
 
-        // check for generic binding first without caching to avoid cross-specialization bleed
+        // check for generic binding first - this resolves type parameters like T, E, etc.
         Type *bound = generic_binding_ctx_lookup(&ctx->bindings, name);
         if (bound)
             return bound;
 
-        // cache if already resolved (only for non-generic references)
-        if (type_node->type)
-            return type_node->type;
-
-        // check for generic instantiation
+        // check for generic instantiation (must come before caching)
         if (type_node->type_name.generic_args && type_node->type_name.generic_args->count > 0)
         {
             Symbol *specialized = request_generic_type_instantiation(driver, ctx, type_node);
             if (specialized && specialized->type)
             {
-                type_node->type = specialized->type;
+                // don't cache specialized types on AST nodes to avoid cross-contamination
                 return specialized->type;
             }
             diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "failed to instantiate generic type '%s'", name);
             return NULL;
         }
 
+        // cache if already resolved (only for non-generic, non-parameterized references)
+        if (type_node->type && !ctx->bindings.count)
+            return type_node->type;
+
         // check builtin types
         Type *builtin = type_lookup_builtin(name);
         if (builtin)
         {
-            type_node->type = builtin;
+            // only cache builtins when not in generic context
+            if (!ctx->bindings.count)
+                type_node->type = builtin;
             return builtin;
         }
 
@@ -716,11 +734,37 @@ static Type *resolve_type_in_context(SemanticDriver *driver, const AnalysisConte
 
         if (type_sym && type_sym->kind == SYMBOL_TYPE)
         {
-            type_node->type = type_sym->type;
+            // only cache when not in generic context
+            if (!ctx->bindings.count)
+                type_node->type = type_sym->type;
             return type_sym->type;
         }
 
-        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "unknown type '%s'", name);
+        // provide more context for debugging generic instantiation issues
+        if (ctx->bindings.count > 0)
+        {
+            // in generic context - list what we DO have bound
+            char bindings_info[256] = {0};
+            size_t offset = 0;
+            for (size_t i = 0; i < ctx->bindings.count && i < 3 && ctx->bindings.bindings; i++)
+            {
+                if (i > 0) offset += snprintf(bindings_info + offset, sizeof(bindings_info) - offset, ", ");
+                const char *bound_name = ctx->bindings.bindings[i].param_name ? ctx->bindings.bindings[i].param_name : "?";
+                const char *bound_type = ctx->bindings.bindings[i].concrete_type && ctx->bindings.bindings[i].concrete_type->name ? 
+                    ctx->bindings.bindings[i].concrete_type->name : "<?>";
+                offset += snprintf(bindings_info + offset, sizeof(bindings_info) - offset, 
+                    "%s=%s", bound_name, bound_type);
+            }
+            if (ctx->bindings.count > 3)
+                offset += snprintf(bindings_info + offset, sizeof(bindings_info) - offset, ", ...");
+            
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, 
+                "unknown type '%s' during generic instantiation (have bindings: %s)", name, bindings_info);
+        }
+        else
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "unknown type '%s'", name);
+        }
         return NULL;
     }
 
@@ -1266,6 +1310,20 @@ static bool declare_str_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
         // mark as generic template - actual struct creation happens during instantiation
         symbol->type_def.is_generic          = true;
         symbol->type_def.generic_param_count = stmt->str_stmt.generics->count;
+        
+        // store generic parameter names for later instantiation
+        size_t param_count                   = (size_t)stmt->str_stmt.generics->count;
+        symbol->type_def.generic_param_names = malloc(sizeof(char *) * param_count);
+        if (symbol->type_def.generic_param_names)
+        {
+            for (size_t i = 0; i < param_count; i++)
+            {
+                AstNode    *type_param                       = stmt->str_stmt.generics->items[i];
+                const char *param_name                       = type_param->type_param.name;
+                symbol->type_def.generic_param_names[i]      = param_name ? strdup(param_name) : NULL;
+            }
+        }
+        
         diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "generic struct '%s' registered", name);
     }
     else
@@ -1304,6 +1362,20 @@ static bool declare_uni_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
     {
         symbol->type_def.is_generic          = true;
         symbol->type_def.generic_param_count = stmt->uni_stmt.generics->count;
+        
+        // store generic parameter names for later instantiation
+        size_t param_count                   = (size_t)stmt->uni_stmt.generics->count;
+        symbol->type_def.generic_param_names = malloc(sizeof(char *) * param_count);
+        if (symbol->type_def.generic_param_names)
+        {
+            for (size_t i = 0; i < param_count; i++)
+            {
+                AstNode    *type_param                       = stmt->uni_stmt.generics->items[i];
+                const char *param_name                       = type_param->type_param.name;
+                symbol->type_def.generic_param_names[i]      = param_name ? strdup(param_name) : NULL;
+            }
+        }
+        
         diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "generic union '%s' registered", name);
     }
     else
@@ -1344,12 +1416,15 @@ static bool declare_method_stmt(SemanticDriver *driver, const AnalysisContext *c
     }
 
     // check if method or owner is generic
-    bool is_generic = (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0) || (owner_sym->type_def.is_generic);
+    bool   is_generic                   = (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0) || (owner_sym->type_def.is_generic);
+    size_t method_generic_count         = stmt->fun_stmt.generics ? (size_t)stmt->fun_stmt.generics->count : 0;
+    size_t owner_generic_count          = owner_sym->type_def.is_generic ? owner_sym->type_def.generic_param_count : 0;
+    size_t total_generic_count          = method_generic_count + owner_generic_count;
 
     if (is_generic)
     {
-        diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "generic method '%s.%s' registered", owner_name, method_name);
-        // Still create a symbol for generic methods so they can be found
+        diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "generic method '%s.%s' registered (%zu owner params + %zu method params)", 
+            owner_name, method_name, owner_generic_count, method_generic_count);
     }
 
     // create method symbol - signature resolved in pass B
@@ -1363,18 +1438,37 @@ static bool declare_method_stmt(SemanticDriver *driver, const AnalysisContext *c
     symbol->func.is_method   = true;
     symbol->func.is_defined  = (stmt->fun_stmt.body != NULL);
     symbol->func.is_generic  = is_generic;
-    if (is_generic && stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
+    symbol->func.method_owner = owner_sym;
+    symbol->func.method_forwarded_generic_count = owner_generic_count;
+    
+    // store all generic parameter names (owner params first, then method params)
+    if (is_generic && total_generic_count > 0)
     {
-        size_t generic_count             = (size_t)stmt->fun_stmt.generics->count;
-        symbol->func.generic_param_count = generic_count;
-        symbol->func.generic_param_names = malloc(sizeof(char *) * generic_count);
+        symbol->func.generic_param_count = total_generic_count;
+        symbol->func.generic_param_names = malloc(sizeof(char *) * total_generic_count);
         if (symbol->func.generic_param_names)
         {
-            for (size_t i = 0; i < generic_count; i++)
+            size_t idx = 0;
+            
+            // first, add owner's type parameters
+            if (owner_sym->type_def.is_generic && owner_sym->type_def.generic_param_names)
             {
-                AstNode    *type_param              = stmt->fun_stmt.generics->items[i];
-                const char *param_name              = type_param->type_param.name;
-                symbol->func.generic_param_names[i] = param_name ? strdup(param_name) : NULL;
+                for (size_t i = 0; i < owner_generic_count; i++)
+                {
+                    symbol->func.generic_param_names[idx++] = owner_sym->type_def.generic_param_names[i] ? 
+                        strdup(owner_sym->type_def.generic_param_names[i]) : NULL;
+                }
+            }
+            
+            // then, add method's own type parameters
+            if (stmt->fun_stmt.generics)
+            {
+                for (size_t i = 0; i < method_generic_count; i++)
+                {
+                    AstNode    *type_param              = stmt->fun_stmt.generics->items[i];
+                    const char *param_name              = type_param->type_param.name;
+                    symbol->func.generic_param_names[idx++] = param_name ? strdup(param_name) : NULL;
+                }
             }
         }
     }
@@ -1950,6 +2044,15 @@ static Symbol *instantiate_generic_struct(SemanticDriver *driver, const Analysis
     specialized_sym->module_name         = module_name ? strdup(module_name) : NULL;
     specialized_sym->home_scope          = generic_sym->home_scope;
 
+    // store type arguments in the specialized type
+    specialized_type->generic_origin = generic_sym;
+    specialized_type->type_arg_count = arg_count;
+    if (arg_count > 0)
+    {
+        specialized_type->type_args = malloc(sizeof(Type *) * arg_count);
+        memcpy(specialized_type->type_args, type_args, sizeof(Type *) * arg_count);
+    }
+
     // build binding context from type parameters
     AstNode          *generic_decl = generic_sym->decl;
     GenericBindingCtx bindings     = ctx->bindings;
@@ -1963,8 +2066,27 @@ static Symbol *instantiate_generic_struct(SemanticDriver *driver, const Analysis
             bindings               = generic_binding_ctx_push(&bindings, param_name, type_args[i]);
         }
     }
+    else if (generic_decl->kind == AST_STMT_STR && generic_sym->type_def.generic_param_names)
+    {
+        // fallback: use stored generic parameter names from symbol
+        for (size_t i = 0; i < arg_count && i < generic_sym->type_def.generic_param_count; i++)
+        {
+            const char *param_name = generic_sym->type_def.generic_param_names[i];
+            bindings               = generic_binding_ctx_push(&bindings, param_name, type_args[i]);
+        }
+    }
+    else if (generic_decl->kind == AST_STMT_STR)
+    {
+        // debug: neither source worked
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, ctx->file_path,
+            "internal error: generic struct '%s' has no parameter names (generics=%p, param_names=%p, count=%zu)", 
+            generic_sym->name,
+            (void*)generic_decl->str_stmt.generics,
+            (void*)generic_sym->type_def.generic_param_names,
+            generic_sym->type_def.generic_param_count);
+    }
 
-    // create context with bindings
+    // create context with bindings and update file_path to point to the generic template's file
     AnalysisContext specialized_ctx = *ctx;
     specialized_ctx.bindings        = bindings;
     if (generic_sym->home_scope)
@@ -1973,14 +2095,30 @@ static Symbol *instantiate_generic_struct(SemanticDriver *driver, const Analysis
         specialized_ctx.module_scope  = generic_sym->home_scope;
     }
     specialized_ctx.module_name = module_name;
-    if (generic_sym->home_scope)
-    {
-        specialized_ctx.current_scope = generic_sym->home_scope;
-        specialized_ctx.module_scope  = generic_sym->home_scope;
-    }
-    specialized_ctx.module_name = module_name;
     if (generic_sym->module_name)
         specialized_ctx.module_name = generic_sym->module_name;
+    
+    // CRITICAL: update file_path to point to the generic template's source file
+    // This ensures diagnostics during instantiation show the correct file
+    FOR_EACH_MODULE(&driver->module_manager, mod)
+    {
+        // check if this module contains the generic symbol's declaration
+        if (mod->symbols && mod->symbols->global_scope)
+        {
+            for (Symbol *sym = mod->symbols->global_scope->symbols; sym; sym = sym->next)
+            {
+                if (sym == generic_sym || (generic_sym->import_origin && sym == generic_sym->import_origin))
+                {
+                    if (mod->file_path)
+                    {
+                        specialized_ctx.file_path = mod->file_path;
+                    }
+                    goto found_module;
+                }
+            }
+        }
+    }
+found_module:;
 
     // resolve fields with specialized context
     if (generic_decl->str_stmt.fields)
@@ -2076,6 +2214,15 @@ static Symbol *instantiate_generic_union(SemanticDriver *driver, const AnalysisC
     specialized_sym->module_name         = module_name ? strdup(module_name) : NULL;
     specialized_sym->home_scope          = generic_sym->home_scope;
 
+    // store type arguments in the specialized type
+    specialized_type->generic_origin = generic_sym;
+    specialized_type->type_arg_count = arg_count;
+    if (arg_count > 0)
+    {
+        specialized_type->type_args = malloc(sizeof(Type *) * arg_count);
+        memcpy(specialized_type->type_args, type_args, sizeof(Type *) * arg_count);
+    }
+
     // build binding context
     AstNode          *generic_decl = generic_sym->decl;
     GenericBindingCtx bindings     = ctx->bindings;
@@ -2089,6 +2236,15 @@ static Symbol *instantiate_generic_union(SemanticDriver *driver, const AnalysisC
             bindings               = generic_binding_ctx_push(&bindings, param_name, type_args[i]);
         }
     }
+    else if (generic_decl->kind == AST_STMT_UNI && generic_sym->type_def.generic_param_names)
+    {
+        // fallback: use stored generic parameter names from symbol
+        for (size_t i = 0; i < arg_count && i < generic_sym->type_def.generic_param_count; i++)
+        {
+            const char *param_name = generic_sym->type_def.generic_param_names[i];
+            bindings               = generic_binding_ctx_push(&bindings, param_name, type_args[i]);
+        }
+    }
 
     AnalysisContext specialized_ctx = *ctx;
     specialized_ctx.bindings        = bindings;
@@ -2097,6 +2253,26 @@ static Symbol *instantiate_generic_union(SemanticDriver *driver, const AnalysisC
         specialized_ctx.current_scope = generic_sym->home_scope;
         specialized_ctx.module_scope  = generic_sym->home_scope;
     }
+    
+    // update file_path to point to the generic template's source file
+    FOR_EACH_MODULE(&driver->module_manager, mod)
+    {
+        if (mod->symbols && mod->symbols->global_scope)
+        {
+            for (Symbol *sym = mod->symbols->global_scope->symbols; sym; sym = sym->next)
+            {
+                if (sym == generic_sym || (generic_sym->import_origin && sym == generic_sym->import_origin))
+                {
+                    if (mod->file_path)
+                    {
+                        specialized_ctx.file_path = mod->file_path;
+                    }
+                    goto found_union_module;
+                }
+            }
+        }
+    }
+found_union_module:;
 
     // resolve variants with specialized context
     if (generic_decl->uni_stmt.fields)
@@ -2183,8 +2359,21 @@ static Symbol *instantiate_generic_function(SemanticDriver *driver, const Analys
     AstNode          *generic_decl = generic_sym->decl;
     GenericBindingCtx bindings     = ctx->bindings;
 
-    if (generic_decl->kind == AST_STMT_FUN && generic_decl->fun_stmt.generics)
+    // use stored generic_param_names which includes owner type params for methods
+    if (generic_sym->func.generic_param_names && generic_sym->func.generic_param_count > 0)
     {
+        for (size_t i = 0; i < arg_count && i < generic_sym->func.generic_param_count; i++)
+        {
+            const char *param_name = generic_sym->func.generic_param_names[i];
+            if (param_name)
+            {
+                bindings = generic_binding_ctx_push(&bindings, param_name, type_args[i]);
+            }
+        }
+    }
+    else if (generic_decl->kind == AST_STMT_FUN && generic_decl->fun_stmt.generics)
+    {
+        // fallback for standalone generic functions
         for (size_t i = 0; i < arg_count && i < (size_t)generic_decl->fun_stmt.generics->count; i++)
         {
             AstNode    *param      = generic_decl->fun_stmt.generics->items[i];
@@ -2201,6 +2390,26 @@ static Symbol *instantiate_generic_function(SemanticDriver *driver, const Analys
         specialized_ctx.module_scope  = generic_sym->home_scope;
     }
     specialized_ctx.module_name = module_name;
+    
+    // update file_path to point to the generic template's source file
+    FOR_EACH_MODULE(&driver->module_manager, mod)
+    {
+        if (mod->symbols && mod->symbols->global_scope)
+        {
+            for (Symbol *sym = mod->symbols->global_scope->symbols; sym; sym = sym->next)
+            {
+                if (sym == generic_sym || (generic_sym->import_origin && sym == generic_sym->import_origin))
+                {
+                    if (mod->file_path)
+                    {
+                        specialized_ctx.file_path = mod->file_path;
+                    }
+                    goto found_func_module;
+                }
+            }
+        }
+    }
+found_func_module:;
 
     // resolve return type
     Type *ret_type = NULL;
@@ -2249,9 +2458,17 @@ static Symbol *instantiate_generic_function(SemanticDriver *driver, const Analys
     specialized_sym->func.is_external = generic_sym->func.is_external;
     specialized_sym->func.is_defined  = generic_sym->func.is_defined;
     specialized_sym->func.is_generic  = false;
+    specialized_sym->func.is_method   = generic_sym->func.is_method;
+    specialized_sym->func.method_owner = generic_sym->func.method_owner;
     specialized_sym->is_public        = generic_sym->is_public;
     specialized_sym->module_name      = module_name ? strdup(module_name) : NULL;
     specialized_sym->home_scope       = generic_sym->home_scope;
+
+    // add specialized symbol to the appropriate scope so it can be looked up
+    if (generic_sym->home_scope)
+    {
+        symbol_add(generic_sym->home_scope, specialized_sym);
+    }
 
     // cache the specialization
     specialization_cache_insert(&driver->spec_cache, generic_sym, type_args, arg_count, specialized_sym);
@@ -2529,12 +2746,17 @@ static Type *analyze_ident_expr(SemanticDriver *driver, const AnalysisContext *c
 {
     const char *name = expr->ident_expr.name;
 
-    Symbol *sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, name);
-
+    // if symbol is already set (e.g., from method call transformation), use it directly
+    Symbol *sym = expr->symbol;
     if (!sym)
     {
-        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "undefined identifier '%s'", name);
-        return NULL;
+        sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, name);
+
+        if (!sym)
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "undefined identifier '%s'", name);
+            return NULL;
+        }
     }
 
     if (sym->import_origin && sym->import_origin->type)
@@ -2832,15 +3054,24 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
             if (!receiver_type)
                 return NULL;
 
-            receiver_type = type_resolve_alias(receiver_type);
-
             // look up method in the receiver's type
             const char *method_name = field_expr->field_expr.field;
 
             Symbol *method_sym        = NULL;
             char    mangled_name[512] = {0};
 
-            if (receiver_type->kind == TYPE_STRUCT || receiver_type->kind == TYPE_UNION)
+            // try to find method on alias type before resolving (for types like string = []char)
+            if (receiver_type->kind == TYPE_ALIAS && receiver_type->name)
+            {
+                snprintf(mangled_name, sizeof(mangled_name), "%s__%s", receiver_type->name, method_name);
+                method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
+            }
+
+            // resolve aliases for further processing
+            receiver_type = type_resolve_alias(receiver_type);
+
+            // try looking up methods on the resolved type
+            if (!method_sym && (receiver_type->kind == TYPE_STRUCT || receiver_type->kind == TYPE_UNION))
             {
                 if (receiver_type->name)
                 {
@@ -2850,29 +3081,14 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                     method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
 
                     // if not found and type is specialized, instantiate generic method
-                    if (!method_sym && strchr(receiver_type->name, '$'))
+                    if (!method_sym && receiver_type->generic_origin && receiver_type->type_arg_count > 0)
                     {
-                        // extract base type name and generic args
-                        const char *dollar   = strchr(receiver_type->name, '$');
-                        size_t      base_len = (size_t)(dollar - receiver_type->name);
-
-                        // extract just the type name without module prefix
-                        // "std_types_result__Result" -> "Result"
-                        const char *type_name_start        = receiver_type->name;
-                        const char *last_double_underscore = NULL;
-                        for (const char *p = receiver_type->name; p < receiver_type->name + base_len - 1; p++)
-                        {
-                            if (p[0] == '_' && p[1] == '_')
-                                last_double_underscore = p + 2;
-                        }
-                        if (last_double_underscore)
-                            type_name_start = last_double_underscore;
-
-                        size_t type_name_len = (size_t)((receiver_type->name + base_len) - type_name_start);
-
-                        // look up generic method: "Result__is_err" (not "Result.is_err")
+                        // use stored type arguments from the specialized type
+                        Symbol *generic_type_sym = receiver_type->generic_origin;
+                        
+                        // construct generic method name from the generic type
                         char generic_method_name[256];
-                        snprintf(generic_method_name, sizeof(generic_method_name), "%.*s__%s", (int)type_name_len, type_name_start, method_name);
+                        snprintf(generic_method_name, sizeof(generic_method_name), "%s__%s", generic_type_sym->name, method_name);
 
                         Symbol *generic_method = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, generic_method_name);
 
@@ -2900,71 +3116,12 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                             return NULL;
                         }
 
-                        if (generic_method && generic_method->kind == SYMBOL_FUNC && generic_method->func.is_generic && generic_method->func.is_method)
+                        // instantiate generic method with type arguments from the specialized type
+                        method_sym = instantiate_generic_function(driver, ctx, generic_method, receiver_type->type_args, receiver_type->type_arg_count);
+                        if (!method_sym)
                         {
-                            // parse type args from specialized type name
-                            // "Result$string$string" -> ["string", "string"]
-                            size_t type_arg_count = 0;
-                            Type  *type_args[16]  = {0}; // max 16 type params
-
-                            const char *arg_start = dollar + 1;
-                            const char *arg_end   = arg_start;
-                            while (*arg_end && type_arg_count < 16)
-                            {
-                                if (*arg_end == '$' || *arg_end == '\0')
-                                {
-                                    size_t arg_len = (size_t)(arg_end - arg_start);
-                                    if (arg_len > 0)
-                                    {
-                                        // look up type by name
-                                        char type_name_buf[128];
-                                        snprintf(type_name_buf, sizeof(type_name_buf), "%.*s", (int)arg_len, arg_start);
-
-                                        // try to find type
-                                        Symbol *type_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, type_name_buf);
-                                        if (type_sym && type_sym->kind == SYMBOL_TYPE)
-                                        {
-                                            type_args[type_arg_count++] = type_sym->type;
-                                        }
-                                        else
-                                        {
-                                            // might be a builtin type
-                                            if (strcmp(type_name_buf, "string") == 0)
-                                                type_args[type_arg_count++] = type_array_create(type_u8());
-                                            else if (strcmp(type_name_buf, "i32") == 0)
-                                                type_args[type_arg_count++] = type_i32();
-                                            else if (strcmp(type_name_buf, "i64") == 0)
-                                                type_args[type_arg_count++] = type_i64();
-                                            else if (strcmp(type_name_buf, "u32") == 0)
-                                                type_args[type_arg_count++] = type_u32();
-                                            else if (strcmp(type_name_buf, "u64") == 0)
-                                                type_args[type_arg_count++] = type_u64();
-                                            // add other builtin types as needed
-                                        }
-                                    }
-
-                                    if (*arg_end == '\0')
-                                        break;
-                                    arg_start = arg_end + 1;
-                                }
-                                arg_end++;
-                            }
-
-                            // instantiate generic method with extracted type args
-                            if (type_arg_count > 0)
-                            {
-                                method_sym = instantiate_generic_function(driver, ctx, generic_method, type_args, type_arg_count);
-                                if (!method_sym)
-                                {
-                                    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to instantiate generic method '%s' with %zu type arguments", generic_method_name, type_arg_count);
-                                    return NULL;
-                                }
-                            }
-                            else
-                            {
-                                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to extract type arguments from specialized type");
-                                return NULL;
-                            }
+                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to instantiate generic method '%s' with %zu type arguments", generic_method_name, receiver_type->type_arg_count);
+                            return NULL;
                         }
                     }
                 }
@@ -3961,16 +4118,36 @@ static bool analyze_function_body(SemanticDriver *driver, const AnalysisContext 
             if (param->kind != AST_STMT_PARAM)
                 continue;
 
-            // parameter type already resolved in Pass B
-            Type *param_type = param->type;
-            if (!param_type && symbol_params && i < symbol_param_count)
+            // for specialized functions, always use symbol's param types (not AST param->type which may be generic)
+            Type *param_type = NULL;
+            if (stmt->symbol && !stmt->symbol->func.is_generic && symbol_params && i < symbol_param_count)
+            {
+                // specialized function - use resolved types from symbol
                 param_type = symbol_params[i];
+            }
+            else
+            {
+                // normal or generic template function - use AST type
+                param_type = param->type;
+                if (!param_type && symbol_params && i < symbol_param_count)
+                    param_type = symbol_params[i];
+            }
+            
             if (!param_type)
             {
                 diagnostic_emit(&driver->diagnostics, DIAG_ERROR, param, ctx->file_path, "parameter '%s' has no resolved type", param->param_stmt.name);
                 continue;
             }
-            param->type = param_type;
+            
+            // only update AST node for non-specialized functions to avoid modifying shared generic templates
+            if (stmt->symbol && stmt->symbol->func.is_generic)
+            {
+                // leave generic template AST unchanged
+            }
+            else
+            {
+                param->type = param_type;
+            }
 
             if (symbol_lookup_scope(func_ctx.current_scope, param->param_stmt.name))
             {
@@ -4066,7 +4243,7 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
     if (!success)
     {
         if (driver->diagnostics.count > 0)
-            diagnostic_print_all(&driver->diagnostics);
+            diagnostic_print_all(&driver->diagnostics, &driver->module_manager);
         return false;
     }
 
@@ -4097,7 +4274,7 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
     if (!success)
     {
         if (driver->diagnostics.count > 0)
-            diagnostic_print_all(&driver->diagnostics);
+            diagnostic_print_all(&driver->diagnostics, &driver->module_manager);
         return false;
     }
 
@@ -4142,7 +4319,7 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
     if (!success)
     {
         if (driver->diagnostics.count > 0)
-            diagnostic_print_all(&driver->diagnostics);
+            diagnostic_print_all(&driver->diagnostics, &driver->module_manager);
         return false;
     }
 
@@ -4173,7 +4350,7 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
     if (!success)
     {
         if (driver->diagnostics.count > 0)
-            diagnostic_print_all(&driver->diagnostics);
+            diagnostic_print_all(&driver->diagnostics, &driver->module_manager);
         return false;
     }
 
@@ -4205,7 +4382,7 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
     if (!success)
     {
         if (driver->diagnostics.count > 0)
-            diagnostic_print_all(&driver->diagnostics);
+            diagnostic_print_all(&driver->diagnostics, &driver->module_manager);
         return false;
     }
 
@@ -4233,7 +4410,7 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
                 error_count++;
         }
 
-        diagnostic_print_all(&driver->diagnostics);
+        diagnostic_print_all(&driver->diagnostics, &driver->module_manager);
 
         if (error_count > 0)
         {

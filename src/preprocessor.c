@@ -863,15 +863,30 @@ bool preprocessor_run(const char *source, const PreprocessorConstant *constants,
                 {
                     const char *expr = directive + 2;
                     ok               = preprocessor_handle_if(expr, constants, constant_count, &frames, &global_active, output, line_no);
+                    // preserve line number by inserting blank line where directive was
+                    if (ok && has_newline)
+                    {
+                        ok = preprocessor_buffer_append_char(&buffer, '\n');
+                    }
                 }
                 else if (strncmp(directive, "or", 2) == 0 && (directive[2] == '\0' || directive[2] == ' ' || directive[2] == '\t' || directive[2] == '('))
                 {
                     const char *expr = directive + 2;
                     ok               = preprocessor_handle_or(expr, constants, constant_count, &frames, &global_active, output, line_no);
+                    // preserve line number by inserting blank line where directive was
+                    if (ok && has_newline)
+                    {
+                        ok = preprocessor_buffer_append_char(&buffer, '\n');
+                    }
                 }
                 else if (strncmp(directive, "end", 3) == 0 && (directive[3] == '\0' || directive[3] == ' ' || directive[3] == '\t'))
                 {
                     ok = preprocessor_handle_end(&frames, &global_active, output, line_no);
+                    // preserve line number by inserting blank line where directive was
+                    if (ok && has_newline)
+                    {
+                        ok = preprocessor_buffer_append_char(&buffer, '\n');
+                    }
                 }
                 else
                 {
@@ -880,7 +895,12 @@ bool preprocessor_run(const char *source, const PreprocessorConstant *constants,
                     {
                         ok = preprocessor_buffer_append_range(&buffer, line, line_length);
                     }
-                    if (has_newline && ok)
+                    else if (has_newline)
+                    {
+                        // preserve line numbers by inserting blank line
+                        ok = preprocessor_buffer_append_char(&buffer, '\n');
+                    }
+                    if (has_newline && ok && global_active)
                     {
                         ok = preprocessor_buffer_append_char(&buffer, '\n');
                     }
@@ -892,7 +912,12 @@ bool preprocessor_run(const char *source, const PreprocessorConstant *constants,
                 {
                     ok = preprocessor_buffer_append_range(&buffer, line, line_length);
                 }
-                if (has_newline && ok)
+                else if (has_newline)
+                {
+                    // preserve line numbers by inserting blank line for inactive lines
+                    ok = preprocessor_buffer_append_char(&buffer, '\n');
+                }
+                if (has_newline && ok && global_active)
                 {
                     ok = preprocessor_buffer_append_char(&buffer, '\n');
                 }

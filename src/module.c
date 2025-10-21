@@ -95,6 +95,28 @@ static Module *module_manager_find_canonical(ModuleManager *manager, const char 
     return NULL;
 }
 
+Module *module_manager_find_by_file_path(ModuleManager *manager, const char *file_path)
+{
+    if (!manager || !file_path)
+        return NULL;
+
+    // iterate through all modules and find by file_path
+    for (int i = 0; i < manager->capacity; i++)
+    {
+        Module *module = manager->modules[i];
+        while (module)
+        {
+            if (module->file_path && strcmp(module->file_path, file_path) == 0)
+            {
+                return module;
+            }
+            module = module->next;
+        }
+    }
+
+    return NULL;
+}
+
 static void module_manager_resize(ModuleManager *manager)
 {
     int      old_capacity = manager->capacity;

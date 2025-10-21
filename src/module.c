@@ -1,6 +1,7 @@
 #include "module.h"
 #include "codegen.h"
 #include "config.h"
+#include "filesystem.h"
 #include "ioutil.h"
 #include "lexer.h"
 #include "preprocessor.h"
@@ -19,7 +20,6 @@
 static char       *generate_target_module_source(ModuleManager *manager);
 static void        module_manager_update_target_info(ModuleManager *manager);
 static char       *append_os_suffix(const char *path, const char *os_name);
-static int         module_file_exists(const char *path);
 static const char *normalize_os_name(const char *os_part);
 static bool        path_has_platform_suffix(const char *path, const char *os_name);
 static void        split_triple(const char *triple, char **arch_out, char **os_out);
@@ -266,17 +266,6 @@ void module_manager_dnit(ModuleManager *manager)
     module_error_list_dnit(&manager->errors);
 }
 
-static int module_file_exists(const char *path)
-{
-    if (!path)
-        return 0;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    fclose(f);
-    return 1;
-}
-
 static const char *normalize_os_name(const char *os_part)
 {
     if (!os_part)
@@ -473,7 +462,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
         char *resolved = config_resolve_module_fqn((ProjectConfig *)manager->config, manager->project_dir, module_fqn);
         if (resolved)
         {
-            if (module_file_exists(resolved))
+            if (fs_file_exists(resolved))
             {
                 return resolved;
             }
@@ -481,7 +470,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
             if (platform)
             {
                 char *plat_path = append_os_suffix(resolved, platform);
-                if (plat_path && module_file_exists(plat_path))
+                if (plat_path && fs_file_exists(plat_path))
                 {
                     free(resolved);
                     return plat_path;
@@ -523,7 +512,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
                 }
                 snprintf(path, path_len, "%s/%s.mach", base, tail_buf);
                 free(tail_buf);
-                if (module_file_exists(path))
+                if (fs_file_exists(path))
                 {
                     return path;
                 }
@@ -531,7 +520,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
                 if (platform)
                 {
                     char *plat_path = append_os_suffix(path, platform);
-                    if (plat_path && module_file_exists(plat_path))
+                    if (plat_path && fs_file_exists(plat_path))
                     {
                         free(path);
                         return plat_path;
@@ -549,7 +538,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
                 if (!path)
                     return NULL;
                 snprintf(path, path_len, "%s/main.mach", base);
-                if (module_file_exists(path))
+                if (fs_file_exists(path))
                 {
                     return path;
                 }
@@ -557,7 +546,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
                 if (platform)
                 {
                     char *plat_path = append_os_suffix(path, platform);
-                    if (plat_path && module_file_exists(plat_path))
+                    if (plat_path && fs_file_exists(plat_path))
                     {
                         free(path);
                         return plat_path;
@@ -595,7 +584,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
             }
             snprintf(path, path_len, "%s/%.*s/%s.mach", base, (int)head_len, module_fqn, tail_buf);
             free(tail_buf);
-            if (module_file_exists(path))
+            if (fs_file_exists(path))
             {
                 return path;
             }
@@ -603,7 +592,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
             if (platform)
             {
                 char *plat_path = append_os_suffix(path, platform);
-                if (plat_path && module_file_exists(plat_path))
+                if (plat_path && fs_file_exists(plat_path))
                 {
                     free(path);
                     return plat_path;
@@ -620,7 +609,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
             if (!path)
                 continue;
             snprintf(path, path_len, "%s/%.*s/main.mach", base, (int)head_len, module_fqn);
-            if (module_file_exists(path))
+            if (fs_file_exists(path))
             {
                 return path;
             }
@@ -628,7 +617,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
             if (platform)
             {
                 char *plat_path = append_os_suffix(path, platform);
-                if (plat_path && module_file_exists(plat_path))
+                if (plat_path && fs_file_exists(plat_path))
                 {
                     free(path);
                     return plat_path;
@@ -742,7 +731,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         if (platform && !path_has_platform_suffix(file_path, platform))
         {
             char *platform_path = append_os_suffix(file_path, platform);
-            if (platform_path && module_file_exists(platform_path))
+            if (platform_path && fs_file_exists(platform_path))
             {
                 char *platform_source = read_file(platform_path);
                 if (!platform_source)
@@ -1241,30 +1230,6 @@ bool module_has_circular_dependency(ModuleManager *manager, Module *module, cons
 // helper declarations
 static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info);
 
-static bool ensure_dirs_recursive(const char *dir)
-{
-    if (!dir || !*dir)
-        return true;
-
-    char *copy = strdup(dir);
-    if (!copy)
-        return false;
-
-    for (char *p = copy + 1; *p; ++p)
-    {
-        if (*p == '/')
-        {
-            *p = '\0';
-            mkdir(copy, 0755);
-            *p = '/';
-        }
-    }
-    int r = mkdir(copy, 0755);
-    (void)r;
-    free(copy);
-    return true;
-}
-
 char *module_make_object_path(const char *output_dir, const char *module_name)
 {
     if (!output_dir || !module_name)
@@ -1297,7 +1262,7 @@ char *module_make_object_path(const char *output_dir, const char *module_name)
     if (last_slash)
     {
         *last_slash = '\0';
-        ensure_dirs_recursive(path);
+        fs_ensure_dir_recursive(path);
         *last_slash = '/';
     }
 

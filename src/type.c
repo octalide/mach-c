@@ -412,7 +412,8 @@ bool type_is_pointer_like(Type *type)
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
-    return type->kind == TYPE_PTR || type->kind == TYPE_POINTER || type->kind == TYPE_FUNCTION || type->kind == TYPE_ARRAY;
+    // slices ([]T) are fat pointers and must not participate in pointer-only coercions
+    return type->kind == TYPE_PTR || type->kind == TYPE_POINTER || type->kind == TYPE_FUNCTION;
 }
 
 bool type_is_truthy(Type *type)

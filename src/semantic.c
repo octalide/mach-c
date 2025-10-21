@@ -2569,7 +2569,7 @@ found_func_module:;
     specialization_cache_insert(&driver->spec_cache, generic_sym, type_args, arg_count, specialized_sym);
 
     // if function has body, clone AST and analyze it with specialized context
-    if (generic_decl->fun_stmt.body && generic_sym->func.is_defined)
+    if (generic_decl->fun_stmt.body)
     {
         // clone the generic template AST so this specialization has independent scope bindings
         AstNode *specialized_decl = ast_clone(generic_decl);

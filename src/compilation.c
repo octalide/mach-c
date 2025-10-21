@@ -299,6 +299,7 @@ bool compilation_codegen(CompilationContext *ctx)
     ctx->codegen.debug_info   = ctx->options->debug_info;
     ctx->codegen.source_file  = ctx->options->input_file;
     ctx->codegen.source_lexer = &ctx->lexer;
+    ctx->codegen.spec_cache   = &ctx->driver->spec_cache;
 
     if (!codegen_generate(&ctx->codegen, ctx->ast, &ctx->driver->symbol_table))
     {

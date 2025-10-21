@@ -607,6 +607,17 @@ static void codegen_generate_specialized_function(Symbol *sym, void *user_data)
     if (sym->kind != SYMBOL_FUNC || !sym->func.is_specialized_instance || !sym->func.is_defined || !sym->decl)
         return;
 
+    // check if the function already exists in the LLVM module by name
+    // (multiple Symbol objects may exist for the same specialized function)
+    const char  *func_name          = sym->func.mangled_name ? sym->func.mangled_name : sym->name;
+    LLVMValueRef existing_in_module = LLVMGetNamedFunction(ctx->module, func_name);
+    if (existing_in_module && !LLVMIsDeclaration(existing_in_module))
+    {
+        // already has a body in the module, skip and update symbol mapping
+        codegen_set_symbol_value(ctx, sym, existing_in_module);
+        return;
+    }
+
     // check if function has already been declared (we'll generate the body anyway if it's just a declaration)
     LLVMValueRef existing = codegen_get_symbol_value(ctx, sym);
     if (existing && !LLVMIsDeclaration(existing))
@@ -677,6 +688,8 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
     ctx->data_layout = LLVMCreateTargetDataLayout(ctx->target_machine);
     LLVMSetModuleDataLayout(ctx->module, ctx->data_layout);
     LLVMSetTarget(ctx->module, LLVMGetDefaultTargetTriple());
+
+    ctx->spec_cache = NULL;
 
     // initialize maps
     ctx->symbol_map.symbols  = NULL;

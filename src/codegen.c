@@ -941,12 +941,41 @@ LLVMTypeRef codegen_get_llvm_type(CodegenContext *ctx, Type *type)
         return NULL;
 
     // check cache
+    LLVMTypeRef reused_llvm = NULL;
     for (int i = 0; i < ctx->type_cache.count; i++)
     {
         if (ctx->type_cache.types[i] == type)
         {
             return ctx->type_cache.llvm_types[i];
         }
+
+        // reuse struct/union types by name even if Type instances differ
+        if (!reused_llvm)
+        {
+            Type *cached_type = ctx->type_cache.types[i];
+            if (type->name && cached_type && cached_type->name && type->kind == cached_type->kind &&
+                (type->kind == TYPE_STRUCT || type->kind == TYPE_UNION) && strcmp(type->name, cached_type->name) == 0)
+            {
+                reused_llvm = ctx->type_cache.llvm_types[i];
+            }
+        }
+    }
+
+    // if we found a reusable type, cache this Type pointer and return
+    if (reused_llvm)
+    {
+        if (ctx->type_cache.count >= ctx->type_cache.capacity)
+        {
+            ctx->type_cache.capacity   = ctx->type_cache.capacity ? ctx->type_cache.capacity * 2 : 16;
+            ctx->type_cache.types      = realloc(ctx->type_cache.types, sizeof(Type *) * ctx->type_cache.capacity);
+            ctx->type_cache.llvm_types = realloc(ctx->type_cache.llvm_types, sizeof(LLVMTypeRef) * ctx->type_cache.capacity);
+        }
+
+        ctx->type_cache.types[ctx->type_cache.count]      = type;
+        ctx->type_cache.llvm_types[ctx->type_cache.count] = reused_llvm;
+        ctx->type_cache.count++;
+
+        return reused_llvm;
     }
 
     LLVMTypeRef llvm_type = NULL;

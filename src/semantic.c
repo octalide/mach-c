@@ -298,16 +298,33 @@ static bool type_equals_strict(Type *a, Type *b)
     switch (a->kind)
     {
     case TYPE_ALIAS:
-        // for aliases, compare both name and target
-        if (a->name && b->name && strcmp(a->name, b->name) == 0)
-            return true;
-        return type_equals_strict(a->alias.target, b->alias.target);
+    {
+        if (b->kind != TYPE_ALIAS)
+            return false;
+        if (a->name && b->name)
+            return strcmp(a->name, b->name) == 0;
+        return a->alias.target == b->alias.target && type_equals_strict(a->alias.target, b->alias.target);
+    }
 
     case TYPE_POINTER:
         return type_equals_strict(a->pointer.base, b->pointer.base);
 
     case TYPE_ARRAY:
         return type_equals_strict(a->array.elem_type, b->array.elem_type);
+
+    case TYPE_FUNCTION:
+        if (a->function.param_count != b->function.param_count)
+            return false;
+        if (a->function.is_variadic != b->function.is_variadic)
+            return false;
+        if (!type_equals_strict(a->function.return_type, b->function.return_type))
+            return false;
+        for (size_t i = 0; i < a->function.param_count; i++)
+        {
+            if (!type_equals_strict(a->function.param_types[i], b->function.param_types[i]))
+                return false;
+        }
+        return true;
 
     case TYPE_STRUCT:
     case TYPE_UNION:
@@ -316,7 +333,7 @@ static bool type_equals_strict(Type *a, Type *b)
         return a == b;
 
     default:
-        return type_equals(a, b);
+        return a == b;
     }
 }
 
@@ -3302,7 +3319,7 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                             // create address-of operation
                             AstNode *addr_of = malloc(sizeof(AstNode));
                             ast_node_init(addr_of, AST_EXPR_UNARY);
-                            addr_of->token           = receiver->token;
+                            addr_of->token           = NULL; // don't share token to avoid double-free
                             addr_of->unary_expr.op   = TOKEN_QUESTION;
                             addr_of->unary_expr.expr = receiver;
                             addr_of->type            = type_pointer_create(receiver_type);
@@ -3330,6 +3347,9 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                 ident->type            = method_sym->type;
 
                 // clear receiver from field expr to prevent double-free
+                // receiver is now owned by either:
+                // - the addr_of node (if wrapped), which is in args
+                // - directly in args (if not wrapped)
                 field_expr->field_expr.object = NULL;
                 field_expr->token             = NULL;
 

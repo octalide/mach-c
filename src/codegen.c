@@ -735,7 +735,7 @@ void codegen_context_dnit(CodegenContext *ctx)
     // no heap state for varargs
 }
 
-bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *analyzer)
+bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticDriver *driver)
 {
     if (root->kind != AST_PROGRAM)
     {
@@ -746,10 +746,10 @@ bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *anal
     if (ctx->debug_info)
         codegen_debug_init(ctx);
 
-    if (analyzer)
+    if (driver)
     {
-        codegen_declare_functions_in_scope(ctx, analyzer->symbol_table.global_scope);
-        codegen_declare_functions_in_scope(ctx, analyzer->symbol_table.module_scope);
+        codegen_declare_functions_in_scope(ctx, driver->symbol_table.global_scope);
+        codegen_declare_functions_in_scope(ctx, driver->symbol_table.module_scope);
     }
 
     // generate top-level statements
@@ -3032,18 +3032,18 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
         {
             return LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
         }
-        if (strcmp(expr->field_expr.field, "length") == 0)
+        if (strcmp(expr->field_expr.field, "len") == 0)
         {
             return LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
         }
 
-        codegen_error(ctx, expr, "no field named '%s' on array", expr->field_expr.field);
+        codegen_error(ctx, expr, "unknown array field '%s'", expr->field_expr.field);
         return NULL;
     }
 
     if (object_type->kind != TYPE_STRUCT && object_type->kind != TYPE_UNION)
     {
-        codegen_error(ctx, expr, "field access on non-struct type");
+        codegen_error(ctx, expr, "field access on non-composite type");
         return NULL;
     }
 
@@ -3205,8 +3205,74 @@ LLVMValueRef codegen_expr_array(CodegenContext *ctx, AstNode *expr)
 
     if (expr->array_expr.is_slice_literal)
     {
-        codegen_error(ctx, expr, "legacy slice literal syntax no longer supported; use named fields");
-        return NULL;
+        Type *elem_type       = resolved_type->array.elem_type;
+        Type *data_type       = type_pointer_create(elem_type);
+        Type *len_type        = type_u64();
+        LLVMTypeRef llvm_data = codegen_get_llvm_type(ctx, data_type);
+        LLVMTypeRef llvm_len  = codegen_get_llvm_type(ctx, len_type);
+        if (!llvm_data || !llvm_len)
+            return NULL;
+
+        LLVMValueRef data_value = LLVMConstNull(llvm_data);
+        LLVMValueRef len_value  = LLVMConstNull(llvm_len);
+
+        size_t elem_count = expr->array_expr.elems ? (size_t)expr->array_expr.elems->count : 0;
+
+        if (elem_count >= 1)
+        {
+            AstNode     *data_expr = expr->array_expr.elems->items[0];
+            LLVMValueRef raw_data  = codegen_expr(ctx, data_expr);
+            if (!raw_data)
+                return NULL;
+            raw_data = codegen_load_if_needed(ctx, raw_data, data_expr->type, data_expr);
+
+            LLVMTypeRef raw_type = LLVMTypeOf(raw_data);
+            switch (LLVMGetTypeKind(raw_type))
+            {
+            case LLVMPointerTypeKind:
+                if (raw_type != llvm_data)
+                    raw_data = LLVMBuildBitCast(ctx->builder, raw_data, llvm_data, "slice_data_cast");
+                break;
+            case LLVMIntegerTypeKind:
+                raw_data = LLVMBuildIntToPtr(ctx->builder, raw_data, llvm_data, "slice_data_inttoptr");
+                break;
+            default:
+                codegen_error(ctx, data_expr, "slice data expression must be pointer-like");
+                return NULL;
+            }
+
+            data_value = raw_data;
+        }
+
+        if (elem_count >= 2)
+        {
+            AstNode     *len_expr = expr->array_expr.elems->items[1];
+            LLVMValueRef raw_len  = codegen_expr(ctx, len_expr);
+            if (!raw_len)
+                return NULL;
+            raw_len = codegen_load_if_needed(ctx, raw_len, len_expr->type, len_expr);
+
+            LLVMTypeRef raw_type = LLVMTypeOf(raw_len);
+            if (LLVMGetTypeKind(raw_type) != LLVMIntegerTypeKind)
+            {
+                codegen_error(ctx, len_expr, "slice length expression must be integer");
+                return NULL;
+            }
+
+            unsigned width = LLVMGetIntTypeWidth(raw_type);
+            if (width < 64)
+                raw_len = LLVMBuildZExt(ctx->builder, raw_len, llvm_len, "slice_len_zext");
+            else if (width > 64)
+                raw_len = LLVMBuildTrunc(ctx->builder, raw_len, llvm_len, "slice_len_trunc");
+
+            len_value = raw_len;
+        }
+
+        LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, array_type);
+        LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
+        fat_ptr                   = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_value, 0, "slice_data");
+        fat_ptr                   = LLVMBuildInsertValue(ctx->builder, fat_ptr, len_value, 1, "slice_len");
+        return fat_ptr;
     }
 
     Type       *elem_type      = resolved_type->array.elem_type;

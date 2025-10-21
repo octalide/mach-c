@@ -275,8 +275,8 @@ Type *type_alias_create(const char *name, Type *target)
 {
     Type *type         = malloc(sizeof(Type));
     type->kind         = TYPE_ALIAS;
-    type->size         = target->size;
-    type->alignment    = target->alignment;
+    type->size         = target ? target->size : 0;
+    type->alignment    = target ? target->alignment : 0;
     type->name         = strdup(name);
     type->alias.target = target;
     return type;
@@ -477,8 +477,6 @@ bool type_can_assign_to(Type *from, Type *to)
     // numeric conversions (more restrictive than casting)
     if (type_is_numeric(from) && type_is_numeric(to))
     {
-        // only allow conversions within the same category (int↔int or float↔float)
-        // and only safe conversions: same type or smaller-to-larger
         bool from_is_float = type_is_float(from);
         bool to_is_float   = type_is_float(to);
 
@@ -486,7 +484,10 @@ bool type_can_assign_to(Type *from, Type *to)
         if (from_is_float != to_is_float)
             return false;
 
-        // within same category, only allow safe size conversions
+        // allow integer narrowing/widening; still guard floating-point to wider only
+        if (!from_is_float)
+            return true;
+
         return from->size <= to->size;
     }
 

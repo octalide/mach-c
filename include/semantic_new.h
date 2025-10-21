@@ -9,13 +9,13 @@
 #include <stddef.h>
 
 // forward declarations
-typedef struct SemanticDriver     SemanticDriver;
-typedef struct AnalysisContext    AnalysisContext;
-typedef struct DiagnosticSink     DiagnosticSink;
-typedef struct GenericBindingCtx  GenericBindingCtx;
-typedef struct SpecializationKey  SpecializationKey;
+typedef struct SemanticDriver      SemanticDriver;
+typedef struct AnalysisContext     AnalysisContext;
+typedef struct DiagnosticSink      DiagnosticSink;
+typedef struct GenericBindingCtx   GenericBindingCtx;
+typedef struct SpecializationKey   SpecializationKey;
 typedef struct SpecializationCache SpecializationCache;
-typedef struct InstantiationQueue InstantiationQueue;
+typedef struct InstantiationQueue  InstantiationQueue;
 
 // diagnostic severity
 typedef enum
@@ -69,6 +69,7 @@ struct AnalysisContext
     Scope            *global_scope;
     GenericBindingCtx bindings;
     const char       *module_name;
+    const char       *file_path;
     Symbol           *current_function;
 };
 
@@ -83,8 +84,8 @@ struct SpecializationKey
 // specialization cache entry
 typedef struct SpecializationEntry
 {
-    SpecializationKey          key;
-    Symbol                    *specialized_symbol;
+    SpecializationKey           key;
+    Symbol                     *specialized_symbol;
     struct SpecializationEntry *next;
 } SpecializationEntry;
 
@@ -107,11 +108,11 @@ typedef enum
 // instantiation request: deferred generic specialization
 typedef struct InstantiationRequest
 {
-    InstantiationKind kind;
-    Symbol           *generic_symbol;
-    Type            **type_args;
-    size_t            type_arg_count;
-    AstNode          *call_site;
+    InstantiationKind            kind;
+    Symbol                      *generic_symbol;
+    Type                       **type_args;
+    size_t                       type_arg_count;
+    AstNode                     *call_site;
     struct InstantiationRequest *next;
 } InstantiationRequest;
 
@@ -127,11 +128,17 @@ struct InstantiationQueue
 struct SemanticDriver
 {
     ModuleManager       module_manager;
+    SymbolTable         symbol_table; // for codegen compatibility
     SpecializationCache spec_cache;
     InstantiationQueue  inst_queue;
     DiagnosticSink      diagnostics;
     AstNode            *program_root;
     const char         *entry_module_name;
+
+    // module analysis queue for breadth-first processing
+    Module **module_queue;
+    size_t   module_queue_count;
+    size_t   module_queue_capacity;
 };
 
 // driver lifecycle
@@ -139,7 +146,7 @@ SemanticDriver *semantic_driver_create(void);
 void            semantic_driver_destroy(SemanticDriver *driver);
 
 // main entry point
-bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *entry_path);
+bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *module_name, const char *module_path);
 
 // diagnostics
 void diagnostic_sink_init(DiagnosticSink *sink);
@@ -172,12 +179,12 @@ char *mangle_method(const char *module_name, const char *owner_name, const char 
 char *mangle_global_symbol(const char *module_name, const char *symbol_name);
 
 // analysis context helpers
-AnalysisContext analysis_context_create(Scope *global_scope, Scope *module_scope, const char *module_name);
+AnalysisContext analysis_context_create(Scope *global_scope, Scope *module_scope, const char *module_name, const char *module_path);
 AnalysisContext analysis_context_with_scope(const AnalysisContext *parent, Scope *new_scope);
 AnalysisContext analysis_context_with_bindings(const AnalysisContext *parent, GenericBindingCtx new_bindings);
 AnalysisContext analysis_context_with_function(const AnalysisContext *parent, Symbol *function);
 
 // main analysis entry point
-bool semantic_analyze_new(SemanticDriver *driver, AstNode *root, const char *entry_module_name);
+bool semantic_analyze_new(SemanticDriver *driver, AstNode *root, const char *module_name, const char *module_path);
 
 #endif // SEMANTIC_NEW_H

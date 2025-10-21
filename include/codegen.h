@@ -2,7 +2,7 @@
 #define CODEGEN_H
 
 #include "ast.h"
-#include "semantic.h"
+#include "semantic_new.h"
 #include "lexer.h"
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
@@ -94,7 +94,7 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
 void codegen_context_dnit(CodegenContext *ctx);
 
 // main entry point
-bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *analyzer);
+bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticDriver *driver);
 
 // output generation
 bool codegen_emit_object(CodegenContext *ctx, const char *filename);

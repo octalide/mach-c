@@ -1,9 +1,8 @@
 #include "semantic.h"
-#include "config.h"
+#include "ioutil.h"
 #include "lexer.h"
-#include "module.h"
-#include "token.h"
-#include <ctype.h>
+#include "symbol.h"
+#include "type.h"
 #include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -11,268 +10,1025 @@
 #include <stdlib.h>
 #include <string.h>
 
-// forward declarations
-static Type *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNode *expr, Type *specified_type, Type *resolved_type);
-static Type *semantic_analyze_null_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
-static bool semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-static bool semantic_register_generic_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-static bool semantic_register_generic_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node);
-static Type *semantic_lookup_generic_binding(SemanticAnalyzer *analyzer, const char *name);
-static bool semantic_push_generic_binding(SemanticAnalyzer *analyzer, const char *name, Type *type);
-static void semantic_pop_generic_bindings(SemanticAnalyzer *analyzer, size_t count);
-static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
-static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
-static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request);
-static void  semantic_register_builtin_types(SemanticAnalyzer *analyzer);
-static void  semantic_register_error_variable(SemanticAnalyzer *analyzer, AstNode *stmt, const char *name, bool is_val);
-static bool  semantic_predeclare_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
+static Type *analyze_expr_with_hint(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr, Type *expected);
+static Type *analyze_lit_expr_with_hint(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr, Type *expected);
+static Type *analyze_null_expr_with_hint(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr, Type *expected);
+static Type *analyze_array_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr);
+static bool  ensure_assignable(SemanticDriver *driver, const AnalysisContext *ctx, Type *expected, Type *actual, AstNode *site, const char *what);
 
-static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count);
-static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count);
-static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count);
-static void semantic_remove_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol);
-static char *semantic_build_method_mangle_name(const char *module_name, const char *type_name, const char *method_name, bool receiver_is_pointer);
-bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-static bool semantic_compare_type_ast(const AstNode *a, const AstNode *b);
-static Symbol *semantic_find_type_symbol_from_type(SemanticAnalyzer *analyzer, Type *type);
-static bool semantic_prepare_method_call(SemanticAnalyzer *analyzer, AstNode *call_expr);
-
-static bool semantic_predeclare_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+void diagnostic_sink_init(DiagnosticSink *sink)
 {
-    if (!analyzer || !stmt)
-        return false;
-
-    if (stmt->kind != AST_STMT_FUN)
-        return true;
-
-    if (stmt->fun_stmt.is_method)
-        return true;
-
-    if (stmt->symbol && stmt->symbol->kind == SYMBOL_FUNC && stmt->symbol->func.is_specialized_instance)
-        return true;
-
-    if (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
-    {
-        AstNode *saved_body = stmt->fun_stmt.body;
-        stmt->fun_stmt.body = NULL;
-
-        bool success = semantic_register_generic_fun_stmt(analyzer, stmt);
-
-        if (stmt->symbol)
-        {
-            stmt->symbol->func.is_defined = false;
-        }
-
-        stmt->fun_stmt.body = saved_body;
-        return success;
-    }
-
-    AstNode *saved_body = stmt->fun_stmt.body;
-    stmt->fun_stmt.body = NULL;
-
-    size_t error_mark = analyzer->errors.count;
-    bool   had_error   = analyzer->has_errors;
-    bool   had_fatal   = analyzer->has_fatal_error;
-
-    bool success = semantic_analyze_fun_stmt(analyzer, stmt);
-
-    if (stmt->symbol)
-    {
-        stmt->symbol->func.is_defined = false;
-        stmt->symbol->decl            = stmt;
-    }
-
-    stmt->fun_stmt.body = saved_body;
-
-    if (!success)
-    {
-        while ((size_t)analyzer->errors.count > error_mark)
-        {
-            analyzer->errors.count--;
-            SemanticError *err = &analyzer->errors.errors[analyzer->errors.count];
-            if (err->token)
-            {
-                token_dnit(err->token);
-                free(err->token);
-            }
-            free(err->message);
-            free(err->file_path);
-        }
-
-        stmt->symbol = NULL;
-        stmt->type   = NULL;
-        analyzer->has_errors      = had_error;
-        analyzer->has_fatal_error = had_fatal;
-        return true;
-    }
-
-    return success;
+    sink->entries      = NULL;
+    sink->count        = 0;
+    sink->capacity     = 0;
+    sink->has_errors   = false;
+    sink->has_fatal    = false;
+    sink->source_cache = calloc(16, sizeof(SourceCacheEntry *));
+    sink->cache_size   = 16;
 }
 
-static void instantiation_queue_init(InstantiationQueue *queue);
-static void instantiation_queue_dnit(InstantiationQueue *queue);
-static InstantiationRequest *instantiation_queue_dequeue(InstantiationQueue *queue);
-static void instantiation_request_destroy(InstantiationRequest *req);
-
-static Module *semantic_find_module_for_scope(ModuleManager *manager, Scope *scope);
-static Symbol *semantic_generic_origin(Symbol *symbol)
+void diagnostic_sink_dnit(DiagnosticSink *sink)
 {
-    if (!symbol)
-        return NULL;
+    for (size_t i = 0; i < sink->count; i++)
+    {
+        free(sink->entries[i].message);
+        free(sink->entries[i].file_path);
+        if (sink->entries[i].token)
+            free(sink->entries[i].token);
+    }
+    free(sink->entries);
+    sink->entries  = NULL;
+    sink->count    = 0;
+    sink->capacity = 0;
 
-    Symbol *origin = symbol;
-    while (origin->import_origin && origin->import_origin != origin)
-        origin = origin->import_origin;
-    return origin;
+    // clean up source cache
+    if (sink->source_cache)
+    {
+        for (size_t i = 0; i < sink->cache_size; i++)
+        {
+            SourceCacheEntry *entry = sink->source_cache[i];
+            while (entry)
+            {
+                SourceCacheEntry *next = entry->next;
+                free(entry->file_path);
+                free(entry->source);
+                free(entry);
+                entry = next;
+            }
+        }
+        free(sink->source_cache);
+        sink->source_cache = NULL;
+        sink->cache_size   = 0;
+    }
 }
 
-static Module *semantic_find_module_for_scope(ModuleManager *manager, Scope *scope)
+void diagnostic_emit(DiagnosticSink *sink, DiagnosticLevel level, AstNode *node, const char *file_path, const char *fmt, ...)
 {
-    if (!manager || !scope)
+    if (sink->count >= sink->capacity)
+    {
+        size_t      new_capacity = sink->capacity ? sink->capacity * 2 : 16;
+        Diagnostic *new_entries  = realloc(sink->entries, new_capacity * sizeof(Diagnostic));
+        if (!new_entries)
+            return;
+        sink->entries  = new_entries;
+        sink->capacity = new_capacity;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    char buffer[1024];
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    Diagnostic *diag = &sink->entries[sink->count++];
+    diag->level      = level;
+    diag->message    = strdup(buffer);
+    diag->file_path  = file_path ? strdup(file_path) : NULL;
+
+    // copy token info if available (position calculated at print time)
+    if (node && node->token)
+    {
+        diag->token = malloc(sizeof(Token));
+        if (diag->token)
+        {
+            diag->token->kind = node->token->kind;
+            diag->token->pos  = node->token->pos;
+            diag->token->len  = node->token->len;
+        }
+        diag->line   = 0; // calculated at print time
+        diag->column = 0; // calculated at print time
+    }
+    else
+    {
+        diag->token  = NULL;
+        diag->line   = 0;
+        diag->column = 0;
+    }
+
+    if (level == DIAG_ERROR)
+        sink->has_errors = true;
+}
+
+static unsigned int hash_file_path(const char *path)
+{
+    unsigned int hash = 5381;
+    while (*path)
+    {
+        hash = ((hash << 5) + hash) + (unsigned char)*path;
+        path++;
+    }
+    return hash;
+}
+
+static char *get_cached_source(DiagnosticSink *sink, const char *file_path)
+{
+    if (!sink->source_cache || !file_path)
         return NULL;
 
-    for (int i = 0; i < manager->capacity; i++)
+    unsigned int      hash  = hash_file_path(file_path) % sink->cache_size;
+    SourceCacheEntry *entry = sink->source_cache[hash];
+
+    while (entry)
     {
-        Module *module = manager->modules[i];
-        while (module)
+        if (strcmp(entry->file_path, file_path) == 0)
+            return entry->source;
+        entry = entry->next;
+    }
+
+    // not cached, read and cache it
+    char *source = read_file((char *)file_path);
+    if (source)
+    {
+        entry                    = malloc(sizeof(SourceCacheEntry));
+        entry->file_path         = strdup(file_path);
+        entry->source            = source;
+        entry->next              = sink->source_cache[hash];
+        sink->source_cache[hash] = entry;
+    }
+
+    return source;
+}
+
+void diagnostic_print_all(DiagnosticSink *sink)
+{
+    for (size_t i = 0; i < sink->count; i++)
+    {
+        Diagnostic *diag      = &sink->entries[i];
+        const char *level_str = (diag->level == DIAG_ERROR) ? "error" : (diag->level == DIAG_WARNING) ? "warning" : "note";
+
+        // skip note for now
+        if (diag->level == DIAG_NOTE)
+            continue;
+
+        fprintf(stderr, "%s: %s\n", level_str, diag->message);
+
+        // if we have token and file info, calculate and display location
+        if (diag->token && diag->file_path)
         {
-            if (module->symbols)
+            // use cached source
+            char *source = get_cached_source(sink, diag->file_path);
+            if (source)
             {
-                SymbolTable *symbols = module->symbols;
-                if (symbols->module_scope == scope || symbols->global_scope == scope)
-                    return module;
+                // create a temporary lexer for this file to calculate position
+                Lexer lexer;
+                lexer_init(&lexer, source);
+
+                int   line      = lexer_get_pos_line(&lexer, diag->token->pos);
+                int   col       = lexer_get_pos_line_offset(&lexer, diag->token->pos);
+                char *line_text = lexer_get_line_text(&lexer, line);
+
+                if (line_text)
+                {
+                    fprintf(stderr, "%s:%d:%d\n", diag->file_path, line + 1, col);
+                    fprintf(stderr, "%5d | %s\n", line + 1, line_text);
+                    fprintf(stderr, "      | %*s^\n", col > 1 ? col - 1 : 0, "");
+                    free(line_text);
+                }
+                else
+                {
+                    // fallback if we can't get line text
+                    fprintf(stderr, "%s:%d:%d\n", diag->file_path, line + 1, col);
+                }
+
+                lexer_dnit(&lexer);
+                // don't free source - it's cached
             }
-            module = module->next;
+            else
+            {
+                // fallback if we can't open the file
+                fprintf(stderr, "%s:<unknown position>\n", diag->file_path);
+            }
         }
+        else if (diag->file_path)
+        {
+            // no token info, just show file
+            fprintf(stderr, "%s\n", diag->file_path);
+        }
+    }
+}
+
+GenericBindingCtx generic_binding_ctx_create(void)
+{
+    GenericBindingCtx ctx;
+    ctx.bindings = NULL;
+    ctx.count    = 0;
+    ctx.capacity = 0;
+    return ctx;
+}
+
+void generic_binding_ctx_destroy(GenericBindingCtx *ctx)
+{
+    free(ctx->bindings);
+    ctx->bindings = NULL;
+    ctx->count    = 0;
+    ctx->capacity = 0;
+}
+
+GenericBindingCtx generic_binding_ctx_push(GenericBindingCtx *parent, const char *param_name, Type *concrete_type)
+{
+    GenericBindingCtx new_ctx;
+    new_ctx.count    = parent->count + 1;
+    new_ctx.capacity = new_ctx.count;
+    new_ctx.bindings = malloc(new_ctx.capacity * sizeof(GenericBinding));
+
+    // copy parent bindings
+    if (parent->count > 0)
+        memcpy(new_ctx.bindings, parent->bindings, parent->count * sizeof(GenericBinding));
+
+    // add new binding
+    new_ctx.bindings[parent->count].param_name    = param_name;
+    new_ctx.bindings[parent->count].concrete_type = concrete_type;
+
+    return new_ctx;
+}
+
+Type *generic_binding_ctx_lookup(const GenericBindingCtx *ctx, const char *param_name)
+{
+    if (!param_name)
+        return NULL;
+
+    for (size_t i = ctx->count; i > 0; i--)
+    {
+        if (ctx->bindings[i - 1].param_name && strcmp(ctx->bindings[i - 1].param_name, param_name) == 0)
+            return ctx->bindings[i - 1].concrete_type;
     }
 
     return NULL;
 }
 
-static void semantic_register_builtin_types(SemanticAnalyzer *analyzer)
+#define SPEC_CACHE_INITIAL_BUCKETS 64
+
+static size_t hash_specialization_key(Symbol *generic_symbol, Type **type_args, size_t type_arg_count)
 {
-    if (!analyzer || !analyzer->symbol_table.global_scope)
-        return;
-
-    static const char *builtin_names[] = {
-        "u8",  "u16", "u32", "u64", "i8",  "i16", "i32",
-        "i64", "f16", "f32", "f64", "ptr"
-    };
-
-    Scope *global_scope = analyzer->symbol_table.global_scope;
-
-    for (size_t i = 0; i < sizeof(builtin_names) / sizeof(builtin_names[0]); i++)
+    size_t hash = (size_t)generic_symbol;
+    for (size_t i = 0; i < type_arg_count; i++)
     {
-        const char *name = builtin_names[i];
-        if (!name)
-            continue;
-
-        if (symbol_lookup_scope(global_scope, name))
-            continue;
-
-        Type *builtin_type = type_lookup_builtin(name);
-        if (!builtin_type)
-            continue;
-
-        Symbol *symbol = symbol_create(SYMBOL_TYPE, name, builtin_type, NULL);
-        if (!symbol)
-            continue;
-
-        symbol->is_public     = true;
-        symbol->import_origin = symbol;
-        symbol_add(global_scope, symbol);
+        hash = hash * 31 + (size_t)type_args[i];
     }
+    return hash;
 }
 
-static char semantic_sanitize_export_char(char c)
+static bool keys_equal(const SpecializationKey *a, const SpecializationKey *b)
 {
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
-        return c;
-    return '_';
+    if (a->generic_symbol != b->generic_symbol)
+        return false;
+    if (a->type_arg_count != b->type_arg_count)
+        return false;
+    for (size_t i = 0; i < a->type_arg_count; i++)
+    {
+        if (!type_equals(a->type_args[i], b->type_args[i]))
+            return false;
+    }
+    return true;
 }
 
-static char *semantic_build_export_name(const char *module_name, const char *symbol_name)
+void specialization_cache_init(SpecializationCache *cache)
 {
-    if (!symbol_name || !symbol_name[0])
-        return NULL;
-
-    const char *module = (module_name && module_name[0]) ? module_name : NULL;
-    size_t       module_len = module ? strlen(module) : 0;
-    size_t       symbol_len = strlen(symbol_name);
-
-    size_t total = module_len ? (module_len + 2 + symbol_len) : symbol_len;
-    char  *out   = malloc(total + 1);
-    if (!out)
-        return NULL;
-
-    size_t pos = 0;
-    if (module_len)
-    {
-        for (size_t i = 0; i < module_len; i++)
-            out[pos++] = semantic_sanitize_export_char(module[i]);
-        out[pos++] = '_';
-        out[pos++] = '_';
-    }
-
-    for (size_t i = 0; i < symbol_len; i++)
-        out[pos++] = semantic_sanitize_export_char(symbol_name[i]);
-
-    out[pos] = '\0';
-    return out;
+    cache->bucket_count = SPEC_CACHE_INITIAL_BUCKETS;
+    cache->buckets      = calloc(cache->bucket_count, sizeof(SpecializationEntry *));
+    cache->entry_count  = 0;
 }
 
-static char *semantic_build_method_mangle_name(const char *module_name, const char *type_name, const char *method_name, bool receiver_is_pointer)
+void specialization_cache_dnit(SpecializationCache *cache)
 {
-    if (!method_name || !method_name[0])
-        return NULL;
-
-    const char *type = type_name && type_name[0] ? type_name : "";
-    size_t       type_len = strlen(type);
-    size_t       method_len = strlen(method_name);
-    size_t       prefix_len = receiver_is_pointer ? 4 : 0; // ptr_
-    size_t       separator  = (type_len > 0) ? 2 : 0;      // __
-
-    size_t combined_len = prefix_len + type_len + separator + method_len;
-    if (combined_len == 0)
-        return NULL;
-
-    char *combined = malloc(combined_len + 1);
-    if (!combined)
-        return NULL;
-
-    size_t pos = 0;
-    if (receiver_is_pointer)
+    for (size_t i = 0; i < cache->bucket_count; i++)
     {
-        combined[pos++] = 'p';
-        combined[pos++] = 't';
-        combined[pos++] = 'r';
-        combined[pos++] = '_';
-    }
-
-    if (type_len > 0)
-    {
-        for (size_t i = 0; i < type_len; i++)
-            combined[pos++] = semantic_sanitize_export_char(type[i]);
-        if (method_len > 0)
+        SpecializationEntry *entry = cache->buckets[i];
+        while (entry)
         {
-            combined[pos++] = '_';
-            combined[pos++] = '_';
+            SpecializationEntry *next = entry->next;
+            free(entry->key.type_args);
+            free(entry);
+            entry = next;
+        }
+    }
+    free(cache->buckets); // Free the memory allocated for the buckets
+    cache->buckets      = NULL;
+    cache->bucket_count = 0;
+    cache->entry_count  = 0;
+}
+
+Symbol *specialization_cache_find(SpecializationCache *cache, Symbol *generic_symbol, Type **type_args, size_t type_arg_count)
+{
+    size_t hash   = hash_specialization_key(generic_symbol, type_args, type_arg_count);
+    size_t bucket = hash % cache->bucket_count;
+
+    SpecializationKey search_key = {generic_symbol, type_args, type_arg_count};
+
+    for (SpecializationEntry *entry = cache->buckets[bucket]; entry; entry = entry->next)
+    {
+        if (keys_equal(&entry->key, &search_key))
+            return entry->specialized_symbol;
+    }
+
+    return NULL;
+}
+
+void specialization_cache_insert(SpecializationCache *cache, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, Symbol *specialized)
+{
+    size_t hash   = hash_specialization_key(generic_symbol, type_args, type_arg_count);
+    size_t bucket = hash % cache->bucket_count;
+
+    SpecializationEntry *entry = malloc(sizeof(SpecializationEntry));
+    entry->key.generic_symbol  = generic_symbol;
+    entry->key.type_arg_count  = type_arg_count;
+    entry->key.type_args       = malloc(type_arg_count * sizeof(Type *));
+    memcpy(entry->key.type_args, type_args, type_arg_count * sizeof(Type *));
+    entry->specialized_symbol = specialized;
+    entry->next               = cache->buckets[bucket];
+    cache->buckets[bucket]    = entry;
+    cache->entry_count++;
+}
+
+void instantiation_queue_init(InstantiationQueue *queue)
+{
+    queue->head  = NULL;
+    queue->tail  = NULL;
+    queue->count = 0;
+}
+
+void instantiation_queue_dnit(InstantiationQueue *queue)
+{
+    InstantiationRequest *req = queue->head;
+    while (req)
+    {
+        InstantiationRequest *next = req->next;
+        free(req->type_args);
+        free(req);
+        req = next;
+    }
+    queue->head  = NULL; // Reset the head of the queue
+    queue->tail  = NULL;
+    queue->count = 0;
+}
+
+void instantiation_queue_push(InstantiationQueue *queue, InstantiationKind kind, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, AstNode *call_site)
+{
+    InstantiationRequest *req = malloc(sizeof(InstantiationRequest));
+    req->kind                 = kind;
+    req->generic_symbol       = generic_symbol;
+    req->type_arg_count       = type_arg_count;
+    req->type_args            = malloc(type_arg_count * sizeof(Type *));
+    memcpy(req->type_args, type_args, type_arg_count * sizeof(Type *));
+    req->call_site = call_site;
+    req->next      = NULL;
+
+    if (queue->tail)
+    {
+        queue->tail->next = req;
+        queue->tail       = req;
+    }
+    else
+    {
+        queue->head = queue->tail = req;
+    }
+    queue->count++;
+}
+
+InstantiationRequest *instantiation_queue_pop(InstantiationQueue *queue)
+{
+    if (!queue->head)
+        return NULL;
+
+    InstantiationRequest *req = queue->head;
+    queue->head               = req->next;
+    if (!queue->head)
+        queue->tail = NULL;
+    queue->count--;
+
+    return req;
+}
+
+static char *sanitize_type_name(const char *name)
+{
+    if (!name)
+        return strdup("anon");
+
+    size_t len    = strlen(name);
+    char  *result = malloc(len + 1);
+    char  *dst    = result;
+
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = name[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
+        {
+            *dst++ = c;
+        }
+    }
+    *dst = '\0';
+
+    return result;
+}
+
+static char *type_to_mangled_string(Type *type)
+{
+    if (!type)
+        return strdup("unknown");
+
+    // if type has a name (like "string" alias), use it
+    if (type->name && strlen(type->name) > 0)
+        return sanitize_type_name(type->name);
+
+    char buffer[256];
+    switch (type->kind)
+    {
+    case TYPE_U8:
+    case TYPE_U16:
+    case TYPE_U32:
+    case TYPE_U64:
+    case TYPE_I8:
+    case TYPE_I16:
+    case TYPE_I32:
+    case TYPE_I64:
+    case TYPE_F16:
+    case TYPE_F32:
+    case TYPE_F64:
+    case TYPE_PTR:
+        return strdup(type->name ? type->name : "type");
+
+    case TYPE_POINTER:
+        snprintf(buffer, sizeof(buffer), "ptr_%s", type_to_mangled_string(type->pointer.base));
+        return strdup(buffer);
+
+    case TYPE_ARRAY:
+        snprintf(buffer, sizeof(buffer), "arr_%s", type_to_mangled_string(type->array.elem_type));
+        return strdup(buffer);
+
+    case TYPE_STRUCT:
+    case TYPE_UNION:
+        return sanitize_type_name(type->name);
+
+    default:
+        return strdup("unknown");
+    }
+}
+
+char *mangle_generic_type(const char *module_name, const char *base_name, Type **type_args, size_t type_arg_count)
+{
+    if (!base_name)
+        base_name = "type";
+
+    char *sanitized_base = sanitize_type_name(base_name);
+
+    // calculate total length with module prefix
+    size_t total_len     = 0;
+    char  *module_prefix = NULL;
+    if (module_name && strlen(module_name) > 0)
+    {
+        // sanitize module path: std.types.result → std__types__result
+        size_t mod_len = strlen(module_name);
+        module_prefix  = malloc(mod_len + 1);
+        char *dst      = module_prefix;
+        for (size_t i = 0; i < mod_len; i++)
+        {
+            char c = module_name[i];
+            if (c == '.')
+                *dst++ = '_';
+            else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
+                *dst++ = c;
+        }
+        *dst      = '\0';
+        total_len = strlen(module_prefix) + 2; // module + "__"
+    }
+
+    total_len += strlen(sanitized_base);
+
+    char **arg_strs = malloc(type_arg_count * sizeof(char *));
+    for (size_t i = 0; i < type_arg_count; i++)
+    {
+        arg_strs[i] = type_to_mangled_string(type_args[i]);
+        total_len += 1 + strlen(arg_strs[i]); // '$' + arg
+    }
+
+    char  *result = malloc(total_len + 1);
+    size_t offset = 0;
+
+    // add module prefix
+    if (module_prefix)
+    {
+        strcpy(result, module_prefix);
+        offset           = strlen(module_prefix);
+        result[offset++] = '_';
+        result[offset++] = '_';
+        free(module_prefix);
+    }
+
+    // add base name
+    strcpy(result + offset, sanitized_base);
+    offset += strlen(sanitized_base);
+
+    // add type arguments
+    for (size_t i = 0; i < type_arg_count; i++)
+    {
+        result[offset++] = '$';
+        strcpy(result + offset, arg_strs[i]);
+        offset += strlen(arg_strs[i]);
+        free(arg_strs[i]);
+    }
+    result[offset] = '\0';
+
+    free(arg_strs);
+    free(sanitized_base);
+    return result;
+}
+
+char *mangle_generic_function(const char *module_name, const char *base_name, Type **type_args, size_t type_arg_count)
+{
+    // functions use same mangling as types
+    return mangle_generic_type(module_name, base_name, type_args, type_arg_count);
+}
+
+char *mangle_method(const char *module_name, const char *owner_name, const char *method_name, bool receiver_is_pointer)
+{
+    const char *mod        = module_name ? module_name : "mod";
+    const char *own        = owner_name ? owner_name : "owner";
+    const char *mth        = method_name ? method_name : "method";
+    const char *ptr_suffix = receiver_is_pointer ? "_ptr" : "";
+
+    size_t len    = strlen(mod) + 2 + strlen(own) + 2 + strlen(mth) + strlen(ptr_suffix) + 1;
+    char  *result = malloc(len);
+    snprintf(result, len, "%s__%s__%s%s", mod, own, mth, ptr_suffix);
+    return result;
+}
+
+char *mangle_global_symbol(const char *module_name, const char *symbol_name)
+{
+    const char *mod = module_name ? module_name : "mod";
+    const char *sym = symbol_name ? symbol_name : "symbol";
+
+    size_t len    = strlen(mod) + 2 + strlen(sym) + 1;
+    char  *result = malloc(len);
+    snprintf(result, len, "%s__%s", mod, sym);
+    return result;
+}
+
+AnalysisContext analysis_context_create(Scope *global_scope, Scope *module_scope, const char *module_name, const char *module_path)
+{
+    AnalysisContext ctx;
+    ctx.current_scope    = module_scope ? module_scope : global_scope;
+    ctx.module_scope     = module_scope;
+    ctx.global_scope     = global_scope;
+    ctx.bindings         = generic_binding_ctx_create();
+    ctx.module_name      = module_name;
+    ctx.file_path        = module_path;
+    ctx.current_function = NULL;
+    return ctx;
+}
+
+AnalysisContext analysis_context_with_scope(const AnalysisContext *parent, Scope *new_scope)
+{
+    AnalysisContext ctx = *parent;
+    ctx.current_scope   = new_scope;
+    return ctx;
+}
+
+AnalysisContext analysis_context_with_bindings(const AnalysisContext *parent, GenericBindingCtx new_bindings)
+{
+    AnalysisContext ctx = *parent;
+    ctx.bindings        = new_bindings;
+    return ctx;
+}
+
+AnalysisContext analysis_context_with_function(const AnalysisContext *parent, Symbol *function)
+{
+    AnalysisContext ctx  = *parent;
+    ctx.current_function = function;
+    return ctx;
+}
+
+SemanticDriver *semantic_driver_create(void)
+{
+    SemanticDriver *driver = malloc(sizeof(SemanticDriver));
+    module_manager_init(&driver->module_manager);
+    specialization_cache_init(&driver->spec_cache);
+    instantiation_queue_init(&driver->inst_queue);
+    diagnostic_sink_init(&driver->diagnostics);
+    driver->program_root      = NULL;
+    driver->entry_module_name = NULL;
+    return driver;
+}
+
+void semantic_driver_destroy(SemanticDriver *driver)
+{
+    symbol_table_dnit(&driver->symbol_table);
+    module_manager_dnit(&driver->module_manager);
+    specialization_cache_dnit(&driver->spec_cache);
+    instantiation_queue_dnit(&driver->inst_queue);
+    diagnostic_sink_dnit(&driver->diagnostics);
+    free(driver);
+}
+
+static bool    analyze_pass_a_declarations(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *root);
+static bool    analyze_pass_b_signatures(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *root);
+static bool    analyze_pass_c_bodies(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *root);
+static Symbol *request_generic_type_instantiation(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *type_node);
+static bool    analyze_function_body(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt);
+static bool    process_use_statement(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt);
+static bool    enqueue_module(SemanticDriver *driver, const char *module_path);
+static bool    import_public_symbols(SemanticDriver *driver, const AnalysisContext *ctx, Module *src_module, AstNode *stmt, Scope *alias_scope);
+static Symbol *clone_imported_symbol(Symbol *source, const char *module_name);
+
+// helper macro to iterate all modules in hash table
+#define FOR_EACH_MODULE(manager, module_var)         \
+    for (int _i = 0; _i < (manager)->capacity; _i++) \
+        for (Module *module_var = (manager)->modules[_i]; module_var != NULL; module_var = module_var->next)
+
+// load module (parse only, no analysis)
+static Module *load_module_deferred(SemanticDriver *driver, const char *module_path)
+{
+    // check if already loaded
+    Module *existing = module_manager_find_module(&driver->module_manager, module_path);
+    if (existing)
+        return existing;
+
+    // use module manager to load and parse
+    Module *module = module_manager_load_module(&driver->module_manager, module_path);
+    if (!module)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module_path, "failed to load module '%s'", module_path);
+        return NULL;
+    }
+
+    // initialize symbol table if not present
+    if (!module->symbols)
+    {
+        module->symbols = malloc(sizeof(SymbolTable));
+        symbol_table_init(module->symbols);
+    }
+
+    if (!module->symbols->global_scope)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module_path, "module '%s' has invalid symbol table", module_path);
+        return NULL;
+    }
+
+    return module;
+}
+
+static Type *resolve_type_in_context(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *type_node)
+{
+    if (!type_node)
+        return NULL;
+
+    switch (type_node->kind)
+    {
+    case AST_TYPE_NAME:
+    {
+        const char *name = type_node->type_name.name;
+
+        // check for generic binding first without caching to avoid cross-specialization bleed
+        Type *bound = generic_binding_ctx_lookup(&ctx->bindings, name);
+        if (bound)
+            return bound;
+
+        // cache if already resolved (only for non-generic references)
+        if (type_node->type)
+            return type_node->type;
+
+        // check for generic instantiation
+        if (type_node->type_name.generic_args && type_node->type_name.generic_args->count > 0)
+        {
+            Symbol *specialized = request_generic_type_instantiation(driver, ctx, type_node);
+            if (specialized && specialized->type)
+            {
+                type_node->type = specialized->type;
+                return specialized->type;
+            }
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "failed to instantiate generic type '%s'", name);
+            return NULL;
+        }
+
+        // check builtin types
+        Type *builtin = type_lookup_builtin(name);
+        if (builtin)
+        {
+            type_node->type = builtin;
+            return builtin;
+        }
+
+        // look up user-defined type in scope
+        Symbol *type_sym = symbol_lookup_scope(ctx->current_scope, name);
+        if (!type_sym)
+            type_sym = symbol_lookup_scope(ctx->module_scope, name);
+        if (!type_sym)
+            type_sym = symbol_lookup_scope(ctx->global_scope, name);
+
+        if (type_sym && type_sym->kind == SYMBOL_TYPE)
+        {
+            type_node->type = type_sym->type;
+            return type_sym->type;
+        }
+
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "unknown type '%s'", name);
+        return NULL;
+    }
+
+    case AST_TYPE_PTR:
+    {
+        Type *base = resolve_type_in_context(driver, ctx, type_node->type_ptr.base);
+        if (!base)
+            return NULL;
+        Type *ptr       = type_pointer_create(base);
+        type_node->type = ptr;
+        return ptr;
+    }
+
+    case AST_TYPE_ARRAY:
+    {
+        Type *elem = resolve_type_in_context(driver, ctx, type_node->type_array.elem_type);
+        if (!elem)
+            return NULL;
+        Type *arr       = type_array_create(elem);
+        type_node->type = arr;
+        return arr;
+    }
+
+    case AST_TYPE_FUN:
+    {
+        Type *ret_type = NULL;
+        if (type_node->type_fun.return_type)
+        {
+            ret_type = resolve_type_in_context(driver, ctx, type_node->type_fun.return_type);
+            if (!ret_type)
+                return NULL;
+        }
+
+        size_t param_count = type_node->type_fun.params ? type_node->type_fun.params->count : 0;
+        Type **param_types = NULL;
+        if (param_count > 0)
+        {
+            param_types = malloc(sizeof(Type *) * param_count);
+            for (size_t i = 0; i < param_count; i++)
+            {
+                param_types[i] = resolve_type_in_context(driver, ctx, type_node->type_fun.params->items[i]);
+                if (!param_types[i])
+                {
+                    free(param_types);
+                    return NULL;
+                }
+            }
+        }
+
+        Type *func = type_function_create(ret_type, param_types, param_count, type_node->type_fun.is_variadic);
+        free(param_types);
+        type_node->type = func;
+        return func;
+    }
+
+    case AST_TYPE_STR:
+    {
+        // named struct - look it up
+        if (type_node->type_str.name)
+        {
+            Symbol *sym = symbol_lookup_scope(ctx->current_scope, type_node->type_str.name);
+            if (!sym || sym->kind != SYMBOL_TYPE)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "unknown type '%s'", type_node->type_str.name);
+                return NULL;
+            }
+            type_node->type = sym->type;
+            return sym->type;
+        }
+
+        // anonymous struct - create inline
+        Type   *struct_type = type_struct_create(NULL);
+        Symbol *head        = NULL;
+        Symbol *tail        = NULL;
+        size_t  offset      = 0;
+        size_t  max_align   = 1;
+        size_t  field_count = 0;
+
+        if (type_node->type_str.fields)
+        {
+            for (int i = 0; i < type_node->type_str.fields->count; i++)
+            {
+                AstNode *field_node = type_node->type_str.fields->items[i];
+                Type    *field_type = resolve_type_in_context(driver, ctx, field_node->field_stmt.type);
+                if (!field_type)
+                {
+                    // cleanup
+                    Symbol *curr = head;
+                    while (curr)
+                    {
+                        Symbol *next = curr->next;
+                        symbol_destroy(curr);
+                        curr = next;
+                    }
+                    free(struct_type);
+                    return NULL;
+                }
+
+                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+
+                size_t field_align         = type_alignof(field_type);
+                size_t align_val           = field_align ? field_align : 1;
+                offset                     = (offset + align_val - 1) / align_val * align_val; // align offset
+                field_symbol->field.offset = offset;
+
+                if (!head)
+                {
+                    head = tail = field_symbol;
+                }
+                else
+                {
+                    tail->next = field_symbol;
+                    tail       = field_symbol;
+                }
+
+                offset += type_sizeof(field_type);
+                if (field_align > max_align)
+                    max_align = field_align;
+                field_count++;
+            }
+        }
+
+        size_t final_align = max_align ? max_align : 1;
+        offset             = (offset + final_align - 1) / final_align * final_align; // align struct size
+
+        struct_type->size                  = offset;
+        struct_type->alignment             = final_align;
+        struct_type->composite.fields      = head;
+        struct_type->composite.field_count = field_count;
+
+        type_node->type = struct_type;
+        return struct_type;
+    }
+
+    case AST_TYPE_UNI:
+    {
+        // named union - look it up
+        if (type_node->type_uni.name)
+        {
+            Symbol *sym = symbol_lookup_scope(ctx->current_scope, type_node->type_uni.name);
+            if (!sym || sym->kind != SYMBOL_TYPE)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "unknown type '%s'", type_node->type_uni.name);
+                return NULL;
+            }
+            type_node->type = sym->type;
+            return sym->type;
+        }
+
+        // anonymous union - create inline
+        Type   *union_type  = type_union_create(NULL);
+        Symbol *head        = NULL;
+        Symbol *tail        = NULL;
+        size_t  max_size    = 0;
+        size_t  max_align   = 1;
+        size_t  field_count = 0;
+
+        if (type_node->type_uni.fields)
+        {
+            for (int i = 0; i < type_node->type_uni.fields->count; i++)
+            {
+                AstNode *field_node = type_node->type_uni.fields->items[i];
+                Type    *field_type = resolve_type_in_context(driver, ctx, field_node->field_stmt.type);
+                if (!field_type)
+                {
+                    // cleanup
+                    Symbol *curr = head;
+                    while (curr)
+                    {
+                        Symbol *next = curr->next;
+                        symbol_destroy(curr);
+                        curr = next;
+                    }
+                    free(union_type);
+                    return NULL;
+                }
+
+                Symbol *field_symbol       = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+                field_symbol->field.offset = 0; // all union fields start at offset 0
+
+                if (!head)
+                {
+                    head = tail = field_symbol;
+                }
+                else
+                {
+                    tail->next = field_symbol;
+                    tail       = field_symbol;
+                }
+
+                size_t field_size  = type_sizeof(field_type);
+                size_t field_align = type_alignof(field_type);
+                if (field_size > max_size)
+                    max_size = field_size;
+                if (field_align > max_align)
+                    max_align = field_align;
+                field_count++;
+            }
+        }
+
+        size_t final_align = max_align ? max_align : 1;
+        size_t final_size  = (max_size + final_align - 1) / final_align * final_align; // align to max_align
+
+        union_type->size                  = final_size;
+        union_type->alignment             = final_align;
+        union_type->composite.fields      = head;
+        union_type->composite.field_count = field_count;
+
+        type_node->type = union_type;
+        return union_type;
+    }
+
+    default:
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "unsupported type kind in resolution");
+        return NULL;
+    }
+}
+
+// enqueue module for analysis (loads and collects dependencies)
+static bool enqueue_module(SemanticDriver *driver, const char *module_path)
+{
+    Module *module = load_module_deferred(driver, module_path);
+    if (!module)
+        return false;
+
+    // scan for use statements and enqueue dependencies
+    if (module->ast && module->ast->kind == AST_PROGRAM)
+    {
+        for (int i = 0; i < module->ast->program.stmts->count; i++)
+        {
+            AstNode *stmt = module->ast->program.stmts->items[i];
+            if (stmt->kind == AST_STMT_USE)
+            {
+                const char *dep_path = stmt->use_stmt.module_path;
+                if (dep_path)
+                {
+                    // recursively enqueue dependencies
+                    if (!enqueue_module(driver, dep_path))
+                        return false;
+                }
+            }
         }
     }
 
-    for (size_t i = 0; i < method_len; i++)
-        combined[pos++] = semantic_sanitize_export_char(method_name[i]);
-
-    combined[pos] = '\0';
-
-    char *export_name = semantic_build_export_name(module_name, combined);
-    free(combined);
-    return export_name;
+    return true;
 }
 
-static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module_name)
+// import public symbols from module into current scope
+static bool import_public_symbols(SemanticDriver *driver, const AnalysisContext *ctx, Module *src_module, AstNode *stmt, Scope *alias_scope)
+{
+    if (!src_module || !src_module->symbols)
+        return false;
+
+    Scope *export_scope = src_module->symbols->module_scope ? src_module->symbols->module_scope : src_module->symbols->global_scope;
+    if (!export_scope)
+        return false;
+
+    bool import_into_current_scope = (alias_scope == NULL);
+
+    for (Symbol *sym = export_scope->symbols; sym; sym = sym->next)
+    {
+        // skip modules and non-public symbols
+        if (sym->kind == SYMBOL_MODULE || !sym->is_public)
+            continue;
+
+        // skip imported symbols (don't re-export transitive imports)
+        if (sym->is_imported)
+            continue;
+
+        if (import_into_current_scope)
+        {
+            Symbol *existing = symbol_lookup_scope(ctx->current_scope, sym->name);
+            if (existing)
+            {
+                // allow re-importing the same symbol from the same module (idempotent)
+                if (existing->is_imported && existing->import_module && src_module->name && strcmp(existing->import_module, src_module->name) == 0)
+                {
+                    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "symbol '%s' conflicts with existing declaration", sym->name);
+                    return false;
+                }
+                continue;
+            }
+
+            Symbol *imported = clone_imported_symbol(sym, src_module->name);
+            if (!imported)
+                return false;
+
+            imported->home_scope = ctx->current_scope;
+            symbol_add(ctx->current_scope, imported);
+        }
+
+        if (alias_scope)
+        {
+            if (!symbol_lookup_scope(alias_scope, sym->name))
+            {
+                Symbol *alias_copy = clone_imported_symbol(sym, src_module->name);
+                if (!alias_copy)
+                    return false;
+                alias_copy->home_scope = alias_scope;
+                symbol_add(alias_scope, alias_copy);
+            }
+        }
+    }
+
+    return true;
+}
+
+static Symbol *clone_imported_symbol(Symbol *source, const char *module_name)
 {
     if (!source)
         return NULL;
@@ -306,72 +1062,72 @@ static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module
         clone->var.mangled_name = source->var.mangled_name ? strdup(source->var.mangled_name) : NULL;
         break;
     case SYMBOL_FUNC:
-        clone->func.is_external            = source->func.is_external;
-        clone->func.is_defined             = source->func.is_defined;
-        clone->func.uses_mach_varargs      = source->func.uses_mach_varargs;
-        clone->func.extern_name            = source->func.extern_name ? strdup(source->func.extern_name) : NULL;
-        clone->func.convention             = source->func.convention ? strdup(source->func.convention) : NULL;
-        clone->func.mangled_name           = source->func.mangled_name ? strdup(source->func.mangled_name) : NULL;
-        // preserve generic information for imported generics
-        clone->func.is_generic             = source->func.is_generic;
-        clone->func.generic_param_count    = source->func.generic_param_count;
+        clone->func.is_external                    = source->func.is_external;
+        clone->func.is_defined                     = source->func.is_defined;
+        clone->func.uses_mach_varargs              = source->func.uses_mach_varargs;
+        clone->func.extern_name                    = source->func.extern_name ? strdup(source->func.extern_name) : NULL;
+        clone->func.convention                     = source->func.convention ? strdup(source->func.convention) : NULL;
+        clone->func.mangled_name                   = source->func.mangled_name ? strdup(source->func.mangled_name) : NULL;
+        clone->func.is_generic                     = source->func.is_generic;
+        clone->func.generic_param_count            = source->func.generic_param_count;
+        clone->func.generic_specializations        = NULL;
+        clone->func.is_specialized_instance        = source->func.is_specialized_instance;
+        clone->func.is_method                      = source->func.is_method;
+        clone->func.method_owner                   = source->func.method_owner;
+        clone->func.method_forwarded_generic_count = source->func.method_forwarded_generic_count;
+        clone->func.method_receiver_is_pointer     = source->func.method_receiver_is_pointer;
+        clone->func.method_receiver_name           = source->func.method_receiver_name ? strdup(source->func.method_receiver_name) : NULL;
         if (source->func.generic_param_count > 0 && source->func.generic_param_names)
         {
             clone->func.generic_param_names = malloc(sizeof(char *) * source->func.generic_param_count);
-            if (clone->func.generic_param_names)
+            if (!clone->func.generic_param_names)
             {
-                for (size_t i = 0; i < source->func.generic_param_count; i++)
-                {
-                    clone->func.generic_param_names[i] = source->func.generic_param_names[i] ? strdup(source->func.generic_param_names[i]) : NULL;
-                }
+                symbol_destroy(clone);
+                return NULL;
             }
-            else
+            for (size_t i = 0; i < source->func.generic_param_count; i++)
             {
-                // allocation failed, mark as non-generic
-                clone->func.generic_param_count = 0;
-                clone->func.is_generic = false;
+                clone->func.generic_param_names[i] = source->func.generic_param_names[i] ? strdup(source->func.generic_param_names[i]) : NULL;
             }
         }
         else
         {
             clone->func.generic_param_names = NULL;
         }
-        // imported clones don't own specialization lists; lookups forward to origin
-        clone->func.generic_specializations = NULL;
-        clone->func.is_specialized_instance = source->func.is_specialized_instance;
-        clone->func.is_method               = source->func.is_method;
-        clone->func.method_owner            = source->func.method_owner;
-        clone->func.method_forwarded_generic_count = source->func.method_forwarded_generic_count;
-        clone->func.method_receiver_is_pointer = source->func.method_receiver_is_pointer;
-        clone->func.method_receiver_name    = source->func.method_receiver_name ? strdup(source->func.method_receiver_name) : NULL;
         break;
     case SYMBOL_TYPE:
-        clone->type_def.is_alias = source->type_def.is_alias;
-        clone->type_def.is_generic = source->type_def.is_generic;
-        clone->type_def.generic_param_count = source->type_def.generic_param_count;
+        clone->type_def.is_alias                = source->type_def.is_alias;
+        clone->type_def.is_generic              = source->type_def.is_generic;
+        clone->type_def.generic_param_count     = source->type_def.generic_param_count;
+        clone->type_def.generic_specializations = NULL;
+        clone->type_def.is_specialized_instance = source->type_def.is_specialized_instance;
+        clone->type_def.methods                 = NULL;
         if (source->type_def.generic_param_count > 0 && source->type_def.generic_param_names)
         {
             clone->type_def.generic_param_names = malloc(sizeof(char *) * source->type_def.generic_param_count);
-            if (clone->type_def.generic_param_names)
+            if (!clone->type_def.generic_param_names)
             {
-                for (size_t i = 0; i < source->type_def.generic_param_count; i++)
-                {
-                    clone->type_def.generic_param_names[i] = source->type_def.generic_param_names[i] ? strdup(source->type_def.generic_param_names[i]) : NULL;
-                }
+                symbol_destroy(clone);
+                return NULL;
             }
-            else
+            for (size_t i = 0; i < source->type_def.generic_param_count; i++)
             {
-                clone->type_def.generic_param_count = 0;
+                clone->type_def.generic_param_names[i] = source->type_def.generic_param_names[i] ? strdup(source->type_def.generic_param_names[i]) : NULL;
             }
         }
-        clone->type_def.generic_specializations = NULL;
-        clone->type_def.is_specialized_instance = source->type_def.is_specialized_instance;
-        clone->type_def.methods = NULL;
+        else
+        {
+            clone->type_def.generic_param_names = NULL;
+        }
+
         for (Symbol *method = source->type_def.methods; method; method = method->method_next)
         {
-            Symbol *method_clone = semantic_clone_imported_symbol(method, module_name);
+            Symbol *method_clone = clone_imported_symbol(method, module_name);
             if (!method_clone)
-                continue;
+            {
+                symbol_destroy(clone);
+                return NULL;
+            }
             method_clone->func.method_owner = clone;
             method_clone->method_next       = NULL;
             type_add_method(clone, method_clone);
@@ -384,3745 +1140,1430 @@ static Symbol *semantic_clone_imported_symbol(Symbol *source, const char *module
         clone->param.index = source->param.index;
         break;
     case SYMBOL_MODULE:
+        // modules should not be cloned in this path; but handle gracefully
+        if (source->module.path)
+            clone->module.path = strdup(source->module.path);
+        if (source->module.scope)
+            clone->module.scope = source->module.scope;
         break;
     }
 
     return clone;
 }
 
-static bool semantic_compare_type_ast(const AstNode *a, const AstNode *b)
+// process use statement (import resolution phase - module must already be loaded)
+static bool process_use_statement(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
 {
-    if (a == b)
-        return true;
-    if (!a || !b)
-        return false;
-    if (a->kind != b->kind)
-        return false;
-
-    switch (a->kind)
-    {
-    case AST_TYPE_NAME:
-    {
-        if (!a->type_name.name || !b->type_name.name)
-            return a->type_name.name == b->type_name.name;
-        if (strcmp(a->type_name.name, b->type_name.name) != 0)
-            return false;
-
-        int count_a = a->type_name.generic_args ? a->type_name.generic_args->count : 0;
-        int count_b = b->type_name.generic_args ? b->type_name.generic_args->count : 0;
-        if (count_a != count_b)
-            return false;
-        for (int i = 0; i < count_a; i++)
-        {
-            if (!semantic_compare_type_ast(a->type_name.generic_args->items[i], b->type_name.generic_args->items[i]))
-                return false;
-        }
-        return true;
-    }
-    case AST_TYPE_PTR:
-        return semantic_compare_type_ast(a->type_ptr.base, b->type_ptr.base);
-    case AST_TYPE_ARRAY:
-    {
-        if (!semantic_compare_type_ast(a->type_array.elem_type, b->type_array.elem_type))
-            return false;
-        if ((a->type_array.size == NULL) != (b->type_array.size == NULL))
-            return false;
-        if (a->type_array.size && b->type_array.size)
-        {
-            return a->type_array.size == b->type_array.size;
-        }
-        return true;
-    }
-    case AST_TYPE_PARAM:
-        if (!a->type_param.name || !b->type_param.name)
-            return a->type_param.name == b->type_param.name;
-        return strcmp(a->type_param.name, b->type_param.name) == 0;
-    case AST_TYPE_FUN:
-    {
-        if (!semantic_compare_type_ast(a->type_fun.return_type, b->type_fun.return_type))
-            return false;
-        size_t count_a = a->type_fun.params ? a->type_fun.params->count : 0;
-        size_t count_b = b->type_fun.params ? b->type_fun.params->count : 0;
-        if (count_a != count_b)
-            return false;
-        for (size_t i = 0; i < count_a; i++)
-        {
-            if (!semantic_compare_type_ast(a->type_fun.params->items[i], b->type_fun.params->items[i]))
-                return false;
-        }
-        return a->type_fun.is_variadic == b->type_fun.is_variadic;
-    }
-    default:
-        break;
-    }
-
-    return false;
-}
-
-static Symbol *semantic_find_type_symbol_from_type(SemanticAnalyzer *analyzer, Type *type)
-{
-    if (!analyzer || !type)
-        return NULL;
-
-    Type *current = type;
-    while (current)
-    {
-        if (current->kind == TYPE_ALIAS && current->name)
-        {
-            Symbol *alias_symbol = symbol_lookup(&analyzer->symbol_table, current->name);
-            if (alias_symbol && alias_symbol->kind == SYMBOL_TYPE)
-                return alias_symbol;
-            current = current->alias.target;
-            continue;
-        }
-
-        if (current->name)
-        {
-            Symbol *named_symbol = symbol_lookup(&analyzer->symbol_table, current->name);
-            if (named_symbol && named_symbol->kind == SYMBOL_TYPE)
-                return named_symbol;
-        }
-
-        break;
-    }
-
-    return NULL;
-}
-
-static bool semantic_populate_module_alias_scope(SemanticAnalyzer *analyzer, Symbol *module_symbol)
-{
-    if (!analyzer || !module_symbol || module_symbol->kind != SYMBOL_MODULE)
-        return false;
-
-    Scope *alias_scope = module_symbol->module.scope;
-    if (!alias_scope)
-        return false;
-
-    if (alias_scope->symbols)
-        return true;
-
-    const char *module_path = module_symbol->module.path ? module_symbol->module.path : module_symbol->name;
-    if (!module_path)
-        return false;
-
-    Module *origin = module_manager_find_module(&analyzer->module_manager, module_path);
-    if (!origin || !origin->symbols)
-        return false;
-
-    Scope *export_scope = origin->symbols->module_scope ? origin->symbols->module_scope : origin->symbols->global_scope;
-    if (!export_scope)
-        return false;
-
-    for (Symbol *sym = export_scope->symbols; sym; sym = sym->next)
-    {
-        if (sym->kind == SYMBOL_MODULE || sym->is_imported || !sym->is_public)
-            continue;
-
-        if (symbol_lookup_scope(alias_scope, sym->name))
-            continue;
-
-        Symbol *alias_copy = semantic_clone_imported_symbol(sym, module_symbol->module.path);
-        if (!alias_copy)
-            return false;
-
-        alias_copy->home_scope = alias_scope;
-        symbol_add(alias_scope, alias_copy);
-    }
-
-    return alias_scope->symbols != NULL;
-}
-
-static Symbol *semantic_lookup_module_member(SemanticAnalyzer *analyzer, Symbol *module_symbol, const char *name)
-{
-    if (!analyzer || !module_symbol || module_symbol->kind != SYMBOL_MODULE || !name)
-        return NULL;
-
-    semantic_populate_module_alias_scope(analyzer, module_symbol);
-
-    if (module_symbol->module.scope)
-    {
-        Symbol *member = symbol_lookup_scope(module_symbol->module.scope, name);
-        if (member)
-            return member;
-    }
-
-    const char *module_name = module_symbol->module.path ? module_symbol->module.path : module_symbol->name;
-
-    if (module_name)
-    {
-        Symbol *global_member = symbol_lookup_module(&analyzer->symbol_table, module_name, name);
-        if (global_member)
-            return global_member;
-
-        Module *origin = module_manager_find_module(&analyzer->module_manager, module_name);
-        if (origin && origin->symbols)
-        {
-            Scope *export_scope = origin->symbols->module_scope ? origin->symbols->module_scope : origin->symbols->global_scope;
-            if (export_scope)
-            {
-                Symbol *member = symbol_lookup_scope(export_scope, name);
-                if (member)
-                    return member;
-            }
-        }
-    }
-
-    for (Scope *scope = analyzer->symbol_table.current_scope; scope; scope = scope->parent)
-    {
-        for (Symbol *sym = scope->symbols; sym; sym = sym->next)
-        {
-            if (!sym->name || strcmp(sym->name, name) != 0)
-                continue;
-
-            const char *origin = NULL;
-            if (sym->kind == SYMBOL_MODULE)
-            {
-                origin = sym->module.path ? sym->module.path : sym->name;
-            }
-            else
-            {
-                origin = sym->import_module ? sym->import_module : sym->module_name;
-            }
-
-            if (origin && module_name && strcmp(origin, module_name) == 0)
-                return sym;
-        }
-    }
-
-    return NULL;
-}
-
-void semantic_analyzer_init(SemanticAnalyzer *analyzer)
-{
-    symbol_table_init(&analyzer->symbol_table);
-    semantic_register_builtin_types(analyzer);
-    module_manager_init(&analyzer->module_manager);
-    semantic_error_list_init(&analyzer->errors);
-    analyzer->current_function = NULL;
-    analyzer->program_root     = NULL;
-    analyzer->loop_depth       = 0;
-    analyzer->has_errors       = false;
-    analyzer->has_fatal_error  = false;
-    analyzer->current_module_name = NULL;
-    analyzer->generic_bindings        = NULL;
-    analyzer->generic_binding_count   = 0;
-    analyzer->generic_binding_capacity = 0;
-    instantiation_queue_init(&analyzer->instantiation_queue);
-}
-
-void semantic_analyzer_dnit(SemanticAnalyzer *analyzer)
-{
-    symbol_table_dnit(&analyzer->symbol_table);
-    module_manager_dnit(&analyzer->module_manager);
-    semantic_error_list_dnit(&analyzer->errors);
-    analyzer->current_module_name = NULL;
-    analyzer->program_root        = NULL;
-    free(analyzer->generic_bindings);
-    analyzer->generic_bindings        = NULL;
-    analyzer->generic_binding_count   = 0;
-    analyzer->generic_binding_capacity = 0;
-    instantiation_queue_dnit(&analyzer->instantiation_queue);
-}
-
-void semantic_analyzer_set_module(SemanticAnalyzer *analyzer, const char *module_name)
-{
-    if (!analyzer)
-        return;
-
-    analyzer->current_module_name = module_name;
-
-    if (!module_name)
-    {
-        analyzer->symbol_table.module_scope  = NULL;
-        analyzer->symbol_table.current_scope = analyzer->symbol_table.global_scope;
-        return;
-    }
-
-    Symbol *module_symbol = symbol_find_module(&analyzer->symbol_table, module_name);
-    if (!module_symbol)
-    {
-        module_symbol = symbol_create_module(module_name, module_name);
-        symbol_add_module(&analyzer->symbol_table, module_symbol);
-    }
-
-    if (module_symbol->module.scope)
-    {
-        module_symbol->module.scope->parent = analyzer->symbol_table.global_scope;
-        analyzer->symbol_table.module_scope = module_symbol->module.scope;
-        scope_enter(&analyzer->symbol_table, analyzer->symbol_table.module_scope);
-    }
-    else
-    {
-        analyzer->symbol_table.module_scope  = NULL;
-        analyzer->symbol_table.current_scope = analyzer->symbol_table.global_scope;
-    }
-}
-
-static bool semantic_in_top_level_scope(SemanticAnalyzer *analyzer)
-{
-    if (!analyzer)
-        return false;
-
-    if (analyzer->symbol_table.current_scope == analyzer->symbol_table.global_scope)
-        return true;
-
-    if (analyzer->symbol_table.module_scope && analyzer->symbol_table.current_scope == analyzer->symbol_table.module_scope)
-        return true;
-
-    return false;
-}
-
-static Type *semantic_lookup_generic_binding(SemanticAnalyzer *analyzer, const char *name)
-{
-    if (!analyzer || !name)
-        return NULL;
-
-    for (size_t i = analyzer->generic_binding_count; i > 0; i--)
-    {
-        GenericBinding *binding = &analyzer->generic_bindings[i - 1];
-        if (binding->name && strcmp(binding->name, name) == 0)
-        {
-            return binding->type;
-        }
-    }
-
-    fprintf(stderr, "debug: missing generic binding for %s\n", name ? name : "<null>");
-    fflush(stderr);
-    return NULL;
-}
-
-static bool semantic_push_generic_binding(SemanticAnalyzer *analyzer, const char *name, Type *type)
-{
-    if (!analyzer || !name || !type)
-        return false;
-
-    if (analyzer->generic_binding_count >= analyzer->generic_binding_capacity)
-    {
-        size_t new_capacity = analyzer->generic_binding_capacity ? analyzer->generic_binding_capacity * 2 : 8;
-        GenericBinding *new_bindings = realloc(analyzer->generic_bindings, new_capacity * sizeof(GenericBinding));
-        if (!new_bindings)
-            return false;
-        analyzer->generic_bindings        = new_bindings;
-        analyzer->generic_binding_capacity = new_capacity;
-    }
-
-    analyzer->generic_bindings[analyzer->generic_binding_count].name = name;
-    analyzer->generic_bindings[analyzer->generic_binding_count].type = type;
-    analyzer->generic_binding_count++;
-    return true;
-}
-
-static void semantic_pop_generic_bindings(SemanticAnalyzer *analyzer, size_t count)
-{
-    if (!analyzer || count == 0)
-        return;
-
-    if (count > analyzer->generic_binding_count)
-    {
-        analyzer->generic_binding_count = 0;
-    }
-    else
-    {
-        analyzer->generic_binding_count -= count;
-    }
-}
-
-static void instantiation_queue_init(InstantiationQueue *queue)
-{
-    if (!queue)
-        return;
-    queue->head  = NULL;
-    queue->tail  = NULL;
-    queue->count = 0;
-}
-
-static void instantiation_queue_dnit(InstantiationQueue *queue)
-{
-    if (!queue)
-        return;
-
-    InstantiationRequest *req = queue->head;
-    while (req)
-    {
-        InstantiationRequest *next = req->next;
-        free(req->type_args);
-        free(req->unique_id);
-        free(req);
-        req = next;
-    }
-
-    queue->head  = NULL;
-    queue->tail  = NULL;
-    queue->count = 0;
-}
-
-static InstantiationRequest *instantiation_queue_dequeue(InstantiationQueue *queue)
-{
-    if (!queue || !queue->head)
-        return NULL;
-
-    InstantiationRequest *req = queue->head;
-    queue->head               = req->next;
-
-    if (!queue->head)
-        queue->tail = NULL;
-
-    queue->count--;
-    req->next = NULL;
-    return req;
-}
-
-static void instantiation_request_destroy(InstantiationRequest *req)
-{
-    if (!req)
-        return;
-    free(req->type_args);
-    free(req->unique_id);
-    free(req);
-}
-
-static char *semantic_sanitize_type_token(const char *input)
-{
-    if (!input)
-        return strdup("anon");
-
-    size_t len = strlen(input);
-    char  *out = malloc(len + 1);
-    if (!out)
-        return NULL;
-
-    size_t j = 0;
-    for (size_t i = 0; i < len; i++)
-    {
-        unsigned char c = (unsigned char)input[i];
-        if (isalnum(c))
-        {
-            out[j++] = (char)tolower(c);
-        }
-        else if (c == '_' || c == '$')
-        {
-            out[j++] = '_';
-        }
-        else if (c == '*')
-        {
-            out[j++] = 'p';
-        }
-        else if (c == '[' || c == ']')
-        {
-            out[j++] = 'a';
-        }
-        else if (c == '.'){ out[j++] = '_'; }
-        else
-        {
-            out[j++] = '_';
-        }
-    }
-
-    if (j == 0)
-        out[j++] = 't';
-
-    out[j] = '\0';
-    return out;
-}
-
-static char *semantic_mangle_generic_function(Symbol *generic_symbol, Type **type_args, size_t arg_count)
-{
-    const char *raw_base_name = generic_symbol->name ? generic_symbol->name : "fun";
-    char       *method_prefix = NULL;
-
-    if (generic_symbol->kind == SYMBOL_FUNC && generic_symbol->func.is_method && generic_symbol->func.method_owner &&
-        generic_symbol->func.method_owner->name)
-    {
-        char *owner_sanitized = semantic_sanitize_type_token(generic_symbol->func.method_owner->name);
-        if (!owner_sanitized)
-            return NULL;
-
-        size_t owner_len  = strlen(owner_sanitized);
-        size_t method_len = strlen(raw_base_name);
-
-        method_prefix = malloc(owner_len + 2 + method_len + 1);
-        if (!method_prefix)
-        {
-            free(owner_sanitized);
-            return NULL;
-        }
-
-        memcpy(method_prefix, owner_sanitized, owner_len);
-        method_prefix[owner_len]     = '_';
-        method_prefix[owner_len + 1] = '_';
-        memcpy(method_prefix + owner_len + 2, raw_base_name, method_len);
-        method_prefix[owner_len + 2 + method_len] = '\0';
-
-        free(owner_sanitized);
-        raw_base_name = method_prefix;
-    }
-
-    size_t base_len = strlen(raw_base_name);
-
-    char **parts = NULL;
-    size_t total_len = base_len;
-
-    if (arg_count > 0)
-    {
-        parts = calloc(arg_count, sizeof(char *));
-        if (!parts)
-            return NULL;
-        for (size_t i = 0; i < arg_count; i++)
-        {
-            char *raw = type_to_string(type_args[i]);
-            if (!raw)
-            {
-                for (size_t j = 0; j < i; j++)
-                    free(parts[j]);
-                free(parts);
-                return NULL;
-            }
-            char *sanitized = semantic_sanitize_type_token(raw);
-            free(raw);
-            if (!sanitized)
-            {
-                for (size_t j = 0; j < i; j++)
-                    free(parts[j]);
-                free(parts);
-                return NULL;
-            }
-            parts[i]   = sanitized;
-            total_len += 1 + strlen(sanitized);
-        }
-    }
-
-    char *mangled = malloc(total_len + 1);
-    if (!mangled)
-    {
-        if (parts)
-        {
-            for (size_t i = 0; i < arg_count; i++)
-                free(parts[i]);
-            free(parts);
-        }
-        free(method_prefix);
-        return NULL;
-    }
-
-    strcpy(mangled, raw_base_name);
-    size_t offset = base_len;
-    for (size_t i = 0; i < arg_count; i++)
-    {
-        mangled[offset++] = '$';
-        size_t part_len   = strlen(parts[i]);
-        memcpy(mangled + offset, parts[i], part_len);
-        offset += part_len;
-    }
-    mangled[offset] = '\0';
-
-    if (parts)
-    {
-        for (size_t i = 0; i < arg_count; i++)
-            free(parts[i]);
-        free(parts);
-    }
-
-    free(method_prefix);
-
-    return mangled;
-}
-
-static Symbol *semantic_find_generic_specialization(Symbol *generic_symbol, Type **type_args, size_t arg_count)
-{
-    Symbol *origin = semantic_generic_origin(generic_symbol);
-    if (!origin)
-        return NULL;
-
-    GenericSpecialization *spec_list = NULL;
-    if (origin->kind == SYMBOL_FUNC)
-    {
-        spec_list = origin->func.generic_specializations;
-    }
-    else if (origin->kind == SYMBOL_TYPE)
-    {
-        spec_list = origin->type_def.generic_specializations;
-    }
-    else
-    {
-        return NULL;
-    }
-
-    for (GenericSpecialization *spec = spec_list; spec; spec = spec->next)
-    {
-        if (spec->arg_count != arg_count)
-            continue;
-
-        bool match = true;
-        for (size_t i = 0; i < arg_count; i++)
-        {
-            if (!type_equals(spec->type_args[i], type_args[i]))
-            {
-                char *a_str = type_to_string(spec->type_args[i]);
-                char *b_str = type_to_string(type_args[i]);
-                fprintf(stderr, "debug: specialization mismatch %s vs %s\n", a_str ? a_str : "<null>", b_str ? b_str : "<null>");
-                free(a_str);
-                free(b_str);
-                match = false;
-                break;
-            }
-        }
-
-        if (match)
-        {
-            fprintf(stderr, "debug: found existing specialization for %s\n", generic_symbol->name ? generic_symbol->name : "<anon>");
-            fflush(stderr);
-            return spec->symbol;
-        }
-    }
-
-    return NULL;
-}
-
-static void semantic_record_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol, Type **type_args, size_t arg_count)
-{
-    Symbol *origin = semantic_generic_origin(generic_symbol);
-    if (!origin)
-        origin = generic_symbol;
-
-    GenericSpecialization *spec = malloc(sizeof(GenericSpecialization));
-    if (!spec)
-        return;
-
-    spec->arg_count = arg_count;
-    spec->generic_symbol = origin;
-    spec->symbol    = specialized_symbol;
-
-    if (arg_count > 0)
-    {
-        spec->type_args = malloc(sizeof(Type *) * arg_count);
-        if (!spec->type_args)
-        {
-            free(spec);
-            return;
-        }
-        for (size_t i = 0; i < arg_count; i++)
-        {
-            spec->type_args[i] = type_args[i];
-        }
-    }
-    else
-    {
-        spec->type_args = NULL;
-    }
-
-    if (origin->kind == SYMBOL_FUNC)
-    {
-        spec->next = origin->func.generic_specializations;
-        origin->func.generic_specializations = spec;
-    }
-    else if (origin->kind == SYMBOL_TYPE)
-    {
-        spec->next = origin->type_def.generic_specializations;
-        origin->type_def.generic_specializations = spec;
-    }
-    else
-    {
-        free(spec->type_args);
-        free(spec);
-    }
-}
-
-static void semantic_remove_generic_specialization(Symbol *generic_symbol, Symbol *specialized_symbol)
-{
-    if (!generic_symbol || !specialized_symbol)
-        return;
-
-    Symbol *origin = semantic_generic_origin(generic_symbol);
-    if (!origin)
-        origin = generic_symbol;
-
-    GenericSpecialization **head = NULL;
-    if (origin->kind == SYMBOL_FUNC)
-    {
-        head = &origin->func.generic_specializations;
-    }
-    else if (origin->kind == SYMBOL_TYPE)
-    {
-        head = &origin->type_def.generic_specializations;
-    }
-    else
-    {
-        return;
-    }
-
-    GenericSpecialization *prev = NULL;
-    GenericSpecialization *curr = head ? *head : NULL;
-    while (curr)
-    {
-        if (curr->symbol == specialized_symbol)
-        {
-            if (prev)
-                prev->next = curr->next;
-            else
-                *head = curr->next;
-            free(curr->type_args);
-            free(curr);
-            return;
-        }
-        prev = curr;
-        curr = curr->next;
-    }
-}
-
-static Symbol *semantic_instantiate_generic_function_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request)
-{
-    if (!analyzer || !request || !request->generic_symbol)
-        return NULL;
-
-    Symbol *generic_symbol = request->generic_symbol;
-    Type  **type_args      = request->type_args;
-    size_t  type_arg_count = request->type_arg_count;
-    AstNode *call_site     = request->call_site;
-
-    Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, type_arg_count);
-    if (existing)
-        return existing;
-
-    if (!generic_symbol->decl || generic_symbol->decl->kind != AST_STMT_FUN)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "generic function '%s' has no definition to instantiate", generic_symbol->name);
-        return NULL;
-    }
-
-    AstNode *clone = ast_clone(generic_symbol->decl);
-    if (!clone)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to instantiate generic function '%s'", generic_symbol->name);
-        return NULL;
-    }
-
-    if (generic_symbol->func.is_method)
-    {
-        clone->fun_stmt.is_method = true;
-    }
-
-    char *mangled_name = semantic_mangle_generic_function(generic_symbol, type_args, type_arg_count);
-    if (!mangled_name)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to mangle generic function '%s'", generic_symbol->name);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    bool is_method_instantiation = (generic_symbol->kind == SYMBOL_FUNC && generic_symbol->func.is_method);
-
-    if (!is_method_instantiation)
-    {
-        free(clone->fun_stmt.name);
-        clone->fun_stmt.name = mangled_name;
-    }
-    else
-    {
-        free(mangled_name);
-        mangled_name = NULL;
-    }
-
-    if (clone->fun_stmt.generics)
-    {
-        ast_list_dnit(clone->fun_stmt.generics);
-        free(clone->fun_stmt.generics);
-        clone->fun_stmt.generics = NULL;
-    }
-
-    clone->fun_stmt.is_public = generic_symbol->is_public;
-
-    size_t binding_start = analyzer->generic_binding_count;
-    bool   binding_ok    = true;
-    for (size_t i = 0; i < type_arg_count; i++)
-    {
-        const char *param_name = generic_symbol->func.generic_param_names ? generic_symbol->func.generic_param_names[i] : NULL;
-        if (!param_name || !semantic_push_generic_binding(analyzer, param_name, type_args[i]))
-        {
-            binding_ok = false;
-            break;
-        }
-        else
-        {
-            char *tmp = type_to_string(type_args[i]);
-            fprintf(stderr, "debug: pushed binding %s -> %s\n", param_name ? param_name : "<null>", tmp ? tmp : "<type>");
-            free(tmp);
-            fflush(stderr);
-        }
-    }
-
-    if (!binding_ok)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to bind generic parameters for '%s'", generic_symbol->name);
-        semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    Scope  *saved_scope        = analyzer->symbol_table.current_scope;
-    Scope  *saved_module_scope = analyzer->symbol_table.module_scope;
-    Scope  *saved_global_scope = analyzer->symbol_table.global_scope;
-    Module *origin_module      = NULL;
-
-    Scope *home_scope = generic_symbol->home_scope;
-    if (home_scope)
-    {
-        Scope *module_scope = home_scope;
-        while (module_scope && !module_scope->is_module)
-            module_scope = module_scope->parent;
-        if (module_scope)
-        {
-            origin_module = semantic_find_module_for_scope(&analyzer->module_manager, module_scope);
-            analyzer->symbol_table.module_scope = module_scope;
-        }
-
-        Scope *global_scope = home_scope;
-        while (global_scope && global_scope->parent)
-            global_scope = global_scope->parent;
-        if (global_scope)
-            analyzer->symbol_table.global_scope = global_scope;
-
-        analyzer->symbol_table.current_scope = home_scope;
-    }
-
-    Module *import_module = NULL;
-    if (!home_scope && generic_symbol->import_module)
-    {
-        import_module = module_manager_find_module(&analyzer->module_manager, generic_symbol->import_module);
-        if (import_module && import_module->symbols)
-        {
-            home_scope = import_module->symbols->module_scope ? import_module->symbols->module_scope : import_module->symbols->global_scope;
-            analyzer->symbol_table.current_scope = home_scope ? home_scope : analyzer->symbol_table.current_scope;
-            if (home_scope)
-            {
-                Scope *module_scope = home_scope;
-                while (module_scope && !module_scope->is_module)
-                    module_scope = module_scope->parent;
-                if (module_scope)
-                {
-                    analyzer->symbol_table.module_scope = module_scope;
-                    if (!origin_module)
-                        origin_module = import_module;
-                }
-
-                Scope *global_scope = home_scope;
-                while (global_scope && global_scope->parent)
-                    global_scope = global_scope->parent;
-                if (global_scope)
-                    analyzer->symbol_table.global_scope = global_scope;
-            }
-        }
-        if (!origin_module)
-            origin_module = import_module;
-    }
-
-    if (!home_scope)
-    {
-        if (analyzer->symbol_table.module_scope)
-        {
-            analyzer->symbol_table.current_scope = analyzer->symbol_table.module_scope;
-            if (!origin_module)
-                origin_module = semantic_find_module_for_scope(&analyzer->module_manager, analyzer->symbol_table.module_scope);
-        }
-        else
-        {
-            analyzer->symbol_table.current_scope = analyzer->symbol_table.global_scope;
-        }
-    }
-
-    if (!origin_module && analyzer->symbol_table.module_scope)
-        origin_module = semantic_find_module_for_scope(&analyzer->module_manager, analyzer->symbol_table.module_scope);
-
-    if (clone->fun_stmt.is_method && !clone->fun_stmt.method_receiver)
-    {
-        fprintf(stderr, "debug: method clone missing receiver for %s\n", generic_symbol->name ? generic_symbol->name : "<anon>");
-        fflush(stderr);
-    }
-
-    bool success = semantic_analyze_fun_stmt(analyzer, clone);
-
-    analyzer->symbol_table.current_scope = saved_scope;
-    analyzer->symbol_table.module_scope  = saved_module_scope;
-    analyzer->symbol_table.global_scope  = saved_global_scope;
-    semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
-
-    if (!success || !clone->symbol)
-    {
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    clone->symbol->func.is_specialized_instance = true;
-    clone->symbol->func.is_generic              = false;
-    clone->symbol->func.generic_param_count     = 0;
-
-    Symbol *origin_generic = semantic_generic_origin(generic_symbol);
-    if (origin_generic)
-        clone->symbol->import_origin = origin_generic;
-    else
-        clone->symbol->import_origin = clone->symbol;
-
-    if (origin_module && origin_module->name)
-    {
-        free(clone->symbol->module_name);
-        clone->symbol->module_name = strdup(origin_module->name);
-    }
-
-    semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
-    fprintf(stderr, "debug: recorded struct specialization %s\n", clone->symbol->name ? clone->symbol->name : "<anon>");
-    fflush(stderr);
-
-    AstNode *target_program = NULL;
-    if (origin_module && origin_module->ast && origin_module->ast->kind == AST_PROGRAM)
-        target_program = origin_module->ast;
-    if (!target_program && analyzer->program_root && analyzer->program_root->kind == AST_PROGRAM)
-        target_program = analyzer->program_root;
-
-    if (target_program)
-        ast_list_append(target_program->program.stmts, clone);
-
-    return clone->symbol;
-}
-
-static Symbol *semantic_instantiate_generic_struct_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request)
-{
-    if (!analyzer || !request || !request->generic_symbol)
-        return NULL;
-
-    Symbol *generic_symbol = request->generic_symbol;
-    Type  **type_args      = request->type_args;
-    size_t  type_arg_count = request->type_arg_count;
-    AstNode *call_site     = request->call_site;
-
-    printf("debug: instantiate struct %s with %zu args\n", generic_symbol->name ? generic_symbol->name : "<anon>", type_arg_count);
-    fflush(stdout);
-
-    Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, type_arg_count);
-    if (existing)
-        return existing;
-
-    if (!generic_symbol->decl || generic_symbol->decl->kind != AST_STMT_STR)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "generic struct '%s' has no definition to instantiate", generic_symbol->name);
-        return NULL;
-    }
-
-    AstNode *clone = ast_clone(generic_symbol->decl);
-    if (!clone)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to instantiate generic struct '%s'", generic_symbol->name);
-        return NULL;
-    }
-
-    char *mangled_name = semantic_mangle_generic_function(generic_symbol, type_args, type_arg_count);
-    if (!mangled_name)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to mangle generic struct '%s'", generic_symbol->name);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    free(clone->str_stmt.name);
-    clone->str_stmt.name = mangled_name;
-
-    if (clone->str_stmt.generics)
-    {
-        ast_list_dnit(clone->str_stmt.generics);
-        free(clone->str_stmt.generics);
-        clone->str_stmt.generics = NULL;
-    }
-
-    clone->str_stmt.is_public = generic_symbol->is_public;
-
-    size_t binding_start = analyzer->generic_binding_count;
-    bool   binding_ok    = true;
-    for (size_t i = 0; i < type_arg_count; i++)
-    {
-        const char *param_name = generic_symbol->type_def.generic_param_names ? generic_symbol->type_def.generic_param_names[i] : NULL;
-        if (!param_name || !semantic_push_generic_binding(analyzer, param_name, type_args[i]))
-        {
-            binding_ok = false;
-            break;
-        }
-    }
-
-    if (!binding_ok)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to bind generic parameters for '%s'", generic_symbol->name);
-        semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    Scope *saved_scope        = analyzer->symbol_table.current_scope;
-    Scope *saved_module_scope = analyzer->symbol_table.module_scope;
-    Scope *saved_global_scope = analyzer->symbol_table.global_scope;
-
-    Scope *home_scope = generic_symbol->home_scope;
-    if (home_scope)
-    {
-        Scope *module_scope = home_scope;
-        while (module_scope && !module_scope->is_module)
-            module_scope = module_scope->parent;
-        if (module_scope)
-            analyzer->symbol_table.module_scope = module_scope;
-
-        Scope *global_scope = home_scope;
-        while (global_scope && global_scope->parent)
-            global_scope = global_scope->parent;
-        if (global_scope)
-            analyzer->symbol_table.global_scope = global_scope;
-
-        analyzer->symbol_table.current_scope = home_scope;
-    }
-    else if (analyzer->symbol_table.module_scope)
-    {
-        analyzer->symbol_table.current_scope = analyzer->symbol_table.module_scope;
-    }
-    else if (analyzer->symbol_table.global_scope)
-    {
-        analyzer->symbol_table.current_scope = analyzer->symbol_table.global_scope;
-    }
-
-    bool success = semantic_analyze_str_stmt(analyzer, clone);
-    printf("debug: analyze struct %s success=%d\n", clone->str_stmt.name ? clone->str_stmt.name : "<anon>", success ? 1 : 0);
-    fflush(stdout);
-
-    analyzer->symbol_table.current_scope = saved_scope;
-    analyzer->symbol_table.module_scope  = saved_module_scope;
-    analyzer->symbol_table.global_scope  = saved_global_scope;
-
-    semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
-
-    if (!success || !clone->symbol)
-    {
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    // verify it's a struct type
-    if (!clone->symbol->type || clone->symbol->type->kind != TYPE_STRUCT)
-    {
-        printf("debug: struct %s invalid type\n", clone->str_stmt.name ? clone->str_stmt.name : "<anon>");
-        fflush(stdout);
-        if (call_site)
-            semantic_error(analyzer, call_site, "instantiated struct '%s' has invalid type", generic_symbol->name);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
-    bool recorded_specialization = true;
-
-    clone->symbol->type_def.is_specialized_instance = true;
-    clone->symbol->type_def.is_generic = false;
-    clone->symbol->type_def.generic_param_count = 0;
-
-    bool methods_ok = true;
-    for (Symbol *method = generic_symbol->type_def.methods; methods_ok && method; method = method->method_next)
-    {
-        printf("debug: instantiate method %s\n", method->name ? method->name : "<anon>");
-        fflush(stdout);
-        size_t method_generic_count = method->func.generic_param_count;
-        if (method_generic_count > 0 && method_generic_count != type_arg_count)
-        {
-            semantic_error(analyzer, call_site, "method '%s' on type '%s' expects %zu type arguments (got %zu)", method->name, generic_symbol->name, method_generic_count, type_arg_count);
-            methods_ok = false;
-            break;
-        }
-
-        InstantiationRequest method_request = {
-            .kind           = INSTANTIATION_FUNCTION,
-            .generic_symbol = method,
-            .type_args      = method_generic_count > 0 ? type_args : NULL,
-            .type_arg_count = method_generic_count,
-            .call_site      = call_site,
-            .unique_id      = NULL,
-            .next           = NULL
-        };
-
-        Symbol *specialized_method = semantic_instantiate_generic_function_from_request(analyzer, &method_request);
-
-        if (!specialized_method)
-        {
-            printf("debug: method %s instantiation failed\n", method->name ? method->name : "<anon>");
-            fflush(stdout);
-            methods_ok = false;
-            break;
-        }
-
-        specialized_method->func.method_owner = clone->symbol;
-        specialized_method->func.method_receiver_is_pointer = method->func.method_receiver_is_pointer;
-        free(specialized_method->func.method_receiver_name);
-        specialized_method->func.method_receiver_name = clone->symbol->name ? strdup(clone->symbol->name) : NULL;
-        specialized_method->func.is_method = true;
-        if (specialized_method->func.method_receiver_name == NULL && clone->symbol->name)
-        {
-            semantic_error(analyzer, call_site, "out of memory while finalizing method '%s'", method->name);
-            methods_ok = false;
-            break;
-        }
-
-        if (type_find_method(clone->symbol, specialized_method->name, specialized_method->func.method_receiver_is_pointer) != specialized_method)
-        {
-            type_add_method(clone->symbol, specialized_method);
-        }
-    }
-
-    if (!methods_ok)
-    {
-        if (recorded_specialization)
-            semantic_remove_generic_specialization(generic_symbol, clone->symbol);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    AstNode *target_program = analyzer->program_root;
-    if (target_program && target_program->kind == AST_PROGRAM)
-        ast_list_append(target_program->program.stmts, clone);
-
-    return clone->symbol;
-}
-
-static Symbol *semantic_instantiate_generic_union_from_request(SemanticAnalyzer *analyzer, InstantiationRequest *request)
-{
-    if (!analyzer || !request || !request->generic_symbol)
-        return NULL;
-
-    Symbol *generic_symbol = request->generic_symbol;
-    Type  **type_args      = request->type_args;
-    size_t  type_arg_count = request->type_arg_count;
-    AstNode *call_site     = request->call_site;
-
-    Symbol *existing = semantic_find_generic_specialization(generic_symbol, type_args, type_arg_count);
-    if (existing)
-        return existing;
-
-    if (!generic_symbol->decl || generic_symbol->decl->kind != AST_STMT_UNI)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "generic union '%s' has no definition to instantiate", generic_symbol->name);
-        return NULL;
-    }
-
-    AstNode *clone = ast_clone(generic_symbol->decl);
-    if (!clone)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to instantiate generic union '%s'", generic_symbol->name);
-        return NULL;
-    }
-
-    char *mangled_name = semantic_mangle_generic_function(generic_symbol, type_args, type_arg_count);
-    if (!mangled_name)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to mangle generic union '%s'", generic_symbol->name);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    free(clone->uni_stmt.name);
-    clone->uni_stmt.name = mangled_name;
-
-    if (clone->uni_stmt.generics)
-    {
-        ast_list_dnit(clone->uni_stmt.generics);
-        free(clone->uni_stmt.generics);
-        clone->uni_stmt.generics = NULL;
-    }
-
-    clone->uni_stmt.is_public = generic_symbol->is_public;
-
-    size_t binding_start = analyzer->generic_binding_count;
-    bool   binding_ok    = true;
-    for (size_t i = 0; i < type_arg_count; i++)
-    {
-        const char *param_name = generic_symbol->type_def.generic_param_names ? generic_symbol->type_def.generic_param_names[i] : NULL;
-        if (!param_name || !semantic_push_generic_binding(analyzer, param_name, type_args[i]))
-        {
-            binding_ok = false;
-            break;
-        }
-    }
-
-    if (!binding_ok)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "failed to bind generic parameters for '%s'", generic_symbol->name);
-        semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    Scope *saved_scope        = analyzer->symbol_table.current_scope;
-    Scope *saved_module_scope = analyzer->symbol_table.module_scope;
-    Scope *saved_global_scope = analyzer->symbol_table.global_scope;
-
-    Scope *home_scope = generic_symbol->home_scope;
-    if (home_scope)
-    {
-        Scope *module_scope = home_scope;
-        while (module_scope && !module_scope->is_module)
-            module_scope = module_scope->parent;
-        if (module_scope)
-            analyzer->symbol_table.module_scope = module_scope;
-
-        Scope *global_scope = home_scope;
-        while (global_scope && global_scope->parent)
-            global_scope = global_scope->parent;
-        if (global_scope)
-            analyzer->symbol_table.global_scope = global_scope;
-
-        analyzer->symbol_table.current_scope = home_scope;
-    }
-    else if (analyzer->symbol_table.module_scope)
-    {
-        analyzer->symbol_table.current_scope = analyzer->symbol_table.module_scope;
-    }
-    else if (analyzer->symbol_table.global_scope)
-    {
-        analyzer->symbol_table.current_scope = analyzer->symbol_table.global_scope;
-    }
-
-    bool success = semantic_analyze_uni_stmt(analyzer, clone);
-
-    analyzer->symbol_table.current_scope = saved_scope;
-    analyzer->symbol_table.module_scope  = saved_module_scope;
-    analyzer->symbol_table.global_scope  = saved_global_scope;
-
-    semantic_pop_generic_bindings(analyzer, analyzer->generic_binding_count - binding_start);
-
-    if (!success || !clone->symbol)
-    {
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    if (!clone->symbol->type || clone->symbol->type->kind != TYPE_UNION)
-    {
-        if (call_site)
-            semantic_error(analyzer, call_site, "instantiated union '%s' has invalid type", generic_symbol->name);
-        ast_node_dnit(clone);
-        free(clone);
-        return NULL;
-    }
-
-    semantic_record_generic_specialization(generic_symbol, clone->symbol, type_args, type_arg_count);
-
-    clone->symbol->type_def.is_specialized_instance = true;
-    clone->symbol->type_def.is_generic = false;
-    clone->symbol->type_def.generic_param_count = 0;
-
-    AstNode *target_program = analyzer->program_root;
-    if (target_program && target_program->kind == AST_PROGRAM)
-        ast_list_append(target_program->program.stmts, clone);
-
-    return clone->symbol;
-}
-
-bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root)
-{
-    if (!analyzer || !root)
-        return false;
-
-    analyzer->program_root = root;
-
-    // initialize type system
-    type_system_init();
-
-    // NOTE: Built-in intrinsic functions like len, size_of, align_of are handled
-    // directly in both semantic analysis and codegen as special cases
-
-    // resolve module dependencies first
-    if (root->kind == AST_PROGRAM)
-    {
-        if (!module_manager_resolve_dependencies(&analyzer->module_manager, root, "."))
-        {
-            analyzer->has_errors = true;
-            semantic_mark_fatal(analyzer);
-            return false;
-        }
-
-        // first pass: process use statements to create module symbols
-        for (int i = 0; i < root->program.stmts->count; i++)
-        {
-            AstNode *stmt = root->program.stmts->items[i];
-            if (stmt->kind == AST_STMT_USE)
-            {
-                if (!semantic_analyze_use_stmt(analyzer, stmt))
-                {
-                    analyzer->has_errors = true;
-                }
-            }
-            if (analyzer->has_fatal_error)
-                break;
-        }
-
-        if (analyzer->has_fatal_error)
-            return false;
-
-        // second pass: analyze imported modules now that module symbols exist
-        for (int i = 0; i < root->program.stmts->count; i++)
-        {
-            AstNode *stmt = root->program.stmts->items[i];
-            if (stmt->kind == AST_STMT_USE)
-            {
-                if (!semantic_analyze_imported_module(analyzer, stmt))
-                {
-                    analyzer->has_errors = true;
-                }
-            }
-            if (analyzer->has_fatal_error)
-                break;
-        }
-
-        if (analyzer->has_fatal_error)
-            return false;
-
-        // third pass: analyze the current module statements
-        // note: only analyze original statements, not instantiated generics which get appended during analysis
-        int original_stmt_count = root->program.stmts->count;
-
-        for (int i = 0; i < original_stmt_count; i++)
-        {
-            AstNode *stmt = root->program.stmts->items[i];
-            switch (stmt->kind)
-            {
-            case AST_STMT_FUN:
-                if (!semantic_predeclare_fun_stmt(analyzer, stmt))
-                {
-                    analyzer->has_errors = true;
-                }
-                break;
-            default:
-                break;
-            }
-            if (analyzer->has_fatal_error)
-                return false;
-        }
-
-        for (int i = 0; i < original_stmt_count; i++)
-        {
-            AstNode *stmt = root->program.stmts->items[i];
-            if (!semantic_analyze_stmt(analyzer, stmt))
-            {
-                analyzer->has_errors = true;
-            }
-            if (analyzer->has_fatal_error)
-                break;
-        }
-
-        if (analyzer->has_fatal_error)
-            return false;
-
-        // monomorphization loop: process generic instantiation queue
-        while (analyzer->instantiation_queue.count > 0)
-        {
-            InstantiationRequest *request = instantiation_queue_dequeue(&analyzer->instantiation_queue);
-            if (!request)
-                break;
-
-            Symbol *specialized = NULL;
-            if (request->kind == INSTANTIATION_FUNCTION)
-            {
-                specialized = semantic_instantiate_generic_function_from_request(analyzer, request);
-            }
-            else if (request->kind == INSTANTIATION_STRUCT)
-            {
-                specialized = semantic_instantiate_generic_struct_from_request(analyzer, request);
-            }
-            else if (request->kind == INSTANTIATION_UNION)
-            {
-                specialized = semantic_instantiate_generic_union_from_request(analyzer, request);
-            }
-
-            if (!specialized)
-            {
-                analyzer->has_errors = true;
-            }
-
-            instantiation_request_destroy(request);
-
-            if (analyzer->has_fatal_error)
-                break;
-        }
-    }
-
-    return !analyzer->has_errors;
-}
-
-void semantic_print_errors(SemanticAnalyzer *analyzer, Lexer *lexer, const char *file_path)
-{
-    if (analyzer->errors.count > 0)
-    {
-        semantic_error_list_print(&analyzer->errors, lexer, file_path);
-    }
-}
-
-// analyze expression with optional expected type for better inference
-Type *semantic_analyze_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type)
-{
-    if (!analyzer || !expr)
-        return NULL;
-
-    switch (expr->kind)
-    {
-    case AST_EXPR_LIT:
-        return semantic_analyze_lit_expr_with_hint(analyzer, expr, expected_type);
-    case AST_EXPR_NULL:
-        return semantic_analyze_null_expr(analyzer, expr, expected_type);
-    case AST_EXPR_BINARY:
-        return semantic_analyze_binary_expr(analyzer, expr);
-    case AST_EXPR_UNARY:
-        return semantic_analyze_unary_expr(analyzer, expr);
-    case AST_EXPR_CALL:
-        return semantic_analyze_call_expr(analyzer, expr);
-    case AST_EXPR_INDEX:
-        return semantic_analyze_index_expr(analyzer, expr);
-    case AST_EXPR_FIELD:
-        return semantic_analyze_field_expr(analyzer, expr);
-    case AST_EXPR_CAST:
-        return semantic_analyze_cast_expr(analyzer, expr);
-    case AST_EXPR_IDENT:
-        return semantic_analyze_ident_expr(analyzer, expr);
-    case AST_EXPR_ARRAY:
-        return semantic_analyze_array_expr(analyzer, expr);
-    case AST_EXPR_STRUCT:
-        return semantic_analyze_struct_expr(analyzer, expr, expected_type);
-    case AST_EXPR_VARARGS:
-        if (!analyzer->current_function || !analyzer->current_function->symbol)
-        {
-            semantic_error(analyzer, expr, "'...' used outside a variadic function");
-            return NULL;
-        }
-
-        if (!analyzer->current_function->fun_stmt.is_variadic)
-        {
-            semantic_error(analyzer, expr, "'...' used outside a variadic function");
-            return NULL;
-        }
-
-        Symbol *current_func_symbol = analyzer->current_function->symbol;
-        if (!current_func_symbol || current_func_symbol->kind != SYMBOL_FUNC || !current_func_symbol->func.uses_mach_varargs)
-        {
-            semantic_error(analyzer, expr, "'...' forwarding requires a Mach variadic function");
-            return NULL;
-        }
-
-        expr->type = type_ptr();
-        return expr->type;
-    default:
-        semantic_error(analyzer, expr, "unknown expression kind");
-        return NULL;
-    }
-}
-
-// helper function to format type names for error messages
-static void format_type_name(Type *type, char *buffer, size_t buffer_size)
-{
-    if (!type || !buffer || buffer_size == 0)
-    {
-        if (buffer && buffer_size > 0)
-            buffer[0] = '\0';
-        return;
-    }
-
-    FILE *tmp = fmemopen(buffer, buffer_size - 1, "w");
-    if (tmp)
-    {
-        FILE *old_stdout = stdout;
-        stdout           = tmp;
-        type_print(type);
-        stdout = old_stdout;
-        fclose(tmp);
-        buffer[buffer_size - 1] = '\0'; // ensure null termination
-    }
-    else
-    {
-        buffer[0] = '\0';
-    }
-}
-
-static size_t semantic_align_to(size_t value, size_t alignment)
-{
-    if (alignment == 0)
-        return value;
-    size_t remainder = value % alignment;
-    if (remainder == 0)
-        return value;
-    return value + (alignment - remainder);
-}
-
-static void semantic_free_field_list(Symbol *field)
-{
-    while (field)
-    {
-        Symbol *next = field->next;
-        symbol_destroy(field);
-        field = next;
-    }
-}
-
-// helper function to resolve types with current symbol table
-static Type *resolve_type(SemanticAnalyzer *analyzer, AstNode *type_node)
-{
-    if (!type_node)
-        return NULL;
-
-    // cache resolved type in the AST node
-    if (type_node->type)
-        return type_node->type;
-
-    switch (type_node->kind)
-    {
-    case AST_TYPE_NAME:
-    {
-        Type *bound = semantic_lookup_generic_binding(analyzer, type_node->type_name.name);
-        if (bound)
-        {
-            type_node->type = bound;
-            return bound;
-        }
-        else if (analyzer->generic_binding_count > 0 && type_node->type_name.name && strcmp(type_node->type_name.name, "T") == 0)
-        {
-            if (type_node->token)
-            {
-                fprintf(stderr, "debug: failed to bind T at pos %d len %d\n", type_node->token->pos, type_node->token->len);
-            }
-            else
-            {
-                fprintf(stderr, "debug: failed to bind T with no token info\n");
-            }
-        }
-
-        // check for generic type instantiation
-        if (type_node->type_name.generic_args && type_node->type_name.generic_args->count > 0)
-        {
-            Symbol *type_symbol = symbol_lookup(&analyzer->symbol_table, type_node->type_name.name);
-            if (!type_symbol || type_symbol->kind != SYMBOL_TYPE)
-            {
-                semantic_error(analyzer, type_node, "unknown type '%s'", type_node->type_name.name);
-                return NULL;
-            }
-
-            if (!type_symbol->type_def.is_generic)
-            {
-                semantic_error(analyzer, type_node, "type '%s' is not generic", type_node->type_name.name);
-                return NULL;
-            }
-
-            size_t expected_count = type_symbol->type_def.generic_param_count;
-            size_t provided_count = type_node->type_name.generic_args->count;
-
-            if (provided_count != expected_count)
-            {
-                semantic_error(analyzer, type_node, "generic type '%s' expects %zu type arguments (got %zu)", 
-                    type_node->type_name.name, expected_count, provided_count);
-                return NULL;
-            }
-
-            Type **type_args = malloc(sizeof(Type *) * expected_count);
-            if (!type_args)
-            {
-                semantic_error(analyzer, type_node, "failed to allocate type argument buffer");
-                return NULL;
-            }
-
-            for (size_t i = 0; i < expected_count; i++)
-            {
-                AstNode *type_arg_node = type_node->type_name.generic_args->items[i];
-                Type    *resolved      = resolve_type(analyzer, type_arg_node);
-                if (!resolved)
-                {
-                    free(type_args);
-                    return NULL;
-                }
-                type_args[i] = resolved;
-            }
-
-            Symbol *existing = semantic_find_generic_specialization(type_symbol, type_args, expected_count);
-            if (!existing)
-            {
-                // instantiate immediately - types are needed synchronously for variables
-                InstantiationRequest request = {
-                    .kind = (type_symbol->type->kind == TYPE_STRUCT) ? INSTANTIATION_STRUCT : INSTANTIATION_UNION,
-                    .generic_symbol = type_symbol,
-                    .type_args = type_args,
-                    .type_arg_count = expected_count,
-                    .call_site = type_node,
-                    .unique_id = NULL,
-                    .next = NULL
-                };
-                
-                if (request.kind == INSTANTIATION_STRUCT)
-                {
-                    existing = semantic_instantiate_generic_struct_from_request(analyzer, &request);
-                }
-                else
-                {
-                    existing = semantic_instantiate_generic_union_from_request(analyzer, &request);
-                }
-                
-                if (!existing)
-                {
-                    free(type_args);
-                    return NULL;
-                }
-            }
-
-            free(type_args);
-            type_node->type = existing->type;
-            return existing->type;
-        }
-        break;
-    }
-    case AST_TYPE_PARAM:
-    {
-        Type *bound = semantic_lookup_generic_binding(analyzer, type_node->type_param.name);
-        if (!bound)
-        {
-            semantic_error(analyzer, type_node, "unknown generic type parameter '%s'", type_node->type_param.name);
-            return NULL;
-        }
-        type_node->type = bound;
-        return bound;
-    }
-    case AST_TYPE_PTR:
-    {
-        Type *base = resolve_type(analyzer, type_node->type_ptr.base);
-        if (!base)
-            return NULL;
-        Type *ptr_type = type_pointer_create(base);
-        type_node->type = ptr_type;
-        return ptr_type;
-    }
-    case AST_TYPE_ARRAY:
-    {
-        Type *elem_type = resolve_type(analyzer, type_node->type_array.elem_type);
-        if (!elem_type)
-        {
-            semantic_error(analyzer, type_node, "failed to resolve array element type");
-            return NULL;
-        }
-        Type *array_type = type_array_create(elem_type);
-        type_node->type = array_type;
-        return array_type;
-    }
-    case AST_TYPE_FUN:
-    {
-        Type *return_type = NULL;
-        if (type_node->type_fun.return_type)
-        {
-            return_type = resolve_type(analyzer, type_node->type_fun.return_type);
-            if (!return_type)
-                return NULL;
-        }
-
-        size_t param_count = type_node->type_fun.params ? type_node->type_fun.params->count : 0;
-        Type **param_types = NULL;
-        if (param_count > 0)
-        {
-            param_types = malloc(sizeof(Type *) * param_count);
-            if (!param_types)
-            {
-                semantic_error(analyzer, type_node, "out of memory resolving function type");
-                return NULL;
-            }
-            for (size_t i = 0; i < param_count; i++)
-            {
-                AstNode *param_node = type_node->type_fun.params->items[i];
-                param_types[i]      = resolve_type(analyzer, param_node);
-                if (!param_types[i])
-                {
-                    free(param_types);
-                    return NULL;
-                }
-            }
-        }
-
-        bool  is_variadic = type_node->type_fun.is_variadic;
-        Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
-        free(param_types);
-        type_node->type = func_type;
-        return func_type;
-    }
-    case AST_TYPE_STR:
-    {
-        if (type_node->type_str.name)
-        {
-            break;
-        }
-
-        Type   *struct_type = type_struct_create(NULL);
-        Symbol *head        = NULL;
-        Symbol *tail        = NULL;
-        size_t  offset      = 0;
-        size_t  max_align   = 1;
-        size_t  field_count = 0;
-
-        if (type_node->type_str.fields)
-        {
-            for (int i = 0; i < type_node->type_str.fields->count; i++)
-            {
-                AstNode *field_node = type_node->type_str.fields->items[i];
-                Type    *field_type = resolve_type(analyzer, field_node->field_stmt.type);
-                if (!field_type)
-                {
-                    semantic_free_field_list(head);
-                    free(struct_type->name);
-                    free(struct_type);
-                    return NULL;
-                }
-
-                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
-                if (!field_symbol)
-                {
-                    semantic_free_field_list(head);
-                    free(struct_type->name);
-                    free(struct_type);
-                    return NULL;
-                }
-
-                size_t field_align = type_alignof(field_type);
-                offset             = semantic_align_to(offset, field_align ? field_align : 1);
-                field_symbol->field.offset = offset;
-
-                if (!head)
-                {
-                    head = tail = field_symbol;
-                }
-                else
-                {
-                    tail->next = field_symbol;
-                    tail       = field_symbol;
-                }
-
-                offset += type_sizeof(field_type);
-                if (field_align > max_align)
-                {
-                    max_align = field_align;
-                }
-                field_count++;
-            }
-        }
-
-        size_t final_align = max_align ? max_align : 1;
-        offset             = semantic_align_to(offset, final_align);
-
-        struct_type->size                  = offset;
-        struct_type->alignment             = final_align;
-        struct_type->composite.fields      = head;
-        struct_type->composite.field_count = field_count;
-
-        type_node->type = struct_type;
-        return struct_type;
-    }
-    case AST_TYPE_UNI:
-    {
-        if (type_node->type_uni.name)
-        {
-            break;
-        }
-
-        Type   *union_type = type_union_create(NULL);
-        Symbol *head       = NULL;
-        Symbol *tail       = NULL;
-        size_t  max_size   = 0;
-        size_t  max_align  = 1;
-        size_t  field_count = 0;
-
-        if (type_node->type_uni.fields)
-        {
-            for (int i = 0; i < type_node->type_uni.fields->count; i++)
-            {
-                AstNode *field_node = type_node->type_uni.fields->items[i];
-                Type    *field_type = resolve_type(analyzer, field_node->field_stmt.type);
-                if (!field_type)
-                {
-                    semantic_free_field_list(head);
-                    free(union_type->name);
-                    free(union_type);
-                    return NULL;
-                }
-
-                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
-                if (!field_symbol)
-                {
-                    semantic_free_field_list(head);
-                    free(union_type->name);
-                    free(union_type);
-                    return NULL;
-                }
-
-                field_symbol->field.offset = 0;
-
-                if (!head)
-                {
-                    head = tail = field_symbol;
-                }
-                else
-                {
-                    tail->next = field_symbol;
-                    tail       = field_symbol;
-                }
-
-                size_t field_size  = type_sizeof(field_type);
-                size_t field_align = type_alignof(field_type);
-                if (field_size > max_size)
-                    max_size = field_size;
-                if (field_align > max_align)
-                    max_align = field_align;
-                field_count++;
-            }
-        }
-
-        size_t final_align = max_align ? max_align : 1;
-        size_t final_size  = semantic_align_to(max_size, final_align);
-
-        union_type->size                  = final_size;
-        union_type->alignment             = final_align;
-        union_type->composite.fields      = head;
-        union_type->composite.field_count = field_count;
-
-        type_node->type = union_type;
-        return union_type;
-    }
-    default:
-        break;
-    }
-
-    Type *resolved = type_resolve(type_node, &analyzer->symbol_table);
-    if (resolved)
-    {
-        type_node->type = resolved;
-        return resolved;
-    }
-
-    const char *type_name = NULL;
-    switch (type_node->kind)
-    {
-    case AST_TYPE_NAME:
-        type_name = type_node->type_name.name;
-        break;
-    case AST_TYPE_PARAM:
-        type_name = type_node->type_param.name;
-        break;
-    default:
-        break;
-    }
-    if (type_name)
-    {
-        semantic_error(analyzer, type_node, "unknown type '%s'", type_name);
-    }
-    else
-    {
-        semantic_error(analyzer, type_node, "unable to resolve type");
-    }
-    return NULL;
-}
-
-static bool semantic_register_generic_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    const char *name = stmt->fun_stmt.name;
-    size_t      generic_count = stmt->fun_stmt.generics ? (size_t)stmt->fun_stmt.generics->count : 0;
-
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        if (existing->kind != SYMBOL_FUNC || !existing->func.is_generic)
-        {
-            semantic_error(analyzer, stmt, "redefinition of '%s' conflicts with existing non-generic symbol", name);
-            return false;
-        }
-
-        if (existing->func.generic_param_count != generic_count)
-        {
-            semantic_error(analyzer, stmt, "generic function '%s' declared with mismatched type parameter count", name);
-            return false;
-        }
-
-        if (stmt->fun_stmt.body && existing->func.is_defined)
-        {
-            semantic_error(analyzer, stmt, "redefinition of generic function '%s'", name);
-            return false;
-        }
-
-        existing->func.is_defined = (stmt->fun_stmt.body != NULL);
-        existing->decl            = stmt;
-        stmt->symbol              = existing;
-        stmt->type                = existing->type;
-        if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
-        {
-            existing->is_public = true;
-        }
-        return true;
-    }
-
-    Type *placeholder_type = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
-    Symbol *symbol         = symbol_create(SYMBOL_FUNC, name, placeholder_type, stmt);
-    symbol->func.is_external             = false;
-    symbol->func.is_defined              = (stmt->fun_stmt.body != NULL);
-    symbol->func.uses_mach_varargs       = stmt->fun_stmt.is_variadic;
-    symbol->func.is_generic              = true;
-    symbol->func.generic_param_count     = generic_count;
-    symbol->func.generic_specializations = NULL;
-
-    if (generic_count > 0)
-    {
-        symbol->func.generic_param_names = malloc(sizeof(char *) * generic_count);
-        if (!symbol->func.generic_param_names)
-        {
-            semantic_error(analyzer, stmt, "failed to allocate generic parameter storage");
-            symbol_destroy(symbol);
-            return false;
-        }
-        for (size_t i = 0; i < generic_count; i++)
-        {
-            AstNode *param = stmt->fun_stmt.generics->items[i];
-            if (!param || param->kind != AST_TYPE_PARAM)
-            {
-                semantic_error(analyzer, stmt, "invalid generic parameter declaration");
-                symbol_destroy(symbol);
-                return false;
-            }
-            symbol->func.generic_param_names[i] = strdup(param->type_param.name);
-            if (!symbol->func.generic_param_names[i])
-            {
-                semantic_error(analyzer, stmt, "failed to allocate generic parameter name");
-                symbol_destroy(symbol);
-                return false;
-            }
-        }
-    }
-
-    if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
-    {
-        symbol->is_public = true;
-    }
-
-    symbol_add(analyzer->symbol_table.current_scope, symbol);
-    stmt->symbol = symbol;
-    stmt->type   = placeholder_type;
-    return true;
-}
-
-static bool semantic_register_generic_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    const char *name = stmt->str_stmt.name;
-    size_t      generic_count = stmt->str_stmt.generics ? (size_t)stmt->str_stmt.generics->count : 0;
-
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        semantic_error(analyzer, stmt, "redefinition of struct '%s'", name);
-        return false;
-    }
-
-    Type   *struct_type   = type_struct_create(name);
-    Symbol *struct_symbol = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
-    struct_symbol->type_def.is_alias = false;
-    struct_symbol->type_def.is_generic = true;
-    struct_symbol->type_def.generic_param_count = generic_count;
-    struct_symbol->type_def.generic_specializations = NULL;
-    struct_symbol->type_def.is_specialized_instance = false;
-
-    if (generic_count > 0)
-    {
-        struct_symbol->type_def.generic_param_names = malloc(sizeof(char *) * generic_count);
-        if (!struct_symbol->type_def.generic_param_names)
-        {
-            semantic_error(analyzer, stmt, "failed to allocate generic parameter storage");
-            symbol_destroy(struct_symbol);
-            return false;
-        }
-        for (size_t i = 0; i < generic_count; i++)
-        {
-            AstNode *param = stmt->str_stmt.generics->items[i];
-            if (!param || param->kind != AST_TYPE_PARAM)
-            {
-                semantic_error(analyzer, stmt, "invalid generic parameter declaration");
-                symbol_destroy(struct_symbol);
-                return false;
-            }
-            struct_symbol->type_def.generic_param_names[i] = strdup(param->type_param.name);
-            if (!struct_symbol->type_def.generic_param_names[i])
-            {
-                semantic_error(analyzer, stmt, "failed to allocate generic parameter name");
-                symbol_destroy(struct_symbol);
-                return false;
-            }
-        }
-    }
-
-    if (semantic_in_top_level_scope(analyzer) && stmt->str_stmt.is_public)
-    {
-        struct_symbol->is_public = true;
-    }
-
-    symbol_add(analyzer->symbol_table.current_scope, struct_symbol);
-    stmt->symbol = struct_symbol;
-    stmt->type   = struct_type;
-    return true;
-}
-
-static bool semantic_register_generic_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    const char *name = stmt->uni_stmt.name;
-    size_t      generic_count = stmt->uni_stmt.generics ? (size_t)stmt->uni_stmt.generics->count : 0;
-
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        semantic_error(analyzer, stmt, "redefinition of union '%s'", name);
-        return false;
-    }
-
-    Type   *union_type   = type_union_create(name);
-    Symbol *union_symbol = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
-    union_symbol->type_def.is_alias = false;
-    union_symbol->type_def.is_generic = true;
-    union_symbol->type_def.generic_param_count = generic_count;
-    union_symbol->type_def.generic_specializations = NULL;
-    union_symbol->type_def.is_specialized_instance = false;
-
-    if (generic_count > 0)
-    {
-        union_symbol->type_def.generic_param_names = malloc(sizeof(char *) * generic_count);
-        if (!union_symbol->type_def.generic_param_names)
-        {
-            semantic_error(analyzer, stmt, "failed to allocate generic parameter storage");
-            symbol_destroy(union_symbol);
-            return false;
-        }
-        for (size_t i = 0; i < generic_count; i++)
-        {
-            AstNode *param = stmt->uni_stmt.generics->items[i];
-            if (!param || param->kind != AST_TYPE_PARAM)
-            {
-                semantic_error(analyzer, stmt, "invalid generic parameter declaration");
-                symbol_destroy(union_symbol);
-                return false;
-            }
-            union_symbol->type_def.generic_param_names[i] = strdup(param->type_param.name);
-            if (!union_symbol->type_def.generic_param_names[i])
-            {
-                semantic_error(analyzer, stmt, "failed to allocate generic parameter name");
-                symbol_destroy(union_symbol);
-                return false;
-            }
-        }
-    }
-
-    if (semantic_in_top_level_scope(analyzer) && stmt->uni_stmt.is_public)
-    {
-        union_symbol->is_public = true;
-    }
-
-    symbol_add(analyzer->symbol_table.current_scope, union_symbol);
-    stmt->symbol = union_symbol;
-    stmt->type   = union_type;
-    return true;
-}
-
-bool semantic_analyze_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    if (!analyzer || !stmt)
-        return false;
-
-    if (analyzer->has_fatal_error)
-        return false;
-
-    switch (stmt->kind)
-    {
-    case AST_STMT_USE:
-        // use statements are processed in an earlier pass, skip here
-        return true;
-    case AST_STMT_EXT:
-        return semantic_analyze_ext_stmt(analyzer, stmt);
-    case AST_STMT_DEF:
-        return semantic_analyze_def_stmt(analyzer, stmt);
-    case AST_STMT_VAL:
-    case AST_STMT_VAR:
-        return semantic_analyze_var_stmt(analyzer, stmt);
-    case AST_STMT_FUN:
-        return semantic_analyze_fun_stmt(analyzer, stmt);
-    case AST_STMT_STR:
-        return semantic_analyze_str_stmt(analyzer, stmt);
-    case AST_STMT_UNI:
-        return semantic_analyze_uni_stmt(analyzer, stmt);
-    case AST_STMT_IF:
-        return semantic_analyze_if_stmt(analyzer, stmt);
-    case AST_STMT_OR:
-        return semantic_analyze_or_stmt(analyzer, stmt);
-    case AST_STMT_FOR:
-        return semantic_analyze_for_stmt(analyzer, stmt);
-    case AST_STMT_RET:
-        return semantic_analyze_ret_stmt(analyzer, stmt);
-    case AST_STMT_BLOCK:
-        return semantic_analyze_block_stmt(analyzer, stmt);
-    case AST_STMT_EXPR:
-        return semantic_analyze_expr(analyzer, stmt->expr_stmt.expr) != NULL;
-    case AST_STMT_BRK:
-    case AST_STMT_CNT:
-        if (analyzer->loop_depth == 0)
-        {
-            semantic_error(analyzer, stmt, "%s statement not within a loop", stmt->kind == AST_STMT_BRK ? "break" : "continue");
-            return false;
-        }
-        return true;
-    case AST_STMT_ASM:
-        // inline assembly currently unchecked
-        return true;
-    default:
-        semantic_error(analyzer, stmt, "unknown statement kind");
-        return false;
-    }
-}
-
-bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    char *module_path = stmt->use_stmt.module_path;
-    char *raw_path    = NULL;
-
-    if (module_path)
-    {
-        raw_path = strdup(module_path);
-        ProjectConfig *pc        = (ProjectConfig *)analyzer->module_manager.config;
-        char          *canonical = config_expand_module_path(pc, module_path);
-        if (!canonical)
-        {
-            semantic_error(analyzer, stmt, "module path '%s' could not be resolved", raw_path ? raw_path : module_path);
-            semantic_mark_fatal(analyzer);
-            free(raw_path);
-            return false;
-        }
-
-        free(stmt->use_stmt.module_path);
-        stmt->use_stmt.module_path = canonical;
-        module_path                = canonical;
-    }
-
-    Module *module = module_manager_find_module(&analyzer->module_manager, module_path);
+    const char *module_path = stmt->use_stmt.module_path;
+    const char *alias       = stmt->use_stmt.alias;
+
+    // find the module (should already be loaded and analyzed)
+    Module *module = module_manager_find_module(&driver->module_manager, module_path);
     if (!module)
     {
-        semantic_error(analyzer, stmt, "module '%s' not found", module_path);
-        semantic_mark_fatal(analyzer);
-        free(raw_path);
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "module '%s' not found (should have been loaded)", module_path);
         return false;
     }
 
-    free(raw_path);
-
-    if (stmt->use_stmt.alias)
+    Scope *alias_scope = NULL;
+    if (alias)
     {
-        if (symbol_lookup_scope(analyzer->symbol_table.current_scope, stmt->use_stmt.alias))
-        {
-            semantic_error(analyzer, stmt, "alias '%s' conflicts with existing symbol", stmt->use_stmt.alias);
-            return false;
-        }
-
-        Symbol *module_symbol = symbol_create_module(stmt->use_stmt.alias, module->name);
-        if (!module_symbol)
-        {
-            semantic_error(analyzer, stmt, "failed to create alias for module '%s'", module->name);
-            semantic_mark_fatal(analyzer);
-            return false;
-        }
-        module_symbol->is_imported                = true;
-        module_symbol->import_module              = module->name;
-        module_symbol->module.scope->parent       = analyzer->symbol_table.current_scope;
-        module_symbol->module.scope->is_module    = true;
-        symbol_add(analyzer->symbol_table.current_scope, module_symbol);
-        stmt->symbol = module_symbol;
-    }
-    else
-    {
-        stmt->symbol = NULL;
-    }
-
-    return true;
-}
-
-static bool semantic_import_public_symbols(SemanticAnalyzer *analyzer, Module *module, AstNode *use_stmt)
-{
-    if (!module->symbols || !module->symbols->global_scope)
-    {
-        semantic_error(analyzer, use_stmt, "module '%s' has no symbols to import", use_stmt->use_stmt.module_path);
-        return false;
-    }
-
-    Scope *export_scope = module->symbols->module_scope ? module->symbols->module_scope : module->symbols->global_scope;
-    if (!export_scope)
-    {
-        semantic_error(analyzer, use_stmt, "module '%s' has no export scope", use_stmt->use_stmt.module_path);
-        return false;
-    }
-
-    Symbol *alias_symbol = use_stmt->symbol;
-    if (!alias_symbol && use_stmt->use_stmt.alias)
-    {
-        alias_symbol = symbol_lookup_scope(analyzer->symbol_table.current_scope, use_stmt->use_stmt.alias);
-        if (alias_symbol && alias_symbol->kind == SYMBOL_MODULE)
-        {
-            use_stmt->symbol = alias_symbol;
-        }
-        else
-        {
-            alias_symbol = NULL;
-        }
-    }
-    Scope  *alias_scope  = alias_symbol ? alias_symbol->module.scope : NULL;
-    bool    import_into_current_scope = (alias_scope == NULL);
-
-    for (Symbol *sym = export_scope->symbols; sym; sym = sym->next)
-    {
-        if (sym->kind == SYMBOL_MODULE || sym->is_imported || !sym->is_public)
-            continue;
-
-        if (import_into_current_scope)
-        {
-            Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, sym->name);
-            if (existing)
-            {
-                if (existing->is_imported && existing->import_module && strcmp(existing->import_module, module->name) == 0)
-                    continue;
-                semantic_error(analyzer, use_stmt, "symbol '%s' from module '%s' conflicts with existing symbol", sym->name, use_stmt->use_stmt.module_path);
-                return false;
-            }
-
-            Symbol *imported_sym = semantic_clone_imported_symbol(sym, module->name);
-            if (!imported_sym)
-            {
-                semantic_error(analyzer, use_stmt, "out of memory while importing symbol '%s'", sym->name);
-                semantic_mark_fatal(analyzer);
-                return false;
-            }
-
-            imported_sym->home_scope = analyzer->symbol_table.current_scope;
-            symbol_add(analyzer->symbol_table.current_scope, imported_sym);
-        }
-
-        if (alias_scope)
-        {
-            if (!symbol_lookup_scope(alias_scope, sym->name))
-            {
-                Symbol *alias_copy = semantic_clone_imported_symbol(sym, module->name);
-                if (!alias_copy)
-                {
-                    semantic_error(analyzer, use_stmt, "out of memory while populating alias '%s'", alias_symbol->name);
-                    semantic_mark_fatal(analyzer);
-                    return false;
-                }
-                alias_copy->home_scope = alias_scope;
-                symbol_add(alias_scope, alias_copy);
-            }
-        }
-    }
-
-    return true;
-}
-
-bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_stmt)
-{
-    const char *module_path = use_stmt->use_stmt.module_path;
-
-    Module *module = module_manager_find_module(&analyzer->module_manager, module_path);
-    if (!module)
-    {
-        semantic_error(analyzer, use_stmt, "module '%s' not found", module_path);
-        return false;
-    }
-
-    if (module->is_analyzed)
-    {
-        if (!semantic_import_public_symbols(analyzer, module, use_stmt))
-        {
-            semantic_mark_fatal(analyzer);
-            return false;
-        }
-        return true;
-    }
-
-    if (module->ast && module->ast->kind == AST_PROGRAM)
-    {
-        bool extern_only = true;
-        for (int i = 0; i < module->ast->program.stmts->count; i++)
-        {
-            AstNode *s = module->ast->program.stmts->items[i];
-            if (s->kind != AST_STMT_EXT)
-            {
-                extern_only = false;
-                break;
-            }
-        }
-
-        if (extern_only)
-        {
-            if (module->symbols)
-            {
-                symbol_table_dnit(module->symbols);
-                free(module->symbols);
-            }
-            module->symbols = malloc(sizeof(SymbolTable));
-            symbol_table_init(module->symbols);
-
-            SemanticAnalyzer tmp;
-            semantic_analyzer_init(&tmp);
-            semantic_analyzer_set_module(&tmp, module->name);
-            tmp.symbol_table = *module->symbols;
-
-            bool ok = true;
-            for (int i = 0; i < module->ast->program.stmts->count; i++)
-            {
-                if (!semantic_analyze_ext_stmt(&tmp, module->ast->program.stmts->items[i]))
-                {
-                    ok = false;
-                    break;
-                }
-            }
-
-            *module->symbols = tmp.symbol_table;
-            tmp.symbol_table.global_scope  = NULL;
-            tmp.symbol_table.current_scope = NULL;
-            tmp.symbol_table.module_scope  = NULL;
-            semantic_analyzer_dnit(&tmp);
-
-            if (!ok)
-            {
-                semantic_error(analyzer, use_stmt, "failed to analyze externs in module '%s'", module_path);
-                semantic_mark_fatal(analyzer);
-                return false;
-            }
-
-            module->is_analyzed = true;
-            return semantic_import_public_symbols(analyzer, module, use_stmt);
-        }
-    }
-
-    if (!module->symbols)
-    {
-        module->symbols = malloc(sizeof(SymbolTable));
-        symbol_table_init(module->symbols);
-    }
-
-    SemanticAnalyzer module_analyzer;
-    semantic_analyzer_init(&module_analyzer);
-    module_manager_set_config(&module_analyzer.module_manager, analyzer->module_manager.config, analyzer->module_manager.project_dir);
-    semantic_analyzer_set_module(&module_analyzer, module->name);
-    for (int i = 0; i < analyzer->module_manager.search_count; i++)
-        module_manager_add_search_path(&module_analyzer.module_manager, analyzer->module_manager.search_paths[i]);
-    for (int i = 0; i < analyzer->module_manager.alias_count; i++)
-        module_manager_add_alias(&module_analyzer.module_manager, analyzer->module_manager.alias_names[i], analyzer->module_manager.alias_paths[i]);
-
-    bool success = true;
-    if (module->ast && module->ast->kind == AST_PROGRAM)
-    {
-        if (!module_manager_resolve_dependencies(&module_analyzer.module_manager, module->ast, "."))
-        {
-            success = false;
-        }
-        else
-        {
-            for (int i = 0; i < module->ast->program.stmts->count; i++)
-            {
-                AstNode *stmt = module->ast->program.stmts->items[i];
-                if (stmt->kind == AST_STMT_USE)
-                {
-                    if (!semantic_analyze_use_stmt(&module_analyzer, stmt))
-                    {
-                        success = false;
-                    }
-                }
-            }
-
-            for (int i = 0; success && i < module->ast->program.stmts->count; i++)
-            {
-                AstNode *stmt = module->ast->program.stmts->items[i];
-                if (stmt->kind == AST_STMT_USE)
-                {
-                    if (!semantic_analyze_imported_module(&module_analyzer, stmt))
-                    {
-                        success = false;
-                    }
-                }
-            }
-
-            if (success)
-            {
-                int module_stmt_count = module->ast->program.stmts->count;
-                for (int i = 0; i < module_stmt_count && success; i++)
-                {
-                    AstNode *stmt = module->ast->program.stmts->items[i];
-                    if (stmt->kind == AST_STMT_FUN)
-                    {
-                        if (!semantic_predeclare_fun_stmt(&module_analyzer, stmt))
-                            success = false;
-                    }
-                    if (module_analyzer.has_fatal_error)
-                        success = false;
-                }
-            }
-
-            for (int i = 0; success && i < module->ast->program.stmts->count; i++)
-            {
-                AstNode *stmt = module->ast->program.stmts->items[i];
-                if (stmt->kind == AST_STMT_USE)
-                    continue;
-                if (!semantic_analyze_stmt(&module_analyzer, stmt))
-                    success = false;
-            }
-        }
-    }
-
-    if (success)
-    {
-        if (module->symbols)
-        {
-            symbol_table_dnit(module->symbols);
-            free(module->symbols);
-        }
-        module->symbols  = malloc(sizeof(SymbolTable));
-        *module->symbols = module_analyzer.symbol_table;
-        module_analyzer.symbol_table.global_scope  = NULL;
-        module_analyzer.symbol_table.current_scope = NULL;
-        module_analyzer.symbol_table.module_scope  = NULL;
-
-        module->is_analyzed = true;
-        success             = semantic_import_public_symbols(analyzer, module, use_stmt);
-    }
-    else
-    {
-        semantic_error(analyzer, use_stmt, "failed to analyze module '%s'", module_path);
-        semantic_mark_fatal(analyzer);
-    }
-
-    for (int i = 0; i < module_analyzer.errors.count; i++)
-    {
-        semantic_error_list_add(&analyzer->errors, module_analyzer.errors.errors[i].token, module_analyzer.errors.errors[i].message, module->file_path);
-    }
-
-    for (int i = 0; i < module_analyzer.module_manager.capacity; i++)
-    {
-        Module *m = module_analyzer.module_manager.modules[i];
-        while (m)
-        {
-            m->symbols = NULL;
-            m->ast     = NULL;
-            m          = m->next;
-        }
-    }
-
-    semantic_error_list_dnit(&module_analyzer.errors);
-    module_manager_dnit(&module_analyzer.module_manager);
-
-    if (!success)
-        semantic_mark_fatal(analyzer);
-
-    return success;
-}
-
-bool semantic_analyze_ext_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    const char *name = stmt->ext_stmt.name;
-    Type       *type = resolve_type(analyzer, stmt->ext_stmt.type);
-
-    if (!type)
-    {
-        semantic_error(analyzer, stmt, "cannot resolve type for external function '%s'", name);
-        return false;
-    }
-
-    if (type->kind != TYPE_FUNCTION)
-    {
-        semantic_error(analyzer, stmt, "external declaration '%s' must be a function type", name);
-        return false;
-    }
-
-    // check for redefinition
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        semantic_error(analyzer, stmt, "redefinition of '%s'", name);
-        return false;
-    }
-
-    Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, type, stmt);
-    symbol->func.is_external = true;
-    if (stmt->ext_stmt.symbol)
-        symbol->func.extern_name = strdup(stmt->ext_stmt.symbol);
-    if (stmt->ext_stmt.convention)
-        symbol->func.convention = strdup(stmt->ext_stmt.convention);
-    if (semantic_in_top_level_scope(analyzer) && stmt->ext_stmt.is_public)
-    {
-        symbol->is_public = true;
-    }
-    symbol_add(analyzer->symbol_table.current_scope, symbol);
-    stmt->symbol = symbol;
-
-    return true;
-}
-
-bool semantic_analyze_def_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    const char *name        = stmt->def_stmt.name;
-    Type       *target_type = resolve_type(analyzer, stmt->def_stmt.type);
-
-    if (!target_type)
-    {
-        semantic_error(analyzer, stmt, "cannot resolve target type for alias '%s'", name);
-        return false;
-    }
-
-    // check for redefinition
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        semantic_error(analyzer, stmt, "redefinition of type '%s'", name);
-        return false;
-    }
-
-    Type   *alias_type        = type_alias_create(name, target_type);
-    Symbol *symbol            = symbol_create(SYMBOL_TYPE, name, alias_type, stmt);
-    symbol->type_def.is_alias = true;
-    if (semantic_in_top_level_scope(analyzer) && stmt->def_stmt.is_public)
-    {
-        symbol->is_public = true;
-    }
-    symbol_add(analyzer->symbol_table.current_scope, symbol);
-    stmt->symbol = symbol;
-    stmt->type   = alias_type;
-
-    return true;
-}
-
-static void semantic_register_error_variable(SemanticAnalyzer *analyzer, AstNode *stmt, const char *name, bool is_val)
-{
-    if (!analyzer || !stmt || !name || !name[0])
-        return;
-
-    if (stmt->symbol)
-        return;
-
-    if (symbol_lookup_scope(analyzer->symbol_table.current_scope, name))
-        return;
-
-    SymbolKind kind   = is_val ? SYMBOL_VAL : SYMBOL_VAR;
-    Symbol    *symbol = symbol_create(kind, name, type_error(), stmt);
-    if (!symbol)
-        return;
-
-    symbol->var.is_global = semantic_in_top_level_scope(analyzer);
-    symbol->var.is_const  = is_val;
-    symbol->import_origin = symbol;
-
-    if (analyzer->current_module_name)
-    {
-        symbol->module_name = strdup(analyzer->current_module_name);
-    }
-
-    if (symbol->var.is_global && stmt->var_stmt.is_public)
-    {
-        symbol->is_public = true;
-    }
-
-    symbol_add(analyzer->symbol_table.current_scope, symbol);
-    stmt->symbol = symbol;
-    stmt->type   = type_error();
-}
-
-bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    const char *name   = stmt->var_stmt.name;
-    bool        is_val = stmt->var_stmt.is_val;
-
-    // resolve explicit type if given
-    Type *explicit_type = NULL;
-    if (stmt->var_stmt.type)
-    {
-        explicit_type = resolve_type(analyzer, stmt->var_stmt.type);
-        if (!explicit_type)
-        {
-            semantic_error(analyzer, stmt, "cannot resolve type for variable '%s'", name);
-            semantic_register_error_variable(analyzer, stmt, name, is_val);
-            return false;
-        }
-    }
-
-    // analyze initializer with type hint
-    Type *init_type = NULL;
-    if (stmt->var_stmt.init)
-    {
-        init_type = semantic_analyze_expr_with_hint(analyzer, stmt->var_stmt.init, explicit_type);
-        if (!init_type)
-        {
-            semantic_error(analyzer, stmt, "invalid initializer for variable '%s'", name);
-            semantic_register_error_variable(analyzer, stmt, name, is_val);
-            return false;
-        }
-    }
-
-    // determine final type
-    Type *final_type = NULL;
-    if (explicit_type && init_type)
-    {
-        if (!semantic_check_assignment(analyzer, explicit_type, init_type, stmt))
-        {
-            char *init_str = type_to_string(init_type);
-            char *type_str = type_to_string(explicit_type);
-            semantic_error(analyzer, stmt, "cannot assign %s to %s", init_str ? init_str : "<error>", type_str ? type_str : "<error>");
-            free(init_str);
-            free(type_str);
-            semantic_register_error_variable(analyzer, stmt, name, is_val);
-            return false;
-        }
-        final_type = explicit_type;
-    }
-    else if (explicit_type)
-    {
-        final_type = explicit_type;
-    }
-    else if (init_type)
-    {
-        final_type = init_type;
-    }
-    else
-    {
-        semantic_error(analyzer, stmt, "variable '%s' has no type or initializer", name);
-        semantic_register_error_variable(analyzer, stmt, name, is_val);
-        return false;
-    }
-
-    // check for redefinition
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        semantic_error(analyzer, stmt, "redefinition of '%s'", name);
-        return false;
-    }
-
-    // create symbol
-    SymbolKind kind       = is_val ? SYMBOL_VAL : SYMBOL_VAR;
-    Symbol    *symbol     = symbol_create(kind, name, final_type, stmt);
-    symbol->var.is_global = semantic_in_top_level_scope(analyzer);
-    symbol->var.is_const  = is_val;
-    if (symbol->var.is_global && stmt->var_stmt.is_public)
-    {
-        symbol->is_public = true;
-    }
-
-    if (analyzer->current_module_name)
-    {
-        free(symbol->module_name);
-        symbol->module_name = strdup(analyzer->current_module_name);
-    }
-
-    if (stmt->var_stmt.mangle_name)
-    {
-        if (!symbol->var.is_global)
-        {
-            semantic_error(analyzer, stmt, "'#@symbol' is only valid for top-level declarations");
-            symbol_destroy(symbol);
-            return false;
-        }
-        free(symbol->var.mangled_name);
-        symbol->var.mangled_name = strdup(stmt->var_stmt.mangle_name);
-        if (!symbol->var.mangled_name)
-        {
-            semantic_error(analyzer, stmt, "out of memory while applying mangle directive");
-            semantic_mark_fatal(analyzer);
-            symbol_destroy(symbol);
-            return false;
-        }
-    }
-    else if (symbol->var.is_global && !symbol->var.mangled_name)
-    {
-        char *auto_name = semantic_build_export_name(symbol->module_name, symbol->name);
-        if (!auto_name)
-        {
-            semantic_error(analyzer, stmt, "out of memory while generating mangled name");
-            semantic_mark_fatal(analyzer);
-            symbol_destroy(symbol);
-            return false;
-        }
-        symbol->var.mangled_name = auto_name;
-    }
-
-    symbol_add(analyzer->symbol_table.current_scope, symbol);
-    stmt->symbol = symbol;
-    stmt->type   = final_type;
-
-    return true;
-}
-
-static bool stmt_has_return(AstNode *stmt)
-{
-    if (!stmt)
-        return false;
-
-    switch (stmt->kind)
-    {
-    case AST_STMT_RET:
-        return true;
-
-    case AST_STMT_BLOCK:
-        if (stmt->block_stmt.stmts)
-        {
-            for (int i = 0; i < stmt->block_stmt.stmts->count; i++)
-            {
-                if (stmt_has_return(stmt->block_stmt.stmts->items[i]))
-                    return true;
-            }
-        }
-        return false;
-
-    case AST_STMT_IF:
-        if (!stmt_has_return(stmt->cond_stmt.body))
-            return false;
-        // walk chained or branches
-        AstNode *or_node = stmt->cond_stmt.stmt_or;
-        while (or_node)
-        {
-            if (!stmt_has_return(or_node->cond_stmt.body))
-                return false;
-            or_node = or_node->cond_stmt.stmt_or;
-        }
-        return true;
-
-    case AST_STMT_OR:
-        if (!stmt_has_return(stmt->cond_stmt.body))
-            return false;
-        if (stmt->cond_stmt.stmt_or)
-            return stmt_has_return(stmt->cond_stmt.stmt_or);
-        return true;
-
-    default:
-        return false;
-    }
-}
-
-static bool semantic_analyze_method_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    if (!analyzer || !stmt || !stmt->fun_stmt.method_receiver)
-    {
-        semantic_error(analyzer, stmt, "invalid method declaration");
-        return false;
-    }
-
-    AstNode *receiver_ast = stmt->fun_stmt.method_receiver;
-    bool     declared_pointer_receiver = false;
-    AstNode *base_receiver_ast         = receiver_ast;
-    while (base_receiver_ast && base_receiver_ast->kind == AST_TYPE_PTR)
-    {
-        declared_pointer_receiver = true;
-        base_receiver_ast         = base_receiver_ast->type_ptr.base;
-    }
-
-    bool receiver_is_pointer = declared_pointer_receiver;
-
-    if (!base_receiver_ast || base_receiver_ast->kind != AST_TYPE_NAME || !base_receiver_ast->type_name.name)
-    {
-        semantic_error(analyzer, stmt, "method receiver must be a named type");
-        return false;
-    }
-
-    const char *owner_name = base_receiver_ast->type_name.name;
-
-    Symbol *declared_owner_symbol = symbol_lookup(&analyzer->symbol_table, owner_name);
-    if (!declared_owner_symbol || declared_owner_symbol->kind != SYMBOL_TYPE)
-    {
-        semantic_error(analyzer, stmt, "unknown type '%s' for method receiver", owner_name);
-        return false;
-    }
-
-    if (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
-    {
-        semantic_error(analyzer, stmt, "method-specific generics are not supported");
-        return false;
-    }
-
-    bool owner_is_generic = declared_owner_symbol->type_def.is_generic && declared_owner_symbol->type_def.generic_param_count > 0;
-    bool binding_active   = analyzer->generic_binding_count > 0;
-
-    bool   treat_as_generic_definition = owner_is_generic && !binding_active;
-    Type  *resolved_receiver_type      = NULL;
-    Type  *owner_candidate             = NULL;
-    Symbol *resolved_owner_symbol      = NULL;
-
-    if (!treat_as_generic_definition)
-    {
-        resolved_receiver_type = resolve_type(analyzer, stmt->fun_stmt.method_receiver);
-        if (resolved_receiver_type)
-        {
-            resolved_owner_symbol = semantic_find_type_symbol_from_type(analyzer, resolved_receiver_type);
-
-            owner_candidate = resolved_receiver_type;
-            if (owner_candidate->kind == TYPE_POINTER)
-                owner_candidate = owner_candidate->pointer.base;
-            owner_candidate = type_resolve_alias(owner_candidate);
-        }
-
-        if (!resolved_owner_symbol && owner_candidate && declared_owner_symbol->type_def.generic_specializations)
-        {
-            for (GenericSpecialization *spec = declared_owner_symbol->type_def.generic_specializations; spec; spec = spec->next)
-            {
-                if (spec->symbol && spec->symbol->type == owner_candidate)
-                {
-                    resolved_owner_symbol = spec->symbol;
-                    break;
-                }
-            }
-
-            if (!resolved_owner_symbol)
-            {
-                if (resolved_receiver_type && resolved_receiver_type->name)
-                {
-                    Symbol *debug_lookup = symbol_lookup(&analyzer->symbol_table, resolved_receiver_type->name);
-                    fprintf(stderr, "debug: lookup owner type name=%s found=%s\n",
-                            resolved_receiver_type->name,
-                            debug_lookup && debug_lookup->name ? debug_lookup->name : (debug_lookup ? "<noname>" : "<null>"));
-                }
-                else
-                {
-                    fprintf(stderr, "debug: resolved receiver type has no name\n");
-                }
-            }
-        }
-    }
-
-    fprintf(stderr, "debug: method analysis owner=%s generic=%d binding=%zu resolved_owner=%s\n",
-            declared_owner_symbol->name ? declared_owner_symbol->name : "<anon>", owner_is_generic ? 1 : 0,
-            analyzer->generic_binding_count,
-            resolved_owner_symbol && resolved_owner_symbol->name ? resolved_owner_symbol->name : (resolved_owner_symbol ? "<noname>" : "<null>"));
-
-    if (!stmt->fun_stmt.params || stmt->fun_stmt.params->count == 0)
-    {
-        semantic_error(analyzer, stmt, "method must declare receiver parameter");
-        return false;
-    }
-
-    AstNode *receiver_param = stmt->fun_stmt.params->items[0];
-    if (!receiver_param || receiver_param->kind != AST_STMT_PARAM)
-    {
-        semantic_error(analyzer, receiver_param, "invalid receiver parameter");
-        return false;
-    }
-    bool inferred_pointer_receiver     = false;
-    bool receiver_param_is_pointer_ast = receiver_param->param_stmt.type && receiver_param->param_stmt.type->kind == AST_TYPE_PTR;
-
-    Type *param_receiver_type    = NULL;
-    Type *expected_receiver_type = NULL;
-
-    if (treat_as_generic_definition)
-    {
-        bool matches_decl = semantic_compare_type_ast(receiver_param->param_stmt.type, stmt->fun_stmt.method_receiver);
-        if (!matches_decl)
-        {
-            if (!declared_pointer_receiver && receiver_param_is_pointer_ast &&
-                semantic_compare_type_ast(receiver_param->param_stmt.type->type_ptr.base, stmt->fun_stmt.method_receiver))
-            {
-                inferred_pointer_receiver = true;
-            }
-            else if (declared_pointer_receiver && !receiver_param_is_pointer_ast)
-            {
-                semantic_error(analyzer, receiver_param, "receiver parameter must be pointer to declared receiver type");
-                return false;
-            }
-            else
-            {
-                semantic_error(analyzer, receiver_param, "first parameter of method must match receiver type");
-                return false;
-            }
-        }
-        else if (declared_pointer_receiver && !receiver_param_is_pointer_ast)
-        {
-            semantic_error(analyzer, receiver_param, "receiver parameter must be pointer to declared receiver type");
-            return false;
-        }
-
-        receiver_is_pointer = declared_pointer_receiver || inferred_pointer_receiver;
-    }
-    else
-    {
-        param_receiver_type = resolve_type(analyzer, receiver_param->param_stmt.type);
-        if (!param_receiver_type)
-        {
-            semantic_error(analyzer, receiver_param, "cannot resolve receiver parameter type");
-            return false;
-        }
-
-        expected_receiver_type = resolved_receiver_type ? resolved_receiver_type : resolve_type(analyzer, stmt->fun_stmt.method_receiver);
-        if (!expected_receiver_type)
-        {
-            semantic_error(analyzer, stmt, "cannot resolve receiver type");
-            return false;
-        }
-
-        if (!type_equals(param_receiver_type, expected_receiver_type))
-        {
-            if (!declared_pointer_receiver && param_receiver_type->kind == TYPE_POINTER &&
-                type_equals(param_receiver_type->pointer.base, expected_receiver_type))
-            {
-                inferred_pointer_receiver = true;
-            }
-            else if (declared_pointer_receiver && param_receiver_type->kind != TYPE_POINTER)
-            {
-                char expected_str[128];
-                format_type_name(expected_receiver_type, expected_str, sizeof(expected_str));
-                semantic_error(analyzer, receiver_param, "receiver parameter must be pointer to type '%s'", expected_str);
-                return false;
-            }
-            else
-            {
-                char expected_str[128];
-                char actual_str[128];
-                format_type_name(expected_receiver_type, expected_str, sizeof(expected_str));
-                format_type_name(param_receiver_type, actual_str, sizeof(actual_str));
-                semantic_error(analyzer, receiver_param, "receiver parameter must be of type '%s' (got '%s')", expected_str, actual_str);
-                return false;
-            }
-        }
-
-        receiver_is_pointer = declared_pointer_receiver || inferred_pointer_receiver;
-    }
-
-    if (treat_as_generic_definition)
-    {
-        Symbol *existing = type_find_method(declared_owner_symbol, stmt->fun_stmt.name, receiver_is_pointer);
+        // aliased import: use io: std.io
+        // create isolated module namespace scope
+        // check for name collision
+        Symbol *existing = symbol_lookup_scope(ctx->current_scope, alias);
         if (existing)
         {
-            fprintf(stderr, "debug: generic method collision existing=%s generic=%d\n", existing->name ? existing->name : "<anon>", existing->func.is_generic ? 1 : 0);
-            semantic_error(analyzer, stmt, "method '%s' already defined for type '%s'", stmt->fun_stmt.name, owner_name);
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "alias '%s' conflicts with existing symbol", alias);
             return false;
         }
 
-        Type *placeholder_type = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
-        Symbol *method_symbol  = symbol_create(SYMBOL_FUNC, stmt->fun_stmt.name, placeholder_type, stmt);
-        if (!method_symbol)
+        Symbol *ns_symbol = symbol_create_module(alias, module_path);
+        if (!ns_symbol)
         {
-            semantic_error(analyzer, stmt, "out of memory while creating method symbol");
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "failed to create alias scope for module '%s'", module_path);
             return false;
         }
 
-        method_symbol->func.is_external       = false;
-        method_symbol->func.is_defined        = (stmt->fun_stmt.body != NULL);
-        method_symbol->func.uses_mach_varargs = stmt->fun_stmt.is_variadic;
-        method_symbol->func.is_generic        = owner_is_generic;
-        method_symbol->func.generic_param_count = owner_is_generic ? declared_owner_symbol->type_def.generic_param_count : 0;
-        method_symbol->func.generic_specializations = NULL;
+        ns_symbol->is_imported             = true;
+        ns_symbol->is_public               = false;
+        ns_symbol->import_module           = module_path;
+        ns_symbol->module.scope->parent    = ctx->current_scope;
+        ns_symbol->module.scope->is_module = true;
 
-        if (method_symbol->func.generic_param_count > 0)
-        {
-            method_symbol->func.generic_param_names = malloc(sizeof(char *) * method_symbol->func.generic_param_count);
-            if (!method_symbol->func.generic_param_names)
-            {
-                semantic_error(analyzer, stmt, "failed to allocate method generic parameter storage");
-                symbol_destroy(method_symbol);
-                return false;
-            }
-            for (size_t i = 0; i < method_symbol->func.generic_param_count; i++)
-            {
-                const char *param_name = declared_owner_symbol->type_def.generic_param_names ? declared_owner_symbol->type_def.generic_param_names[i] : NULL;
-                method_symbol->func.generic_param_names[i] = param_name ? strdup(param_name) : NULL;
-                if (param_name && !method_symbol->func.generic_param_names[i])
-                {
-                    semantic_error(analyzer, stmt, "failed to allocate method generic parameter name");
-                    symbol_destroy(method_symbol);
-                    return false;
-                }
-            }
-        }
+        symbol_add(ctx->current_scope, ns_symbol);
+        alias_scope = ns_symbol->module.scope;
 
-        method_symbol->import_origin                 = method_symbol;
-        method_symbol->func.is_method                = true;
-        method_symbol->func.method_owner             = declared_owner_symbol;
-        method_symbol->func.method_receiver_is_pointer = receiver_is_pointer;
-        method_symbol->func.method_receiver_name     = owner_name ? strdup(owner_name) : NULL;
-        if (owner_name && !method_symbol->func.method_receiver_name)
-        {
-            semantic_error(analyzer, stmt, "out of memory while creating method symbol");
-            symbol_destroy(method_symbol);
-            return false;
-        }
-
-        if (analyzer->current_module_name)
-        {
-            free(method_symbol->module_name);
-            method_symbol->module_name = strdup(analyzer->current_module_name);
-        }
-        else if (declared_owner_symbol->module_name)
-        {
-            free(method_symbol->module_name);
-            method_symbol->module_name = strdup(declared_owner_symbol->module_name);
-        }
-
-        bool is_top_level = semantic_in_top_level_scope(analyzer);
-        if (is_top_level && stmt->fun_stmt.is_public)
-        {
-            method_symbol->is_public = true;
-        }
-
-        if (stmt->fun_stmt.mangle_name)
-        {
-            if (!is_top_level)
-            {
-                semantic_error(analyzer, stmt, "'#@symbol' is only valid for top-level methods");
-                symbol_destroy(method_symbol);
-                return false;
-            }
-            method_symbol->func.mangled_name = strdup(stmt->fun_stmt.mangle_name);
-            if (!method_symbol->func.mangled_name)
-            {
-                semantic_error(analyzer, stmt, "out of memory while applying mangle directive");
-                symbol_destroy(method_symbol);
-                semantic_mark_fatal(analyzer);
-                return false;
-            }
-        }
-
-        type_add_method(declared_owner_symbol, method_symbol);
-
-        stmt->symbol = method_symbol;
-        stmt->type   = placeholder_type;
-        return true;
+        diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "module '%s' aliased as '%s'", module_path, alias);
     }
 
-    Symbol *target_owner_symbol = resolved_owner_symbol ? resolved_owner_symbol : declared_owner_symbol;
-
-    Symbol *existing_method = type_find_method(target_owner_symbol, stmt->fun_stmt.name, receiver_is_pointer);
-    if (existing_method && !existing_method->func.is_generic)
+    // import public symbols (either into current scope or alias scope)
+    if (!import_public_symbols(driver, ctx, module, stmt, alias_scope))
     {
-        fprintf(stderr, "debug: method duplicate target=%s existing_generic=%d\n",
-                target_owner_symbol->name ? target_owner_symbol->name : owner_name,
-                existing_method->func.is_generic ? 1 : 0);
-        semantic_error(analyzer, stmt, "method '%s' already defined for type '%s'", stmt->fun_stmt.name, target_owner_symbol->name ? target_owner_symbol->name : owner_name);
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "failed to import symbols from module '%s'", module_path);
         return false;
     }
 
-    Type *return_type = NULL;
-    if (stmt->fun_stmt.return_type)
+    if (!alias)
     {
-        return_type = resolve_type(analyzer, stmt->fun_stmt.return_type);
-        if (!return_type)
-        {
-            semantic_error(analyzer, stmt, "cannot resolve method return type");
-            return false;
-        }
+        diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "imported public symbols from module '%s'", module_path);
     }
 
-    size_t original_param_nodes = stmt->fun_stmt.params ? stmt->fun_stmt.params->count : 0;
-    size_t fixed_param_count    = 0;
-    for (size_t i = 0; i < original_param_nodes; i++)
-    {
-        AstNode *param = stmt->fun_stmt.params->items[i];
-        if (!param->param_stmt.is_variadic)
-            fixed_param_count++;
-    }
+    return true;
+}
 
-    Type **param_types = NULL;
-    if (fixed_param_count > 0)
-    {
-        param_types = malloc(sizeof(Type *) * fixed_param_count);
-        if (!param_types)
-        {
-            semantic_error(analyzer, stmt, "out of memory while analyzing method parameters");
-            return false;
-        }
-    }
+// declare type alias
+static bool declare_def_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    const char *name = stmt->def_stmt.name;
 
-    size_t idx = 0;
-    for (size_t i = 0; i < original_param_nodes; i++)
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(ctx->current_scope, name);
+    if (existing)
     {
-        AstNode *param = stmt->fun_stmt.params->items[i];
-        if (param->param_stmt.is_variadic)
-            continue;
-        if (param == receiver_param && param_receiver_type)
-            param_types[idx] = param_receiver_type;
-        else
-            param_types[idx] = resolve_type(analyzer, param->param_stmt.type);
-        if (!param_types[idx])
-        {
-            semantic_error(analyzer, param, "cannot resolve method parameter type '%s'", param->param_stmt.name);
-            free(param_types);
-            return false;
-        }
-        param->type = param_types[idx];
-        idx++;
-    }
-
-    Type *func_type = type_function_create(return_type, param_types, fixed_param_count, stmt->fun_stmt.is_variadic);
-    free(param_types);
-
-    Symbol *method_symbol = symbol_create(SYMBOL_FUNC, stmt->fun_stmt.name, func_type, stmt);
-    if (!method_symbol)
-    {
-        semantic_error(analyzer, stmt, "out of memory while creating method symbol");
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "redefinition of '%s'", name);
         return false;
     }
 
-    method_symbol->func.is_external       = false;
-    method_symbol->func.is_defined        = (stmt->fun_stmt.body != NULL);
-    method_symbol->func.uses_mach_varargs = stmt->fun_stmt.is_variadic;
-    method_symbol->func.is_generic        = false;
-    method_symbol->import_origin          = method_symbol;
-    method_symbol->func.is_method         = true;
-    method_symbol->func.method_owner      = target_owner_symbol;
-    method_symbol->func.method_receiver_is_pointer = receiver_is_pointer;
-    method_symbol->func.method_receiver_name       = target_owner_symbol->name ? strdup(target_owner_symbol->name) : NULL;
-    if (target_owner_symbol->name && !method_symbol->func.method_receiver_name)
+    // create placeholder - signature will be resolved in pass B
+    Type   *placeholder         = type_alias_create(name, NULL);
+    Symbol *symbol              = symbol_create(SYMBOL_TYPE, name, placeholder, stmt);
+    symbol->type_def.is_alias   = true;
+    symbol->type_def.is_generic = false;
+    symbol->is_public           = stmt->def_stmt.is_public;
+    symbol->module_name         = ctx->module_name ? strdup(ctx->module_name) : NULL;
+    symbol->home_scope          = ctx->current_scope;
+
+    symbol_add(ctx->current_scope, symbol);
+    stmt->symbol = symbol;
+    return true;
+}
+
+// declare struct
+static bool declare_str_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    const char *name = stmt->str_stmt.name;
+
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(ctx->current_scope, name);
+    if (existing)
     {
-        semantic_error(analyzer, stmt, "out of memory while creating method symbol");
-        symbol_destroy(method_symbol);
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "redefinition of struct '%s'", name);
         return false;
     }
 
-    if (analyzer->current_module_name)
+    // create struct type - fields resolved in pass B
+    Type   *struct_type       = type_struct_create(name);
+    Symbol *symbol            = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
+    symbol->type_def.is_alias = false;
+    symbol->is_public         = stmt->str_stmt.is_public;
+    symbol->module_name       = ctx->module_name ? strdup(ctx->module_name) : NULL;
+    symbol->home_scope        = ctx->current_scope;
+
+    // check if generic
+    if (stmt->str_stmt.generics && stmt->str_stmt.generics->count > 0)
     {
-        free(method_symbol->module_name);
-        method_symbol->module_name = strdup(analyzer->current_module_name);
+        // mark as generic template - actual struct creation happens during instantiation
+        symbol->type_def.is_generic          = true;
+        symbol->type_def.generic_param_count = stmt->str_stmt.generics->count;
+        diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "generic struct '%s' registered", name);
     }
-    else if (target_owner_symbol->module_name)
+    else
     {
-        free(method_symbol->module_name);
-        method_symbol->module_name = strdup(target_owner_symbol->module_name);
+        symbol->type_def.is_generic = false;
     }
 
-    bool is_top_level = semantic_in_top_level_scope(analyzer);
-    if (is_top_level && stmt->fun_stmt.is_public)
+    symbol_add(ctx->current_scope, symbol);
+    stmt->symbol = symbol;
+    return true;
+}
+
+// declare union
+static bool declare_uni_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    const char *name = stmt->uni_stmt.name;
+
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(ctx->current_scope, name);
+    if (existing)
     {
-        method_symbol->is_public = true;
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "redefinition of union '%s'", name);
+        return false;
     }
 
-    const char *custom_mangle = stmt->fun_stmt.mangle_name;
-    if (custom_mangle)
+    // create union type - fields resolved in pass B
+    Type   *union_type        = type_union_create(name);
+    Symbol *symbol            = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
+    symbol->type_def.is_alias = false;
+    symbol->is_public         = stmt->uni_stmt.is_public;
+    symbol->module_name       = ctx->module_name ? strdup(ctx->module_name) : NULL;
+    symbol->home_scope        = ctx->current_scope;
+
+    // check if generic
+    if (stmt->uni_stmt.generics && stmt->uni_stmt.generics->count > 0)
     {
-        if (!is_top_level)
+        symbol->type_def.is_generic          = true;
+        symbol->type_def.generic_param_count = stmt->uni_stmt.generics->count;
+        diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "generic union '%s' registered", name);
+    }
+    else
+    {
+        symbol->type_def.is_generic = false;
+    }
+
+    symbol_add(ctx->current_scope, symbol);
+    stmt->symbol = symbol;
+    return true;
+}
+
+// declare method
+static bool declare_method_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    const char *method_name = stmt->fun_stmt.name;
+
+    // extract owner type name from method_receiver
+    if (!stmt->fun_stmt.method_receiver || stmt->fun_stmt.method_receiver->kind != AST_TYPE_NAME)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "method '%s' missing valid receiver type", method_name);
+        return false;
+    }
+
+    const char *owner_name = stmt->fun_stmt.method_receiver->type_name.name;
+
+    // find owner type symbol
+    Symbol *owner_sym = symbol_lookup_scope(ctx->current_scope, owner_name);
+    if (!owner_sym)
+        owner_sym = symbol_lookup_scope(ctx->module_scope, owner_name);
+    if (!owner_sym)
+        owner_sym = symbol_lookup_scope(ctx->global_scope, owner_name);
+
+    if (!owner_sym || owner_sym->kind != SYMBOL_TYPE)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "method owner type '%s' not found", owner_name);
+        return false;
+    }
+
+    // check if method or owner is generic
+    bool is_generic = (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0) || (owner_sym->type_def.is_generic);
+
+    if (is_generic)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "generic method '%s.%s' registered", owner_name, method_name);
+        // Still create a symbol for generic methods so they can be found
+    }
+
+    // create method symbol - signature resolved in pass B
+    // mangle method name with owner type: Type.method → Type__method
+    char mangled[512];
+    snprintf(mangled, sizeof(mangled), "%s__%s", owner_name, method_name);
+
+    Type   *placeholder      = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
+    Symbol *symbol           = symbol_create(SYMBOL_FUNC, strdup(mangled), placeholder, stmt);
+    symbol->func.is_external = false;
+    symbol->func.is_method   = true;
+    symbol->func.is_defined  = (stmt->fun_stmt.body != NULL);
+    symbol->func.is_generic  = is_generic;
+    if (is_generic && stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
+    {
+        size_t generic_count             = (size_t)stmt->fun_stmt.generics->count;
+        symbol->func.generic_param_count = generic_count;
+        symbol->func.generic_param_names = malloc(sizeof(char *) * generic_count);
+        if (symbol->func.generic_param_names)
         {
-            semantic_error(analyzer, stmt, "'#@symbol' is only valid for top-level methods");
-            symbol_destroy(method_symbol);
-            return false;
+            for (size_t i = 0; i < generic_count; i++)
+            {
+                AstNode    *type_param              = stmt->fun_stmt.generics->items[i];
+                const char *param_name              = type_param->type_param.name;
+                symbol->func.generic_param_names[i] = param_name ? strdup(param_name) : NULL;
+            }
         }
-        method_symbol->func.mangled_name = strdup(custom_mangle);
-        if (!method_symbol->func.mangled_name)
+    }
+    symbol->is_public   = stmt->fun_stmt.is_public;
+    symbol->module_name = ctx->module_name ? strdup(ctx->module_name) : NULL;
+    symbol->home_scope  = ctx->current_scope;
+
+    // add to current scope with mangled name
+    symbol_add(ctx->current_scope, symbol);
+
+    stmt->symbol = symbol;
+    return true;
+}
+
+// declare function
+static bool declare_fun_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    const char *name = stmt->fun_stmt.name;
+
+    // check if method - handle separately
+    if (stmt->fun_stmt.is_method)
+        return declare_method_stmt(driver, ctx, stmt);
+
+    // check if generic
+    bool is_generic = (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0);
+
+    if (is_generic)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_NOTE, stmt, ctx->file_path, "generic function '%s' registered", name);
+    }
+
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(ctx->current_scope, name);
+    if (existing)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "redefinition of function '%s'", name);
+        return false;
+    }
+
+    // create function symbol - signature resolved in pass B
+    Type   *placeholder      = type_function_create(NULL, NULL, 0, stmt->fun_stmt.is_variadic);
+    Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, placeholder, stmt);
+    symbol->func.is_external = false; // regular functions are not external
+    symbol->func.is_defined  = (stmt->fun_stmt.body != NULL);
+    symbol->func.is_generic  = is_generic;
+    if (is_generic)
+    {
+        size_t generic_count             = (size_t)stmt->fun_stmt.generics->count;
+        symbol->func.generic_param_count = generic_count;
+        symbol->func.generic_param_names = malloc(sizeof(char *) * generic_count);
+        if (symbol->func.generic_param_names)
         {
-            semantic_error(analyzer, stmt, "out of memory while applying mangle directive");
-            symbol_destroy(method_symbol);
-            semantic_mark_fatal(analyzer);
-            return false;
+            for (size_t i = 0; i < generic_count; i++)
+            {
+                AstNode    *type_param              = stmt->fun_stmt.generics->items[i];
+                const char *param_name              = type_param->type_param.name;
+                symbol->func.generic_param_names[i] = param_name ? strdup(param_name) : NULL;
+            }
         }
     }
-    else if (is_top_level)
+    symbol->is_public   = stmt->fun_stmt.is_public;
+    symbol->module_name = ctx->module_name ? strdup(ctx->module_name) : NULL;
+    symbol->home_scope  = ctx->current_scope;
+
+    symbol_add(ctx->current_scope, symbol);
+    stmt->symbol = symbol;
+    return true;
+}
+
+// declare external function
+static bool declare_ext_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    const char *name = stmt->ext_stmt.name;
+
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(ctx->current_scope, name);
+    if (existing)
     {
-        char *auto_name = semantic_build_method_mangle_name(method_symbol->module_name, target_owner_symbol->name ? target_owner_symbol->name : owner_name, method_symbol->name, receiver_is_pointer);
-        if (!auto_name)
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "redefinition of external function '%s'", name);
+        return false;
+    }
+
+    // create external function symbol - signature resolved in pass B
+    Type   *placeholder      = type_function_create(NULL, NULL, 0, false);
+    Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, placeholder, stmt);
+    symbol->func.is_external = true;
+    symbol->func.is_defined  = false; // external functions have no body
+    symbol->func.is_generic  = false;
+    symbol->is_public        = stmt->ext_stmt.is_public;
+    symbol->module_name      = ctx->module_name ? strdup(ctx->module_name) : NULL;
+    symbol->home_scope       = ctx->current_scope;
+
+    symbol_add(ctx->current_scope, symbol);
+    stmt->symbol = symbol;
+    return true;
+}
+
+// declare global variable
+static bool declare_var_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    const char *name = stmt->var_stmt.name;
+
+    // check for redefinition
+    Symbol *existing = symbol_lookup_scope(ctx->current_scope, name);
+    if (existing)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "redefinition of '%s'", name);
+        return false;
+    }
+
+    // create variable symbol - type resolved in pass B
+    Symbol *symbol        = symbol_create(stmt->var_stmt.is_val ? SYMBOL_VAL : SYMBOL_VAR, name, NULL, stmt);
+    symbol->var.is_global = true;
+    symbol->var.is_const  = stmt->var_stmt.is_val;
+    symbol->is_public     = stmt->var_stmt.is_public;
+    symbol->module_name   = ctx->module_name ? strdup(ctx->module_name) : NULL;
+    symbol->home_scope    = ctx->current_scope;
+
+    symbol_add(ctx->current_scope, symbol);
+    stmt->symbol = symbol;
+    return true;
+}
+
+static bool analyze_pass_a_declarations(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *root)
+{
+    if (!root || root->kind != AST_PROGRAM)
+        return false;
+
+    bool success = true;
+
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+
+        switch (stmt->kind)
         {
-            semantic_error(analyzer, stmt, "out of memory while generating method symbol name");
-            symbol_destroy(method_symbol);
-            semantic_mark_fatal(analyzer);
-            return false;
+        case AST_STMT_DEF:
+            if (!declare_def_stmt(driver, ctx, stmt))
+                success = false;
+            break;
+
+        case AST_STMT_STR:
+            if (!declare_str_stmt(driver, ctx, stmt))
+                success = false;
+            break;
+
+        case AST_STMT_UNI:
+            if (!declare_uni_stmt(driver, ctx, stmt))
+                success = false;
+            break;
+
+        case AST_STMT_FUN:
+            if (!declare_fun_stmt(driver, ctx, stmt))
+                success = false;
+            break;
+
+        case AST_STMT_EXT:
+            if (!declare_ext_stmt(driver, ctx, stmt))
+                success = false;
+            break;
+
+        case AST_STMT_VAL:
+        case AST_STMT_VAR:
+            if (!declare_var_stmt(driver, ctx, stmt))
+                success = false;
+            break;
+
+        case AST_STMT_USE:
+            // defer use statement processing until after Pass A
+            // this prevents infinite recursion during module loading
+            break;
+
+        default:
+            break;
         }
-        method_symbol->func.mangled_name = auto_name;
     }
-
-    type_add_method(target_owner_symbol, method_symbol);
-
-    stmt->symbol = method_symbol;
-    stmt->type   = func_type;
-
-    if (!stmt->fun_stmt.body)
-    {
-        return true;
-    }
-
-    Scope *func_scope = scope_push(&analyzer->symbol_table, stmt->fun_stmt.name);
-
-    if (stmt->fun_stmt.params)
-    {
-        size_t param_index = 0;
-        for (int i = 0; i < stmt->fun_stmt.params->count; i++)
-        {
-            AstNode *param = stmt->fun_stmt.params->items[i];
-            if (param->param_stmt.is_variadic)
-                continue;
-            Symbol *param_symbol      = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param->type, param);
-            param_symbol->param.index = param_index++;
-            symbol_add(func_scope, param_symbol);
-            param->symbol = param_symbol;
-        }
-    }
-
-    AstNode *previous_function = analyzer->current_function;
-    analyzer->current_function = stmt;
-
-    bool success = semantic_analyze_stmt(analyzer, stmt->fun_stmt.body);
-
-    if (return_type && !stmt_has_return(stmt->fun_stmt.body))
-    {
-        semantic_error(analyzer, stmt, "method '%s' with return type must have a return statement", stmt->fun_stmt.name);
-        success = false;
-    }
-
-    analyzer->current_function = previous_function;
-    scope_pop(&analyzer->symbol_table);
 
     return success;
 }
 
-bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+// resolve struct fields
+static bool resolve_str_fields(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
 {
-    if (stmt->fun_stmt.is_method)
+    if (!stmt->symbol || !stmt->symbol->type || stmt->symbol->type->kind != TYPE_STRUCT)
+        return false;
+
+    Type *struct_type = stmt->symbol->type;
+
+    if (!stmt->str_stmt.fields || stmt->str_stmt.fields->count == 0)
+        return true; // empty struct is valid
+
+    Symbol *field_list_head = NULL;
+    Symbol *field_list_tail = NULL;
+    size_t  field_count     = 0;
+    size_t  offset          = 0;
+    size_t  max_alignment   = 1;
+
+    for (int i = 0; i < stmt->str_stmt.fields->count; i++)
     {
-        return semantic_analyze_method_fun_stmt(analyzer, stmt);
+        AstNode *field_node = stmt->str_stmt.fields->items[i];
+        if (field_node->kind != AST_STMT_FIELD)
+            continue;
+
+        const char *field_name = field_node->field_stmt.name;
+        Type       *field_type = resolve_type_in_context(driver, ctx, field_node->field_stmt.type);
+
+        if (!field_type)
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, field_node, ctx->file_path, "cannot resolve type for field '%s'", field_name);
+            return false;
+        }
+
+        // create field symbol
+        Symbol *field_sym = symbol_create(SYMBOL_FIELD, field_name, field_type, field_node);
+
+        // calculate offset with alignment
+        size_t field_align = type_alignof(field_type);
+        if (field_align > 0)
+        {
+            size_t remainder = offset % field_align;
+            if (remainder != 0)
+                offset += field_align - remainder;
+        }
+        field_sym->field.offset = offset;
+
+        // link to list
+        if (!field_list_head)
+        {
+            field_list_head = field_list_tail = field_sym;
+        }
+        else
+        {
+            field_list_tail->next = field_sym;
+            field_list_tail       = field_sym;
+        }
+
+        offset += type_sizeof(field_type);
+        if (field_align > max_alignment)
+            max_alignment = field_align;
+        field_count++;
+
+        field_node->symbol = field_sym;
+        field_node->type   = field_type;
     }
 
-    if (stmt->symbol && stmt->symbol->kind == SYMBOL_FUNC && stmt->symbol->func.is_specialized_instance)
+    // align final struct size
+    if (max_alignment > 0)
     {
-        return true;
+        size_t remainder = offset % max_alignment;
+        if (remainder != 0)
+            offset += max_alignment - remainder;
     }
 
-    if (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
+    struct_type->composite.fields      = field_list_head;
+    struct_type->composite.field_count = field_count;
+    struct_type->size                  = offset;
+    struct_type->alignment             = max_alignment;
+
+    return true;
+}
+
+// resolve union variants
+static bool resolve_uni_fields(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    if (!stmt->symbol || !stmt->symbol->type || stmt->symbol->type->kind != TYPE_UNION)
+        return false;
+
+    Type *union_type = stmt->symbol->type;
+
+    if (!stmt->uni_stmt.fields || stmt->uni_stmt.fields->count == 0)
+        return true; // empty union is valid
+
+    Symbol *field_list_head = NULL;
+    Symbol *field_list_tail = NULL;
+    size_t  field_count     = 0;
+    size_t  max_size        = 0;
+    size_t  max_alignment   = 1;
+
+    for (int i = 0; i < stmt->uni_stmt.fields->count; i++)
     {
-        return semantic_register_generic_fun_stmt(analyzer, stmt);
+        AstNode *field_node = stmt->uni_stmt.fields->items[i];
+        if (field_node->kind != AST_STMT_FIELD)
+            continue;
+
+        const char *field_name = field_node->field_stmt.name;
+        Type       *field_type = resolve_type_in_context(driver, ctx, field_node->field_stmt.type);
+
+        if (!field_type)
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, field_node, ctx->file_path, "cannot resolve type for field '%s'", field_name);
+            return false;
+        }
+
+        // create field symbol (all at offset 0 in union)
+        Symbol *field_sym       = symbol_create(SYMBOL_FIELD, field_name, field_type, field_node);
+        field_sym->field.offset = 0;
+
+        // link to list
+        if (!field_list_head)
+        {
+            field_list_head = field_list_tail = field_sym;
+        }
+        else
+        {
+            field_list_tail->next = field_sym;
+            field_list_tail       = field_sym;
+        }
+
+        size_t field_size  = type_sizeof(field_type);
+        size_t field_align = type_alignof(field_type);
+
+        if (field_size > max_size)
+            max_size = field_size;
+        if (field_align > max_alignment)
+            max_alignment = field_align;
+        field_count++;
+
+        field_node->symbol = field_sym;
+        field_node->type   = field_type;
     }
 
-    const char *name = stmt->fun_stmt.name;
+    // align final union size
+    if (max_alignment > 0)
+    {
+        size_t remainder = max_size % max_alignment;
+        if (remainder != 0)
+            max_size += max_alignment - remainder;
+    }
+
+    union_type->composite.fields      = field_list_head;
+    union_type->composite.field_count = field_count;
+    union_type->size                  = max_size;
+    union_type->alignment             = max_alignment;
+
+    return true;
+}
+
+// resolve function signature
+static bool resolve_fun_signature(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    if (!stmt->symbol || stmt->symbol->kind != SYMBOL_FUNC)
+        return false;
 
     // resolve return type
     Type *return_type = NULL;
     if (stmt->fun_stmt.return_type)
     {
-        return_type = resolve_type(analyzer, stmt->fun_stmt.return_type);
+        return_type = resolve_type_in_context(driver, ctx, stmt->fun_stmt.return_type);
         if (!return_type)
         {
-            semantic_error(analyzer, stmt, "cannot resolve return type for function '%s'", name);
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "cannot resolve return type for function '%s'", stmt->fun_stmt.name);
             return false;
         }
     }
 
-    // resolve parameter types
-    size_t original_param_nodes = stmt->fun_stmt.params ? stmt->fun_stmt.params->count : 0;
-    size_t fixed_param_count    = 0;
-    // first pass: count fixed params (ignore variadic sentinel)
-    for (size_t i = 0; i < original_param_nodes; i++)
-    {
-        AstNode *param = stmt->fun_stmt.params->items[i];
-        if (!param->param_stmt.is_variadic)
-            fixed_param_count++;
-    }
-
+    // resolve parameters
+    size_t param_count = stmt->fun_stmt.params ? stmt->fun_stmt.params->count : 0;
     Type **param_types = NULL;
-    if (fixed_param_count > 0)
-        param_types = malloc(sizeof(Type *) * fixed_param_count);
 
-    size_t idx = 0;
-    for (size_t i = 0; i < original_param_nodes; i++)
+    if (param_count > 0)
     {
-        AstNode *param = stmt->fun_stmt.params->items[i];
-        if (param->param_stmt.is_variadic)
-            continue;
-        param_types[idx] = resolve_type(analyzer, param->param_stmt.type);
-        if (!param_types[idx])
-        {
-            semantic_error(analyzer, param, "cannot resolve type for parameter '%s'", param->param_stmt.name);
-            free(param_types);
-            return false;
-        }
-        param->type = param_types[idx];
-        idx++;
-    }
+        param_types = malloc(sizeof(Type *) * param_count);
 
-    size_t param_count = fixed_param_count;
-
-    bool  is_variadic = stmt->fun_stmt.is_variadic;
-    Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
-    free(param_types);
-
-    // check for existing declaration
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        if (existing->kind != SYMBOL_FUNC)
+        for (size_t i = 0; i < param_count; i++)
         {
-            semantic_error(analyzer, stmt, "redefinition of '%s' as different kind", name);
-            return false;
-        }
-        if (!type_equals(existing->type, func_type))
-        {
-            semantic_error(analyzer, stmt, "conflicting types for function '%s'", name);
-            return false;
-        }
-        if (stmt->fun_stmt.body && existing->func.is_defined)
-        {
-            semantic_error(analyzer, stmt, "redefinition of function '%s'", name);
-            return false;
-        }
-        // update existing symbol
-        if (stmt->fun_stmt.body)
-        {
-            existing->func.is_defined = true;
-            existing->decl            = stmt;
-        }
-        existing->func.uses_mach_varargs = is_variadic;
-        if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
-        {
-            existing->is_public = true;
-        }
-        if (!existing->import_origin)
-            existing->import_origin = existing;
-        stmt->symbol = existing;
-        stmt->type   = func_type;
-    }
-    else
-    {
-        // create new symbol
-        Symbol *symbol           = symbol_create(SYMBOL_FUNC, name, func_type, stmt);
-        symbol->func.is_external         = false;
-        symbol->func.is_defined          = (stmt->fun_stmt.body != NULL);
-        symbol->func.uses_mach_varargs   = is_variadic;
-        symbol->import_origin            = symbol;
-        if (semantic_in_top_level_scope(analyzer) && stmt->fun_stmt.is_public)
-        {
-            symbol->is_public = true;
-        }
-        symbol_add(analyzer->symbol_table.current_scope, symbol);
-        stmt->symbol = symbol;
-        stmt->type   = func_type;
-        existing     = symbol;
-    }
-
-    Symbol *function_symbol = stmt->symbol;
-    bool    is_top_level    = semantic_in_top_level_scope(analyzer);
-
-    if (analyzer->current_module_name)
-    {
-        free(function_symbol->module_name);
-        function_symbol->module_name = strdup(analyzer->current_module_name);
-    }
-
-    const char *custom_mangle = stmt->fun_stmt.mangle_name;
-    if (custom_mangle)
-    {
-        if (!is_top_level)
-        {
-            semantic_error(analyzer, stmt, "'#@symbol' is only valid for top-level declarations");
-            return false;
-        }
-        if (function_symbol->func.mangled_name && strcmp(function_symbol->func.mangled_name, custom_mangle) != 0)
-        {
-            semantic_error(analyzer, stmt, "conflicting '#@symbol' directives for function '%s'", name);
-            return false;
-        }
-        if (!function_symbol->func.mangled_name)
-        {
-            function_symbol->func.mangled_name = strdup(custom_mangle);
-            if (!function_symbol->func.mangled_name)
+            AstNode *param = stmt->fun_stmt.params->items[i];
+            if (param->kind != AST_STMT_PARAM)
             {
-                semantic_error(analyzer, stmt, "out of memory while applying mangle directive");
-                semantic_mark_fatal(analyzer);
+                free(param_types);
                 return false;
             }
-        }
-    }
-    else if (is_top_level && !function_symbol->func.mangled_name)
-    {
-        char *auto_name = semantic_build_export_name(function_symbol->module_name, function_symbol->name);
-        if (!auto_name)
-        {
-            semantic_error(analyzer, stmt, "out of memory while generating mangled name for function '%s'", name);
-            semantic_mark_fatal(analyzer);
-            return false;
-        }
-        function_symbol->func.mangled_name = auto_name;
-    }
 
-    // analyze function body if present
-    if (stmt->fun_stmt.body)
-    {
-        // create function scope
-        Scope *func_scope = scope_push(&analyzer->symbol_table, name);
-
-        // add parameters to function scope
-        if (stmt->fun_stmt.params)
-        {
-            size_t param_index = 0;
-            for (int i = 0; i < stmt->fun_stmt.params->count; i++)
+            // skip variadic sentinel
+            if (param->param_stmt.is_variadic)
             {
-                AstNode *param = stmt->fun_stmt.params->items[i];
-                if (param->param_stmt.is_variadic)
-                    continue; // variadic sentinel has no symbol
-                Symbol *param_symbol         = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param->type, param);
-                param_symbol->param.index    = param_index++;
-                symbol_add(func_scope, param_symbol);
-                param->symbol = param_symbol;
-            }
-        }
-
-        // set current function for return type checking
-        AstNode *prev_function     = analyzer->current_function;
-        analyzer->current_function = stmt;
-
-        // analyze body
-        bool success = semantic_analyze_stmt(analyzer, stmt->fun_stmt.body);
-
-        // check for missing return
-        if (return_type && !stmt_has_return(stmt->fun_stmt.body))
-        {
-            semantic_error(analyzer, stmt, "function '%s' with return type must have a return statement", name);
-            analyzer->has_errors = true;
-            return false;
-        }
-
-        // restore previous function
-        analyzer->current_function = prev_function;
-
-        scope_pop(&analyzer->symbol_table);
-
-        return success;
-    }
-
-    return true;
-}
-
-bool semantic_analyze_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    const char *name = stmt->str_stmt.name;
-
-    // if generic, register it without analyzing fields
-    if (stmt->str_stmt.generics && stmt->str_stmt.generics->count > 0)
-    {
-        return semantic_register_generic_str_stmt(analyzer, stmt);
-    }
-
-    // check for redefinition
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        semantic_error(analyzer, stmt, "redefinition of struct '%s'", name);
-        return false;
-    }
-
-    Type   *struct_type   = type_struct_create(name);
-    Symbol *struct_symbol = symbol_create(SYMBOL_TYPE, name, struct_type, stmt);
-    struct_symbol->type_def.is_alias = false;
-    struct_symbol->type_def.is_generic = false;
-    struct_symbol->type_def.generic_param_count = 0;
-    struct_symbol->type_def.generic_param_names = NULL;
-    struct_symbol->type_def.generic_specializations = NULL;
-    struct_symbol->type_def.is_specialized_instance = false;
-    
-    if (semantic_in_top_level_scope(analyzer) && stmt->str_stmt.is_public)
-    {
-        struct_symbol->is_public = true;
-    }
-    symbol_add(analyzer->symbol_table.current_scope, struct_symbol);
-
-    // analyze fields
-    if (stmt->str_stmt.fields)
-    {
-        for (int i = 0; i < stmt->str_stmt.fields->count; i++)
-        {
-            AstNode *field      = stmt->str_stmt.fields->items[i];
-            Type    *field_type = resolve_type(analyzer, field->field_stmt.type);
-
-            if (!field_type)
-            {
-                semantic_error(analyzer, field, "cannot resolve type for field '%s'", field->field_stmt.name);
+                param_types[i] = NULL;
                 continue;
             }
 
-            symbol_add_field(struct_symbol, field->field_stmt.name, field_type, field);
-        }
-    }
-
-    // calculate layout
-    symbol_calculate_struct_layout(struct_symbol);
-
-    stmt->symbol = struct_symbol;
-    stmt->type   = struct_type;
-
-    return true;
-}
-
-bool semantic_analyze_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    const char *name = stmt->uni_stmt.name;
-
-    // if generic, register it without analyzing fields
-    if (stmt->uni_stmt.generics && stmt->uni_stmt.generics->count > 0)
-    {
-        return semantic_register_generic_uni_stmt(analyzer, stmt);
-    }
-
-    // check for redefinition
-    Symbol *existing = symbol_lookup_scope(analyzer->symbol_table.current_scope, name);
-    if (existing)
-    {
-        semantic_error(analyzer, stmt, "redefinition of union '%s'", name);
-        return false;
-    }
-
-    Type   *union_type   = type_union_create(name);
-    Symbol *union_symbol = symbol_create(SYMBOL_TYPE, name, union_type, stmt);
-    union_symbol->type_def.is_alias = false;
-    union_symbol->type_def.is_generic = false;
-    union_symbol->type_def.generic_param_count = 0;
-    union_symbol->type_def.generic_param_names = NULL;
-    union_symbol->type_def.generic_specializations = NULL;
-    union_symbol->type_def.is_specialized_instance = false;
-    
-    if (semantic_in_top_level_scope(analyzer) && stmt->uni_stmt.is_public)
-    {
-        union_symbol->is_public = true;
-    }
-    symbol_add(analyzer->symbol_table.current_scope, union_symbol);
-
-    // analyze fields
-    if (stmt->uni_stmt.fields)
-    {
-        for (int i = 0; i < stmt->uni_stmt.fields->count; i++)
-        {
-            AstNode *field      = stmt->uni_stmt.fields->items[i];
-            Type    *field_type = resolve_type(analyzer, field->field_stmt.type);
-
-            if (!field_type)
+            Type *param_type = resolve_type_in_context(driver, ctx, param->param_stmt.type);
+            if (!param_type)
             {
-                semantic_error(analyzer, field, "cannot resolve type for field '%s'", field->field_stmt.name);
-                continue;
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, param, ctx->file_path, "cannot resolve type for parameter '%s'", param->param_stmt.name);
+                free(param_types);
+                return false;
             }
 
-            symbol_add_field(union_symbol, field->field_stmt.name, field_type, field);
+            param_types[i] = param_type;
+            param->type    = param_type;
         }
     }
 
-    // calculate layout
-    symbol_calculate_union_layout(union_symbol);
+    // create function type
+    Type *func_type = type_function_create(return_type, param_types, param_count, stmt->fun_stmt.is_variadic);
+    free(param_types);
 
-    stmt->symbol = union_symbol;
-    stmt->type   = union_type;
+    // update symbol
+    stmt->symbol->type = func_type;
+    stmt->type         = func_type;
 
     return true;
 }
 
-bool semantic_analyze_if_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+// resolve external function signature
+static bool resolve_ext_signature(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
 {
-    // analyze condition
-    Type *cond_type = semantic_analyze_expr(analyzer, stmt->cond_stmt.cond);
-    if (!cond_type)
+    if (!stmt->symbol || stmt->symbol->kind != SYMBOL_FUNC)
+        return false;
+
+    // resolve return type from ext_stmt.type (full function type)
+    Type *func_type = resolve_type_in_context(driver, ctx, stmt->ext_stmt.type);
+    if (!func_type || func_type->kind != TYPE_FUNCTION)
     {
-        semantic_error(analyzer, stmt, "invalid condition in if statement");
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "invalid type for external function '%s'", stmt->ext_stmt.name);
         return false;
     }
 
-    // condition must evaluate to the mach boolean (u8)
-    if (!type_is_truthy(cond_type))
-    {
-        semantic_error(analyzer, stmt, "condition must be of type u8");
-        return false;
-    }
-
-    // analyze body
-    bool success = semantic_analyze_stmt(analyzer, stmt->cond_stmt.body);
-
-    // analyze or clause if present
-    if (stmt->cond_stmt.stmt_or)
-    {
-        success &= semantic_analyze_stmt(analyzer, stmt->cond_stmt.stmt_or);
-    }
-
-    return success;
-}
-
-bool semantic_analyze_or_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    bool success = true;
-
-    // else-branch: 'or { ... }' has no condition
-    if (stmt->cond_stmt.cond)
-    {
-        Type *cond_type = semantic_analyze_expr(analyzer, stmt->cond_stmt.cond);
-        if (!cond_type)
-        {
-            semantic_error(analyzer, stmt, "invalid condition in or statement");
-            success = false;
-        }
-        else if (!type_is_truthy(cond_type))
-        {
-            semantic_error(analyzer, stmt, "condition must be of type u8");
-            success = false;
-        }
-    }
-
-    // analyze body
-    if (success)
-    {
-        success &= semantic_analyze_stmt(analyzer, stmt->cond_stmt.body);
-    }
-    else
-    {
-        // even if condition failed, attempt to analyze body to surface nested errors
-        semantic_analyze_stmt(analyzer, stmt->cond_stmt.body);
-    }
-
-    if (stmt->cond_stmt.stmt_or)
-    {
-        if (!semantic_analyze_stmt(analyzer, stmt->cond_stmt.stmt_or))
-        {
-            success = false;
-        }
-    }
-
-    return success;
-}
-
-bool semantic_analyze_for_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    bool success = true;
-
-    // analyze condition if present
-    if (stmt->for_stmt.cond)
-    {
-        Type *cond_type = semantic_analyze_expr(analyzer, stmt->for_stmt.cond);
-        if (!cond_type)
-        {
-            semantic_error(analyzer, stmt, "invalid condition in for loop");
-            success = false;
-        }
-        else if (!type_is_truthy(cond_type))
-        {
-            semantic_error(analyzer, stmt, "loop condition must be of type u8");
-            success = false;
-        }
-    }
-
-    // enter loop context
-    analyzer->loop_depth++;
-
-    // analyze body
-    success &= semantic_analyze_stmt(analyzer, stmt->for_stmt.body);
-
-    // exit loop context
-    analyzer->loop_depth--;
-
-    return success;
-}
-
-bool semantic_analyze_ret_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
-{
-    if (!analyzer->current_function)
-    {
-        semantic_error(analyzer, stmt, "return statement outside function");
-        return false;
-    }
-
-    Type *expected_return = analyzer->current_function->type->function.return_type;
-
-    if (stmt->ret_stmt.expr)
-    {
-        // use expected return type as hint for better literal inference
-        if (expected_return == NULL)
-        {
-            semantic_error(analyzer, stmt, "cannot return a value from a void function");
-            return false;
-        }
-        Type *actual_return = semantic_analyze_expr_with_hint(analyzer, stmt->ret_stmt.expr, expected_return);
-        if (!actual_return)
-        {
-            semantic_error(analyzer, stmt, "invalid return expression");
-            return false;
-        }
-
-        if (!semantic_check_assignment(analyzer, expected_return, actual_return, stmt))
-        {
-            return false;
-        }
-    }
-    else
-    {
-        // no return expression
-        if (expected_return != NULL)
-        {
-            semantic_error(analyzer, stmt, "function must return a value");
-            return false;
-        }
-    }
+    stmt->symbol->type = func_type;
+    stmt->type         = func_type;
 
     return true;
 }
 
-bool semantic_analyze_block_stmt(SemanticAnalyzer *analyzer, AstNode *stmt)
+// resolve variable type
+static bool resolve_var_type(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
 {
-    // create new scope for block
-    scope_push(&analyzer->symbol_table, "block");
+    if (!stmt->symbol)
+        return false;
+
+    Type *var_type = NULL;
+
+    // explicit type annotation
+    if (stmt->var_stmt.type)
+    {
+        var_type = resolve_type_in_context(driver, ctx, stmt->var_stmt.type);
+        if (!var_type)
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "cannot resolve type for '%s'", stmt->var_stmt.name);
+            return false;
+        }
+    }
+    else if (stmt->var_stmt.init)
+    {
+        // type inference from initializer - defer to pass C
+        // for now, require explicit types
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "type inference not yet implemented for '%s'", stmt->var_stmt.name);
+        return false;
+    }
+    else
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "variable '%s' must have explicit type or initializer", stmt->var_stmt.name);
+        return false;
+    }
+
+    stmt->symbol->type = var_type;
+    stmt->type         = var_type;
+
+    return true;
+}
+
+static bool analyze_pass_b_signatures(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *root)
+{
+    if (!root || root->kind != AST_PROGRAM)
+        return false;
 
     bool success = true;
-    if (stmt->block_stmt.stmts)
+
+    // resolve type aliases
+    for (int i = 0; i < root->program.stmts->count; i++)
     {
-        for (int i = 0; i < stmt->block_stmt.stmts->count; i++)
+        AstNode *stmt = root->program.stmts->items[i];
+
+        if (stmt->kind == AST_STMT_DEF && stmt->symbol)
         {
-            if (!semantic_analyze_stmt(analyzer, stmt->block_stmt.stmts->items[i]))
+            Type *resolved = resolve_type_in_context(driver, ctx, stmt->def_stmt.type);
+            if (resolved)
+            {
+                stmt->symbol->type->alias.target = resolved;
+                stmt->type                       = resolved;
+            }
+            else
             {
                 success = false;
             }
         }
     }
 
-    scope_pop(&analyzer->symbol_table);
+    // resolve struct fields
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+
+        if (stmt->kind == AST_STMT_STR && stmt->symbol && !stmt->symbol->type_def.is_generic)
+        {
+            if (!resolve_str_fields(driver, ctx, stmt))
+                success = false;
+        }
+    }
+
+    // resolve union fields
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+
+        if (stmt->kind == AST_STMT_UNI && stmt->symbol && !stmt->symbol->type_def.is_generic)
+        {
+            if (!resolve_uni_fields(driver, ctx, stmt))
+                success = false;
+        }
+    }
+
+    // resolve function signatures
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+
+        if (stmt->kind == AST_STMT_FUN && stmt->symbol && !stmt->symbol->func.is_generic)
+        {
+            // handle both regular functions and methods
+            if (!resolve_fun_signature(driver, ctx, stmt))
+                success = false;
+        }
+
+        // also handle external functions
+        if (stmt->kind == AST_STMT_EXT && stmt->symbol)
+        {
+            if (!resolve_ext_signature(driver, ctx, stmt))
+                success = false;
+        }
+    }
+
+    // resolve variable types
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+
+        if ((stmt->kind == AST_STMT_VAL || stmt->kind == AST_STMT_VAR) && stmt->symbol)
+        {
+            if (!resolve_var_type(driver, ctx, stmt))
+                success = false;
+        }
+    }
 
     return success;
 }
 
-// continue with expression analysis in next part due to length...
-
-Type *semantic_analyze_expr(SemanticAnalyzer *analyzer, AstNode *expr)
+// instantiate generic struct
+static Symbol *instantiate_generic_struct(SemanticDriver *driver, const AnalysisContext *ctx, Symbol *generic_sym, Type **type_args, size_t arg_count)
 {
-    return semantic_analyze_expr_with_hint(analyzer, expr, NULL);
-}
+    if (!generic_sym || !generic_sym->decl || arg_count == 0)
+        return NULL;
 
-static Type *type_promote_binary(Type *left, Type *right)
-{
-    // if either is float, promote to float
-    if (type_is_float(left) || type_is_float(right))
+    Symbol *origin_sym = generic_sym->import_origin ? generic_sym->import_origin : generic_sym;
+    generic_sym        = origin_sym;
+
+    // check cache first
+    Symbol *cached = specialization_cache_find(&driver->spec_cache, generic_sym, type_args, arg_count);
+    if (cached)
+        return cached;
+
+    // create specialized type name
+    const char *module_name      = generic_sym->module_name ? generic_sym->module_name : ctx->module_name;
+    char       *specialized_name = mangle_generic_type(module_name, generic_sym->name, type_args, arg_count);
+    if (!specialized_name)
+        return NULL;
+
+    // create specialized struct type
+    Type   *specialized_type             = type_struct_create(specialized_name);
+    Symbol *specialized_sym              = symbol_create(SYMBOL_TYPE, specialized_name, specialized_type, generic_sym->decl);
+    specialized_sym->type_def.is_alias   = false;
+    specialized_sym->type_def.is_generic = false;
+    specialized_sym->is_public           = generic_sym->is_public;
+    specialized_sym->module_name         = module_name ? strdup(module_name) : NULL;
+    specialized_sym->home_scope          = generic_sym->home_scope;
+
+    // build binding context from type parameters
+    AstNode          *generic_decl = generic_sym->decl;
+    GenericBindingCtx bindings     = ctx->bindings;
+
+    if (generic_decl->kind == AST_STMT_STR && generic_decl->str_stmt.generics)
     {
-        if (left->kind == TYPE_F64 || right->kind == TYPE_F64)
-            return type_f64();
-        if (left->kind == TYPE_F32 || right->kind == TYPE_F32)
-            return type_f32();
-        return type_f16();
+        for (size_t i = 0; i < arg_count && i < (size_t)generic_decl->str_stmt.generics->count; i++)
+        {
+            AstNode    *param      = generic_decl->str_stmt.generics->items[i];
+            const char *param_name = param->type_param.name;
+            bindings               = generic_binding_ctx_push(&bindings, param_name, type_args[i]);
+        }
     }
 
-    // both are integers - promote to larger/signed
-    if (type_is_signed(left) || type_is_signed(right))
+    // create context with bindings
+    AnalysisContext specialized_ctx = *ctx;
+    specialized_ctx.bindings        = bindings;
+    if (generic_sym->home_scope)
     {
-        // at least one is signed
-        if (left->size >= right->size)
-            return type_is_signed(left) ? left : right;
-        else
-            return type_is_signed(right) ? right : left;
+        specialized_ctx.current_scope = generic_sym->home_scope;
+        specialized_ctx.module_scope  = generic_sym->home_scope;
+    }
+    specialized_ctx.module_name = module_name;
+    if (generic_sym->home_scope)
+    {
+        specialized_ctx.current_scope = generic_sym->home_scope;
+        specialized_ctx.module_scope  = generic_sym->home_scope;
+    }
+    specialized_ctx.module_name = module_name;
+    if (generic_sym->module_name)
+        specialized_ctx.module_name = generic_sym->module_name;
+
+    // resolve fields with specialized context
+    if (generic_decl->str_stmt.fields)
+    {
+        Symbol *field_head  = NULL;
+        Symbol *field_tail  = NULL;
+        size_t  offset      = 0;
+        size_t  max_align   = 1;
+        size_t  field_count = 0;
+
+        for (int i = 0; i < generic_decl->str_stmt.fields->count; i++)
+        {
+            AstNode *field_node = generic_decl->str_stmt.fields->items[i];
+            Type    *field_type = resolve_type_in_context(driver, &specialized_ctx, field_node->field_stmt.type);
+
+            if (!field_type)
+            {
+                free(specialized_name);
+                return NULL;
+            }
+
+            Symbol *field_sym = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+
+            size_t field_align = type_alignof(field_type);
+            if (field_align > 0)
+            {
+                size_t remainder = offset % field_align;
+                if (remainder != 0)
+                    offset += field_align - remainder;
+            }
+            field_sym->field.offset = offset;
+
+            if (!field_head)
+                field_head = field_tail = field_sym;
+            else
+            {
+                field_tail->next = field_sym;
+                field_tail       = field_sym;
+            }
+
+            offset += type_sizeof(field_type);
+            if (field_align > max_align)
+                max_align = field_align;
+            field_count++;
+        }
+
+        if (max_align > 0)
+        {
+            size_t remainder = offset % max_align;
+            if (remainder != 0)
+                offset += max_align - remainder;
+        }
+
+        specialized_type->composite.fields      = field_head;
+        specialized_type->composite.field_count = field_count;
+        specialized_type->size                  = offset;
+        specialized_type->alignment             = max_align;
     }
 
-    // both unsigned - use larger
-    return left->size >= right->size ? left : right;
+    // cache the specialization
+    specialization_cache_insert(&driver->spec_cache, generic_sym, type_args, arg_count, specialized_sym);
+
+    free(specialized_name);
+    return specialized_sym;
 }
 
-static bool is_lvalue(AstNode *expr)
+// instantiate generic union
+static Symbol *instantiate_generic_union(SemanticDriver *driver, const AnalysisContext *ctx, Symbol *generic_sym, Type **type_args, size_t arg_count)
+{
+    if (!generic_sym || !generic_sym->decl || arg_count == 0)
+        return NULL;
+
+    Symbol *origin_sym = generic_sym->import_origin ? generic_sym->import_origin : generic_sym;
+    generic_sym        = origin_sym;
+
+    // check cache first
+    Symbol *cached = specialization_cache_find(&driver->spec_cache, generic_sym, type_args, arg_count);
+    if (cached)
+        return cached;
+
+    // create specialized type name
+    const char *module_name      = generic_sym->module_name ? generic_sym->module_name : ctx->module_name;
+    char       *specialized_name = mangle_generic_type(module_name, generic_sym->name, type_args, arg_count);
+    if (!specialized_name)
+        return NULL;
+
+    // create specialized union type
+    Type   *specialized_type             = type_union_create(specialized_name);
+    Symbol *specialized_sym              = symbol_create(SYMBOL_TYPE, specialized_name, specialized_type, generic_sym->decl);
+    specialized_sym->type_def.is_alias   = false;
+    specialized_sym->type_def.is_generic = false;
+    specialized_sym->is_public           = generic_sym->is_public;
+    specialized_sym->module_name         = module_name ? strdup(module_name) : NULL;
+    specialized_sym->home_scope          = generic_sym->home_scope;
+
+    // build binding context
+    AstNode          *generic_decl = generic_sym->decl;
+    GenericBindingCtx bindings     = ctx->bindings;
+
+    if (generic_decl->kind == AST_STMT_UNI && generic_decl->uni_stmt.generics)
+    {
+        for (size_t i = 0; i < arg_count && i < (size_t)generic_decl->uni_stmt.generics->count; i++)
+        {
+            AstNode    *param      = generic_decl->uni_stmt.generics->items[i];
+            const char *param_name = param->type_param.name;
+            bindings               = generic_binding_ctx_push(&bindings, param_name, type_args[i]);
+        }
+    }
+
+    AnalysisContext specialized_ctx = *ctx;
+    specialized_ctx.bindings        = bindings;
+    if (generic_sym->home_scope)
+    {
+        specialized_ctx.current_scope = generic_sym->home_scope;
+        specialized_ctx.module_scope  = generic_sym->home_scope;
+    }
+
+    // resolve variants with specialized context
+    if (generic_decl->uni_stmt.fields)
+    {
+        Symbol *field_head  = NULL;
+        Symbol *field_tail  = NULL;
+        size_t  max_size    = 0;
+        size_t  max_align   = 1;
+        size_t  field_count = 0;
+
+        for (int i = 0; i < generic_decl->uni_stmt.fields->count; i++)
+        {
+            AstNode *field_node = generic_decl->uni_stmt.fields->items[i];
+            Type    *field_type = resolve_type_in_context(driver, &specialized_ctx, field_node->field_stmt.type);
+
+            if (!field_type)
+            {
+                free(specialized_name);
+                return NULL;
+            }
+
+            Symbol *field_sym       = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+            field_sym->field.offset = 0;
+
+            if (!field_head)
+                field_head = field_tail = field_sym;
+            else
+            {
+                field_tail->next = field_sym;
+                field_tail       = field_sym;
+            }
+
+            size_t field_size  = type_sizeof(field_type);
+            size_t field_align = type_alignof(field_type);
+
+            if (field_size > max_size)
+                max_size = field_size;
+            if (field_align > max_align)
+                max_align = field_align;
+            field_count++;
+        }
+
+        if (max_align > 0)
+        {
+            size_t remainder = max_size % max_align;
+            if (remainder != 0)
+                max_size += max_align - remainder;
+        }
+
+        specialized_type->composite.fields      = field_head;
+        specialized_type->composite.field_count = field_count;
+        specialized_type->size                  = max_size;
+        specialized_type->alignment             = max_align;
+    }
+
+    // cache the specialization
+    specialization_cache_insert(&driver->spec_cache, generic_sym, type_args, arg_count, specialized_sym);
+
+    free(specialized_name);
+    return specialized_sym;
+}
+
+// instantiate generic function
+static Symbol *instantiate_generic_function(SemanticDriver *driver, const AnalysisContext *ctx, Symbol *generic_sym, Type **type_args, size_t arg_count)
+{
+    if (!generic_sym || !generic_sym->decl || arg_count == 0)
+        return NULL;
+
+    Symbol *origin_sym = generic_sym->import_origin ? generic_sym->import_origin : generic_sym;
+    generic_sym        = origin_sym;
+
+    // check cache first
+    Symbol *cached = specialization_cache_find(&driver->spec_cache, generic_sym, type_args, arg_count);
+    if (cached)
+        return cached;
+
+    // create specialized function name
+    const char *module_name      = generic_sym->module_name ? generic_sym->module_name : ctx->module_name;
+    char       *specialized_name = mangle_generic_function(module_name, generic_sym->name, type_args, arg_count);
+    if (!specialized_name)
+        return NULL;
+
+    // build binding context
+    AstNode          *generic_decl = generic_sym->decl;
+    GenericBindingCtx bindings     = ctx->bindings;
+
+    if (generic_decl->kind == AST_STMT_FUN && generic_decl->fun_stmt.generics)
+    {
+        for (size_t i = 0; i < arg_count && i < (size_t)generic_decl->fun_stmt.generics->count; i++)
+        {
+            AstNode    *param      = generic_decl->fun_stmt.generics->items[i];
+            const char *param_name = param->type_param.name;
+            bindings               = generic_binding_ctx_push(&bindings, param_name, type_args[i]);
+        }
+    }
+
+    AnalysisContext specialized_ctx = *ctx;
+    specialized_ctx.bindings        = bindings;
+    if (generic_sym->home_scope)
+    {
+        specialized_ctx.current_scope = generic_sym->home_scope;
+        specialized_ctx.module_scope  = generic_sym->home_scope;
+    }
+    specialized_ctx.module_name = module_name;
+
+    // resolve return type
+    Type *ret_type = NULL;
+    if (generic_decl->fun_stmt.return_type)
+    {
+        ret_type = resolve_type_in_context(driver, &specialized_ctx, generic_decl->fun_stmt.return_type);
+        if (!ret_type)
+        {
+            free(specialized_name);
+            return NULL;
+        }
+    }
+
+    // resolve parameters
+    size_t param_count = generic_decl->fun_stmt.params ? generic_decl->fun_stmt.params->count : 0;
+    Type **param_types = NULL;
+
+    if (param_count > 0)
+    {
+        param_types = malloc(sizeof(Type *) * param_count);
+        for (size_t i = 0; i < param_count; i++)
+        {
+            AstNode *param = generic_decl->fun_stmt.params->items[i];
+            if (param->param_stmt.is_variadic)
+            {
+                param_types[i] = NULL;
+                continue;
+            }
+
+            param_types[i] = resolve_type_in_context(driver, &specialized_ctx, param->param_stmt.type);
+            if (!param_types[i])
+            {
+                free(param_types);
+                free(specialized_name);
+                return NULL;
+            }
+        }
+    }
+
+    // create specialized function type
+    Type *func_type = type_function_create(ret_type, param_types, param_count, generic_decl->fun_stmt.is_variadic);
+    free(param_types);
+
+    // create specialized symbol
+    Symbol *specialized_sym           = symbol_create(SYMBOL_FUNC, specialized_name, func_type, generic_decl);
+    specialized_sym->func.is_external = generic_sym->func.is_external;
+    specialized_sym->func.is_defined  = generic_sym->func.is_defined;
+    specialized_sym->func.is_generic  = false;
+    specialized_sym->is_public        = generic_sym->is_public;
+    specialized_sym->module_name      = module_name ? strdup(module_name) : NULL;
+    specialized_sym->home_scope       = generic_sym->home_scope;
+
+    // cache the specialization
+    specialization_cache_insert(&driver->spec_cache, generic_sym, type_args, arg_count, specialized_sym);
+
+    // if function has body, analyze it with specialized context
+    if (generic_decl->fun_stmt.body && generic_sym->func.is_defined)
+    {
+        // create temporary AST node for specialized function (reuse generic_decl but with specialized symbol)
+        AstNode specialized_decl = *generic_decl;
+        specialized_decl.symbol  = specialized_sym;
+
+        if (!analyze_function_body(driver, &specialized_ctx, &specialized_decl))
+        {
+            free(specialized_name);
+            return NULL; // body analysis failed
+        }
+    }
+
+    free(specialized_name);
+    return specialized_sym;
+}
+
+// process instantiation queue
+static bool process_instantiation_queue(SemanticDriver *driver, const AnalysisContext *ctx)
+{
+    bool         success        = true;
+    size_t       iterations     = 0;
+    const size_t max_iterations = 1000; // prevent infinite loops
+
+    while (driver->inst_queue.count > 0 && iterations < max_iterations)
+    {
+        InstantiationRequest *req = instantiation_queue_pop(&driver->inst_queue);
+        if (!req)
+            break;
+
+        Symbol *specialized = NULL;
+
+        switch (req->kind)
+        {
+        case INST_STRUCT:
+            specialized = instantiate_generic_struct(driver, ctx, req->generic_symbol, req->type_args, req->type_arg_count);
+            break;
+
+        case INST_UNION:
+            specialized = instantiate_generic_union(driver, ctx, req->generic_symbol, req->type_args, req->type_arg_count);
+            break;
+
+        case INST_FUNCTION:
+            specialized = instantiate_generic_function(driver, ctx, req->generic_symbol, req->type_args, req->type_arg_count);
+            break;
+        }
+
+        if (!specialized)
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, req->call_site, ctx->file_path, "failed to instantiate generic");
+            success = false;
+        }
+
+        // clean up request
+        free(req->type_args);
+        free(req);
+
+        iterations++;
+    }
+
+    if (iterations >= max_iterations)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, ctx->file_path, "generic instantiation exceeded maximum depth (possible infinite recursion)");
+        success = false;
+    }
+
+    return success;
+}
+
+// helper to request instantiation for type node with generic args
+static Symbol *request_generic_type_instantiation(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *type_node)
+{
+    if (!type_node || type_node->kind != AST_TYPE_NAME)
+        return NULL;
+
+    if (!type_node->type_name.generic_args || type_node->type_name.generic_args->count == 0)
+        return NULL;
+
+    // look up base generic symbol
+    Symbol *generic_sym = symbol_lookup_scope(ctx->current_scope, type_node->type_name.name);
+    if (!generic_sym)
+        generic_sym = symbol_lookup_scope(ctx->module_scope, type_node->type_name.name);
+    if (!generic_sym)
+        generic_sym = symbol_lookup_scope(ctx->global_scope, type_node->type_name.name);
+
+    if (!generic_sym || generic_sym->kind != SYMBOL_TYPE)
+        return NULL;
+
+    if (generic_sym->import_origin)
+        generic_sym = generic_sym->import_origin;
+
+    Symbol *origin_sym = generic_sym->import_origin ? generic_sym->import_origin : generic_sym;
+    generic_sym        = origin_sym;
+
+    // resolve type arguments
+    size_t arg_count = type_node->type_name.generic_args->count;
+    Type **type_args = malloc(sizeof(Type *) * arg_count);
+
+    for (size_t i = 0; i < arg_count; i++)
+    {
+        type_args[i] = resolve_type_in_context(driver, ctx, type_node->type_name.generic_args->items[i]);
+        if (!type_args[i])
+        {
+            free(type_args);
+            return NULL;
+        }
+    }
+
+    // check if already specialized
+    Symbol *specialized = specialization_cache_find(&driver->spec_cache, generic_sym, type_args, arg_count);
+    if (specialized)
+    {
+        free(type_args);
+        return specialized;
+    }
+
+    // determine kind and instantiate immediately (synchronous for types)
+    InstantiationKind kind = INST_STRUCT;
+    if (generic_sym->type && generic_sym->type->kind == TYPE_UNION)
+        kind = INST_UNION;
+
+    if (kind == INST_STRUCT)
+        specialized = instantiate_generic_struct(driver, ctx, generic_sym, type_args, arg_count);
+    else
+        specialized = instantiate_generic_union(driver, ctx, generic_sym, type_args, arg_count);
+
+    free(type_args);
+    return specialized;
+}
+
+// forward declarations for mutual recursion
+static Type *analyze_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr);
+static bool  analyze_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt);
+
+// expression analysis
+static bool integer_fits_in_type(unsigned long long value, Type *type)
+{
+    if (!type)
+        return false;
+
+    switch (type->kind)
+    {
+    case TYPE_U8:
+        return value <= UINT8_MAX;
+    case TYPE_U16:
+        return value <= UINT16_MAX;
+    case TYPE_U32:
+        return value <= UINT32_MAX;
+    case TYPE_U64:
+        return true;
+    case TYPE_I8:
+        return value <= (unsigned long long)INT8_MAX;
+    case TYPE_I16:
+        return value <= (unsigned long long)INT16_MAX;
+    case TYPE_I32:
+        return value <= (unsigned long long)INT32_MAX;
+    case TYPE_I64:
+        return value <= (unsigned long long)INT64_MAX;
+    default:
+        return false;
+    }
+}
+
+static Type *analyze_lit_expr_with_hint(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr, Type *expected)
+{
+    (void)driver;
+    (void)ctx;
+
+    Type *resolved_expected = expected ? type_resolve_alias(expected) : NULL;
+
+    switch (expr->lit_expr.kind)
+    {
+    case TOKEN_LIT_INT:
+    {
+        unsigned long long value = expr->lit_expr.int_val;
+
+        if (resolved_expected)
+        {
+            if (type_is_pointer_like(resolved_expected) && value == 0)
+            {
+                expr->type = expected;
+                return expr->type;
+            }
+
+            if (type_is_integer(resolved_expected) && integer_fits_in_type(value, resolved_expected))
+            {
+                expr->type = expected;
+                return expr->type;
+            }
+        }
+
+        // fall back to default integer size (i32)
+        expr->type = type_i32();
+        return expr->type;
+    }
+    case TOKEN_LIT_FLOAT:
+        if (resolved_expected && type_is_float(resolved_expected))
+        {
+            expr->type = expected;
+            return expr->type;
+        }
+        expr->type = type_f64();
+        return expr->type;
+    case TOKEN_LIT_CHAR:
+        if (resolved_expected && type_is_integer(resolved_expected) && resolved_expected->size >= type_u8()->size)
+        {
+            expr->type = expected;
+            return expr->type;
+        }
+        expr->type = type_u8();
+        return expr->type;
+    case TOKEN_LIT_STRING:
+        expr->type = type_array_create(type_u8());
+        return expr->type;
+    default:
+        return NULL;
+    }
+}
+
+// helper: lookup symbol traversing scope chain
+static Symbol *lookup_in_scope_chain(Scope *current_scope, Scope *module_scope, Scope *global_scope, const char *name)
+{
+    // traverse current scope chain (handles nested blocks)
+    for (Scope *scope = current_scope; scope; scope = scope->parent)
+    {
+        Symbol *sym = symbol_lookup_scope(scope, name);
+        if (sym)
+            return sym;
+    }
+
+    // try module scope if not already checked
+    if (module_scope && module_scope != current_scope)
+    {
+        Symbol *sym = symbol_lookup_scope(module_scope, name);
+        if (sym)
+            return sym;
+    }
+
+    // try global scope if not already checked
+    if (global_scope && global_scope != current_scope && global_scope != module_scope)
+    {
+        Symbol *sym = symbol_lookup_scope(global_scope, name);
+        if (sym)
+            return sym;
+    }
+
+    return NULL;
+}
+
+static Type *analyze_null_expr_with_hint(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr, Type *expected)
+{
+
+    Type *resolved = expected ? type_resolve_alias(expected) : NULL;
+    if (resolved)
+    {
+        if (!type_is_pointer_like(resolved))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "'nil' expects a pointer-like context");
+            return NULL;
+        }
+        expr->type = expected;
+        return expr->type;
+    }
+
+    expr->type = type_ptr();
+    return expr->type;
+}
+
+static Type *analyze_ident_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
+{
+    const char *name = expr->ident_expr.name;
+
+    Symbol *sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, name);
+
+    if (!sym)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "undefined identifier '%s'", name);
+        return NULL;
+    }
+
+    if (sym->import_origin && sym->import_origin->type)
+    {
+        sym->type = sym->import_origin->type;
+        if (!sym->has_const_i64 && sym->import_origin->has_const_i64)
+        {
+            sym->has_const_i64 = true;
+            sym->const_i64     = sym->import_origin->const_i64;
+        }
+
+        if (sym->kind == SYMBOL_FUNC)
+        {
+            sym->func.is_external                    = sym->import_origin->func.is_external;
+            sym->func.is_defined                     = sym->import_origin->func.is_defined;
+            sym->func.is_generic                     = sym->import_origin->func.is_generic;
+            sym->func.is_method                      = sym->import_origin->func.is_method;
+            sym->func.method_owner                   = sym->import_origin->func.method_owner;
+            sym->func.method_forwarded_generic_count = sym->import_origin->func.method_forwarded_generic_count;
+            sym->func.method_receiver_is_pointer     = sym->import_origin->func.method_receiver_is_pointer;
+        }
+    }
+
+    expr->symbol = sym;
+    expr->type   = sym->type;
+    return sym->type;
+}
+
+static bool is_lvalue_expr(const AstNode *expr)
 {
     if (!expr)
         return false;
@@ -4130,602 +2571,689 @@ static bool is_lvalue(AstNode *expr)
     switch (expr->kind)
     {
     case AST_EXPR_IDENT:
-        // check if it's a variable (not a function or type)
         if (expr->symbol)
         {
-            return expr->symbol->kind == SYMBOL_VAR || expr->symbol->kind == SYMBOL_VAL || expr->symbol->kind == SYMBOL_PARAM;
+            switch (expr->symbol->kind)
+            {
+            case SYMBOL_VAR:
+            case SYMBOL_VAL:
+            case SYMBOL_PARAM:
+            case SYMBOL_FIELD:
+                return true;
+            default:
+                break;
+            }
         }
         return true;
 
     case AST_EXPR_INDEX:
-        return true; // array elements are lvalues
+        return true;
 
     case AST_EXPR_FIELD:
-        return is_lvalue(expr->field_expr.object);
+        return is_lvalue_expr(expr->field_expr.object);
 
     case AST_EXPR_UNARY:
-        if (expr->unary_expr.op == TOKEN_AT)
-        {
-            return true; // *ptr is an lvalue
-        }
-        return false;
+        return expr->unary_expr.op == TOKEN_AT;
 
     default:
         return false;
     }
 }
 
-Type *semantic_analyze_binary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
+static Type *analyze_binary_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
 {
-    // for assignment, analyze left first to get the target type
-    if (expr->binary_expr.op == TOKEN_EQUAL)
-    {
-        Type *left_type = semantic_analyze_expr(analyzer, expr->binary_expr.left);
-        if (!left_type)
-            return NULL;
+    Type *left  = analyze_expr(driver, ctx, expr->binary_expr.left);
+    Type *right = analyze_expr(driver, ctx, expr->binary_expr.right);
 
-        // check if left side is an lvalue
-        if (!is_lvalue(expr->binary_expr.left))
-        {
-            semantic_error(analyzer, expr, "cannot assign to non-lvalue");
-            return NULL;
-        }
-
-        // use left type as hint for right side
-        Type *right_type = semantic_analyze_expr_with_hint(analyzer, expr->binary_expr.right, left_type);
-        if (!right_type)
-            return NULL;
-
-        if (!semantic_check_assignment(analyzer, left_type, right_type, expr))
-        {
-            return NULL;
-        }
-
-        expr->type = left_type;
-        return left_type;
-    }
-
-    // for other operations, analyze both sides with context-aware literal promotion
-    Type *left_type  = semantic_analyze_expr(analyzer, expr->binary_expr.left);
-    Type *right_type = semantic_analyze_expr(analyzer, expr->binary_expr.right);
-
-    if (!left_type || !right_type)
+    if (!left || !right)
         return NULL;
 
-    // if one operand is a literal and the other is a concrete type, promote the literal
-    bool left_is_literal  = expr->binary_expr.left->kind == AST_EXPR_LIT;
-    bool right_is_literal = expr->binary_expr.right->kind == AST_EXPR_LIT;
+    left  = type_resolve_alias(left);
+    right = type_resolve_alias(right);
 
-    if (left_is_literal && !right_is_literal && type_is_integer(left_type) && type_is_integer(right_type))
-    {
-        // re-analyze left literal with right type as hint
-        Type *promoted_left = semantic_analyze_expr_with_hint(analyzer, expr->binary_expr.left, right_type);
-        if (promoted_left)
-            left_type = promoted_left;
-    }
-    else if (right_is_literal && !left_is_literal && type_is_integer(right_type) && type_is_integer(left_type))
-    {
-        // re-analyze right literal with left type as hint
-        Type *promoted_right = semantic_analyze_expr_with_hint(analyzer, expr->binary_expr.right, left_type);
-        if (promoted_right)
-            right_type = promoted_right;
-    }
+    TokenKind op        = expr->binary_expr.op;
+    bool      left_ptr  = type_is_pointer_like(left);
+    bool      right_ptr = type_is_pointer_like(right);
 
-    // determine result type based on operation
-    Type *result_type = NULL;
-    switch (expr->binary_expr.op)
+    if ((op == TOKEN_PLUS || op == TOKEN_MINUS) && (left_ptr || right_ptr))
     {
-    case TOKEN_EQUAL_EQUAL:
-    case TOKEN_BANG_EQUAL:
-    case TOKEN_LESS:
-    case TOKEN_LESS_EQUAL:
-    case TOKEN_GREATER:
-    case TOKEN_GREATER_EQUAL:
-    case TOKEN_AMPERSAND_AMPERSAND:
-    case TOKEN_PIPE_PIPE:
-        // comparison/logical operators return u8 (bool)
-        result_type = type_u8();
-        break;
-
-    case TOKEN_PLUS:
-    case TOKEN_MINUS:
-        // pointer arithmetic
-        if (type_is_pointer_like(left_type) && type_is_integer(right_type))
+        if (left_ptr && right_ptr)
         {
-            result_type = left_type;
+            if (op == TOKEN_MINUS)
+            {
+                expr->type = type_u64();
+                return expr->type;
+            }
+
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "cannot add two pointers");
+            return NULL;
         }
-        else if (type_is_numeric(left_type) && type_is_numeric(right_type))
+
+        Type *pointer_type = left_ptr ? left : right;
+        Type *other_type   = left_ptr ? right : left;
+
+        if (!type_is_integer(other_type))
         {
-            result_type = type_promote_binary(left_type, right_type);
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "pointer arithmetic requires integer offset");
+            return NULL;
+        }
+
+        expr->type = pointer_type;
+        return expr->type;
+    }
+
+    // arithmetic operators
+    if (op == TOKEN_PLUS || op == TOKEN_MINUS || op == TOKEN_STAR || op == TOKEN_SLASH || op == TOKEN_PERCENT)
+    {
+        if (!type_is_numeric(left) || !type_is_numeric(right))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "arithmetic requires numeric operands");
+            return NULL;
+        }
+
+        // type promotion: choose wider type
+        Type *result_type = left;
+
+        // if sizes differ, use the larger
+        if (left->size < right->size)
+            result_type = right;
+        else if (left->size == right->size)
+        {
+            // same size: prefer unsigned over signed
+            if (type_is_integer(left) && type_is_integer(right))
+            {
+                // if one is unsigned and one is signed, use unsigned
+                bool left_signed  = (strcmp(left->name, "i8") == 0 || strcmp(left->name, "i16") == 0 || strcmp(left->name, "i32") == 0 || strcmp(left->name, "i64") == 0);
+                bool right_signed = (strcmp(right->name, "i8") == 0 || strcmp(right->name, "i16") == 0 || strcmp(right->name, "i32") == 0 || strcmp(right->name, "i64") == 0);
+
+                if (!left_signed && right_signed)
+                    result_type = left; // left is unsigned
+                else if (left_signed && !right_signed)
+                    result_type = right; // right is unsigned
+            }
+        }
+
+        expr->type = result_type;
+        return expr->type;
+    }
+
+    // bitwise operators
+    if (op == TOKEN_PIPE || op == TOKEN_AMPERSAND || op == TOKEN_CARET)
+    {
+        if (!type_is_integer(left) || !type_is_integer(right))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "bitwise operators require integer operands");
+            return NULL;
+        }
+
+        // result type follows arithmetic promotion rules
+        Type *result_type = left;
+        if (left->size < right->size)
+            result_type = right;
+
+        expr->type = result_type;
+        return expr->type;
+    }
+
+    // bitshift operators
+    if (op == TOKEN_LESS_LESS || op == TOKEN_GREATER_GREATER)
+    {
+        if (!type_is_integer(left) || !type_is_integer(right))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "bitshift operators require integer operands");
+            return NULL;
+        }
+
+        expr->type = left;
+        return expr->type;
+    }
+
+    // comparison operators
+    if (op == TOKEN_EQUAL_EQUAL || op == TOKEN_BANG_EQUAL || op == TOKEN_LESS || op == TOKEN_LESS_EQUAL || op == TOKEN_GREATER || op == TOKEN_GREATER_EQUAL)
+    {
+        expr->type = type_u8(); // boolean result as u8
+        return expr->type;
+    }
+
+    // logical operators
+    if (op == TOKEN_AMPERSAND_AMPERSAND || op == TOKEN_PIPE_PIPE)
+    {
+        expr->type = type_u8(); // boolean result as u8
+        return expr->type;
+    }
+
+    // assignment
+    if (op == TOKEN_EQUAL)
+    {
+        if (!is_lvalue_expr(expr->binary_expr.left))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "cannot assign to non-lvalue");
+            return NULL;
+        }
+
+        if (!type_equals(left, right) && !type_can_assign_to(right, left))
+        {
+            char *lhs = type_to_string(left);
+            char *rhs = type_to_string(right);
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "incompatible types in assignment (%s <- %s)", lhs ? lhs : "<unknown>", rhs ? rhs : "<unknown>");
+            free(lhs);
+            free(rhs);
+            return NULL;
+        }
+        expr->type = left;
+        return expr->type;
+    }
+
+    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "unsupported binary operator");
+    return NULL;
+}
+
+static Type *analyze_unary_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
+{
+    Type *operand = analyze_expr(driver, ctx, expr->unary_expr.expr);
+    if (!operand)
+        return NULL;
+    operand = type_resolve_alias(operand);
+
+    TokenKind op = expr->unary_expr.op;
+
+    if (op == TOKEN_MINUS || op == TOKEN_PLUS)
+    {
+        if (!type_is_numeric(operand))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "unary arithmetic requires numeric operand");
+            return NULL;
+        }
+        expr->type = operand;
+        return expr->type;
+    }
+
+    if (op == TOKEN_BANG)
+    {
+        expr->type = type_u8(); // logical not result as u8
+        return expr->type;
+    }
+
+    if (op == TOKEN_AT) // dereference (@expr)
+    {
+        if (!type_is_pointer_like(operand))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "cannot dereference non-pointer type");
+            return NULL;
+        }
+        if (operand->kind == TYPE_POINTER)
+            expr->type = operand->pointer.base;
+        else if (operand->kind == TYPE_ARRAY)
+            expr->type = operand->array.elem_type;
+        else if (operand->kind == TYPE_FUNCTION)
+            expr->type = operand;
+        else
+            expr->type = operand;
+        return expr->type;
+    }
+
+    if (op == TOKEN_QUESTION) // address-of (?expr)
+    {
+        if (!is_lvalue_expr(expr->unary_expr.expr))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "address-of requires lvalue");
+            return NULL;
+        }
+        expr->type = type_pointer_create(operand);
+        return expr->type;
+    }
+
+    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "unsupported unary operator");
+    return NULL;
+}
+
+static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
+{
+    // handle module member function calls: module.func(args)
+    if (expr->call_expr.func && expr->call_expr.func->kind == AST_EXPR_FIELD && expr->call_expr.func->field_expr.object && expr->call_expr.func->field_expr.object->kind == AST_EXPR_IDENT)
+    {
+        const char *obj_name = expr->call_expr.func->field_expr.object->ident_expr.name;
+        Symbol     *obj_sym  = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, obj_name);
+
+        if (obj_sym && obj_sym->kind == SYMBOL_MODULE)
+        {
+            // this is module.function() - not a method call, just resolve normally via analyze_expr
+            // the field expression analysis will handle looking up the function in the module scope
+            // so we don't need to transform it, just fall through to normal call processing
         }
         else
         {
-            semantic_error(analyzer, expr, "invalid operands for %s", expr->binary_expr.op == TOKEN_PLUS ? "addition" : "subtraction");
-            return NULL;
-        }
-        break;
+            // handle method calls: obj.method(args) -> method(obj, args)
+            AstNode *field_expr = expr->call_expr.func;
+            AstNode *receiver   = field_expr->field_expr.object;
 
-    case TOKEN_STAR:
-    case TOKEN_SLASH:
-    case TOKEN_PERCENT:
-        if (!type_is_numeric(left_type) || !type_is_numeric(right_type))
-        {
-            semantic_error(analyzer, expr, "arithmetic requires numeric operands");
-            return NULL;
-        }
-        result_type = type_promote_binary(left_type, right_type);
-        break;
+            // analyze receiver to get its type
+            Type *receiver_type = analyze_expr(driver, ctx, receiver);
+            if (!receiver_type)
+                return NULL;
 
-    case TOKEN_AMPERSAND:
-    case TOKEN_PIPE:
-    case TOKEN_CARET:
-    case TOKEN_LESS_LESS:
-    case TOKEN_GREATER_GREATER:
-        if (!type_is_integer(left_type) || !type_is_integer(right_type))
-        {
-            semantic_error(analyzer, expr, "bitwise operations require integer operands");
-            return NULL;
-        }
-        result_type = type_promote_binary(left_type, right_type);
-        break;
+            receiver_type = type_resolve_alias(receiver_type);
 
-    default:
-        semantic_error(analyzer, expr, "unknown binary operator");
-        return NULL;
-    }
+            // look up method in the receiver's type
+            const char *method_name = field_expr->field_expr.field;
 
-    expr->type = result_type;
-    return result_type;
-}
+            Symbol *method_sym        = NULL;
+            char    mangled_name[512] = {0};
 
-Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr)
-{
-    Type *operand_type = semantic_analyze_expr(analyzer, expr->unary_expr.expr);
-    if (!operand_type)
-        return NULL;
-
-    if (!semantic_check_unary_op(analyzer, expr->unary_expr.op, operand_type, expr))
-    {
-        return NULL;
-    }
-
-    switch (expr->unary_expr.op)
-    {
-    case TOKEN_QUESTION:
-        if (!is_lvalue(expr->unary_expr.expr))
-        {
-            semantic_error(analyzer, expr, "address-of requires lvalue");
-            return NULL;
-        }
-        expr->type = type_pointer_create(operand_type);
-        return expr->type;
-
-    case TOKEN_AT: // dereference
-        if (operand_type->kind == TYPE_POINTER)
-        {
-            expr->type = operand_type->pointer.base;
-            return expr->type;
-        }
-        semantic_error(analyzer, expr, "cannot dereference non-pointer type");
-        return NULL;
-    case TOKEN_BANG:            // logical not
-        expr->type = type_u8(); // logical not returns u8 (0 or 1)
-        return type_u8();
-
-    case TOKEN_TILDE: // bitwise not
-        if (!type_is_integer(operand_type))
-        {
-            semantic_error(analyzer, expr, "bitwise not requires integer operand");
-            return NULL;
-        }
-        expr->type = operand_type;
-        return operand_type;
-
-    default: // arithmetic unary
-        expr->type = operand_type;
-        return operand_type;
-    }
-}
-
-static bool semantic_prepare_method_call(SemanticAnalyzer *analyzer, AstNode *call_expr)
-{
-    if (!call_expr || call_expr->kind != AST_EXPR_CALL)
-        return true;
-
-    AstNode *func_expr = call_expr->call_expr.func;
-    if (!func_expr || func_expr->kind != AST_EXPR_FIELD)
-        return true;
-
-    if (!func_expr->field_expr.is_method)
-        return true;
-
-    Symbol *method_symbol = func_expr->symbol;
-    if (!method_symbol || method_symbol->kind != SYMBOL_FUNC)
-    {
-        semantic_error(analyzer, call_expr, "invalid method reference");
-        return false;
-    }
-
-    AstNode *receiver = func_expr->field_expr.object;
-    if (!receiver)
-    {
-        semantic_error(analyzer, call_expr, "method call requires an instance");
-        return false;
-    }
-
-    if (!call_expr->call_expr.args)
-    {
-        AstList *args = malloc(sizeof(AstList));
-        if (!args)
-        {
-            semantic_error(analyzer, call_expr, "out of memory while rewriting method call");
-            return false;
-        }
-        ast_list_init(args);
-        call_expr->call_expr.args = args;
-    }
-
-    ast_list_prepend(call_expr->call_expr.args, receiver);
-    func_expr->field_expr.object = NULL;
-
-    AstNode *ident = malloc(sizeof(AstNode));
-    if (!ident)
-    {
-        semantic_error(analyzer, call_expr, "out of memory while rewriting method call");
-        return false;
-    }
-    ast_node_init(ident, AST_EXPR_IDENT);
-
-    if (func_expr->token)
-    {
-        ident->token     = func_expr->token;
-        func_expr->token = NULL;
-    }
-
-    ident->ident_expr.name = method_symbol->name ? strdup(method_symbol->name) : NULL;
-    if (method_symbol->name && !ident->ident_expr.name)
-    {
-        ast_node_dnit(ident);
-        free(ident);
-        semantic_error(analyzer, call_expr, "out of memory while rewriting method call");
-        return false;
-    }
-    ident->symbol = method_symbol;
-    ident->type   = method_symbol->type;
-
-    call_expr->call_expr.func            = ident;
-    call_expr->call_expr.is_method_call = true;
-
-    ast_node_dnit(func_expr);
-    free(func_expr);
-
-    return true;
-}
-
-Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr)
-{
-    if (expr->call_expr.func && expr->call_expr.func->kind == AST_EXPR_FIELD)
-    {
-        if (!semantic_prepare_method_call(analyzer, expr))
-            return NULL;
-    }
-
-    // check for builtin/intrinsic functions first
-    if (expr->call_expr.func->kind == AST_EXPR_IDENT)
-    {
-        const char *func_name = expr->call_expr.func->ident_expr.name;
-
-        // handle size_of() intrinsic
-        if (strcmp(func_name, "size_of") == 0)
-        {
-            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+            if (receiver_type->kind == TYPE_STRUCT || receiver_type->kind == TYPE_UNION)
             {
-                semantic_error(analyzer, expr, "size_of() expects exactly one argument");
+                if (receiver_type->name)
+                {
+                    // first try: look up fully specialized method
+                    // "std_types_result__Result$string$string" -> "std_types_result__Result$string$string__is_err"
+                    snprintf(mangled_name, sizeof(mangled_name), "%s__%s", receiver_type->name, method_name);
+                    method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
+
+                    // if not found and type is specialized, instantiate generic method
+                    if (!method_sym && strchr(receiver_type->name, '$'))
+                    {
+                        // extract base type name and generic args
+                        const char *dollar   = strchr(receiver_type->name, '$');
+                        size_t      base_len = (size_t)(dollar - receiver_type->name);
+
+                        // extract just the type name without module prefix
+                        // "std_types_result__Result" -> "Result"
+                        const char *type_name_start        = receiver_type->name;
+                        const char *last_double_underscore = NULL;
+                        for (const char *p = receiver_type->name; p < receiver_type->name + base_len - 1; p++)
+                        {
+                            if (p[0] == '_' && p[1] == '_')
+                                last_double_underscore = p + 2;
+                        }
+                        if (last_double_underscore)
+                            type_name_start = last_double_underscore;
+
+                        size_t type_name_len = (size_t)((receiver_type->name + base_len) - type_name_start);
+
+                        // look up generic method: "Result__is_err" (not "Result.is_err")
+                        char generic_method_name[256];
+                        snprintf(generic_method_name, sizeof(generic_method_name), "%.*s__%s", (int)type_name_len, type_name_start, method_name);
+
+                        Symbol *generic_method = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, generic_method_name);
+
+                        if (!generic_method)
+                        {
+                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "generic method '%s' not found in any scope", generic_method_name);
+                            return NULL;
+                        }
+
+                        if (generic_method->kind != SYMBOL_FUNC)
+                        {
+                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "symbol '%s' is not a function (kind=%d)", generic_method_name, generic_method->kind);
+                            return NULL;
+                        }
+
+                        if (!generic_method->func.is_generic)
+                        {
+                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "function '%s' is not generic", generic_method_name);
+                            return NULL;
+                        }
+
+                        if (!generic_method->func.is_method)
+                        {
+                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "function '%s' is not a method", generic_method_name);
+                            return NULL;
+                        }
+
+                        if (generic_method && generic_method->kind == SYMBOL_FUNC && generic_method->func.is_generic && generic_method->func.is_method)
+                        {
+                            // parse type args from specialized type name
+                            // "Result$string$string" -> ["string", "string"]
+                            size_t type_arg_count = 0;
+                            Type  *type_args[16]  = {0}; // max 16 type params
+
+                            const char *arg_start = dollar + 1;
+                            const char *arg_end   = arg_start;
+                            while (*arg_end && type_arg_count < 16)
+                            {
+                                if (*arg_end == '$' || *arg_end == '\0')
+                                {
+                                    size_t arg_len = (size_t)(arg_end - arg_start);
+                                    if (arg_len > 0)
+                                    {
+                                        // look up type by name
+                                        char type_name_buf[128];
+                                        snprintf(type_name_buf, sizeof(type_name_buf), "%.*s", (int)arg_len, arg_start);
+
+                                        // try to find type
+                                        Symbol *type_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, type_name_buf);
+                                        if (type_sym && type_sym->kind == SYMBOL_TYPE)
+                                        {
+                                            type_args[type_arg_count++] = type_sym->type;
+                                        }
+                                        else
+                                        {
+                                            // might be a builtin type
+                                            if (strcmp(type_name_buf, "string") == 0)
+                                                type_args[type_arg_count++] = type_array_create(type_u8());
+                                            else if (strcmp(type_name_buf, "i32") == 0)
+                                                type_args[type_arg_count++] = type_i32();
+                                            else if (strcmp(type_name_buf, "i64") == 0)
+                                                type_args[type_arg_count++] = type_i64();
+                                            else if (strcmp(type_name_buf, "u32") == 0)
+                                                type_args[type_arg_count++] = type_u32();
+                                            else if (strcmp(type_name_buf, "u64") == 0)
+                                                type_args[type_arg_count++] = type_u64();
+                                            // add other builtin types as needed
+                                        }
+                                    }
+
+                                    if (*arg_end == '\0')
+                                        break;
+                                    arg_start = arg_end + 1;
+                                }
+                                arg_end++;
+                            }
+
+                            // instantiate generic method with extracted type args
+                            if (type_arg_count > 0)
+                            {
+                                method_sym = instantiate_generic_function(driver, ctx, generic_method, type_args, type_arg_count);
+                                if (!method_sym)
+                                {
+                                    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to instantiate generic method '%s' with %zu type arguments", generic_method_name, type_arg_count);
+                                    return NULL;
+                                }
+                            }
+                            else
+                            {
+                                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to extract type arguments from specialized type");
+                                return NULL;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (method_sym && method_sym->kind == SYMBOL_FUNC && method_sym->func.is_method)
+            {
+                // transform method call: prepend receiver as first argument
+                if (!expr->call_expr.args)
+                {
+                    expr->call_expr.args = malloc(sizeof(AstList));
+                    ast_list_init(expr->call_expr.args);
+                }
+
+                // insert receiver at the beginning
+                ast_list_prepend(expr->call_expr.args, receiver);
+
+                // replace func with identifier pointing to method symbol
+                AstNode *ident = malloc(sizeof(AstNode));
+                ast_node_init(ident, AST_EXPR_IDENT);
+                ident->token           = field_expr->token;
+                ident->ident_expr.name = strdup(mangled_name);
+                ident->symbol          = method_sym;
+                ident->type            = method_sym->type;
+
+                // clear receiver from field expr to prevent double-free
+                field_expr->field_expr.object = NULL;
+                field_expr->token             = NULL;
+
+                // replace func
+                expr->call_expr.func           = ident;
+                expr->call_expr.is_method_call = true;
+
+                // free the old field expression
+                ast_node_dnit(field_expr);
+                free(field_expr);
+
+                // continue with normal call analysis below
+            }
+            else
+            {
+                // not a method - might be a function stored in a field, which isn't supported yet
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "member access on non-composite type");
+                return NULL;
+            }
+        }
+    }
+
+    if (expr->call_expr.func && expr->call_expr.func->kind == AST_EXPR_IDENT)
+    {
+        const char *intr_name = expr->call_expr.func->ident_expr.name;
+        size_t      arg_count = expr->call_expr.args ? expr->call_expr.args->count : 0;
+
+        if (strcmp(intr_name, "size_of") == 0)
+        {
+            if (arg_count != 1)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "size_of expects exactly one argument");
                 return NULL;
             }
 
             AstNode *arg      = expr->call_expr.args->items[0];
-            Type    *arg_type = semantic_analyze_expr(analyzer, arg);
+            Type    *arg_type = analyze_expr(driver, ctx, arg);
             if (!arg_type)
                 return NULL;
 
-            expr->type = type_u64(); // size_of() returns u64
-            return expr->type;
-        }
-
-        // handle align_of() intrinsic
-        if (strcmp(func_name, "align_of") == 0)
-        {
-            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
-            {
-                semantic_error(analyzer, expr, "align_of() expects exactly one argument");
-                return NULL;
-            }
-
-            AstNode *arg      = expr->call_expr.args->items[0];
-            Type    *arg_type = semantic_analyze_expr(analyzer, arg);
-            if (!arg_type)
-                return NULL;
-
-            expr->type = type_u64(); // align_of() returns u64
-            return expr->type;
-        }
-
-        // handle offset_of() intrinsic - get offset of struct field
-        if (strcmp(func_name, "offset_of") == 0)
-        {
-            if (!expr->call_expr.args || expr->call_expr.args->count != 2)
-            {
-                semantic_error(analyzer, expr, "offset_of() expects exactly two arguments (type, field)");
-                return NULL;
-            }
-
-            // first argument should be a type (handled as expression for now)
-            AstNode *type_arg  = expr->call_expr.args->items[0];
-            AstNode *field_arg = expr->call_expr.args->items[1];
-
-            // field argument should be an identifier
-            if (field_arg->kind != AST_EXPR_IDENT)
-            {
-                semantic_error(analyzer, expr, "offset_of() second argument must be a field name");
-                return NULL;
-            }
-
-            Type *struct_type = semantic_analyze_expr(analyzer, type_arg);
-            if (!struct_type)
-                return NULL;
-
-            struct_type = type_resolve_alias(struct_type);
-            if (struct_type->kind != TYPE_STRUCT)
-            {
-                semantic_error(analyzer, expr, "offset_of() first argument must be a struct type");
-                return NULL;
-            }
-
-            expr->type = type_u64(); // offset_of() returns u64
-            return expr->type;
-        }
-
-        // handle type_of() intrinsic - get type info as runtime value
-        if (strcmp(func_name, "type_of") == 0)
-        {
-            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
-            {
-                semantic_error(analyzer, expr, "type_of() expects exactly one argument");
-                return NULL;
-            }
-
-            AstNode *arg      = expr->call_expr.args->items[0];
-            Type    *arg_type = semantic_analyze_expr(analyzer, arg);
-            if (!arg_type)
-                return NULL;
-
-            // type_of() returns a compile-time constant representing the type
-            // for now, we'll represent this as a u64 hash/id
-            expr->type = type_u64(); // type_of() returns u64
-            return expr->type;
-        }
-
-        // handle va_count() intrinsic - number of variadic args inside current variadic function
-        if (strcmp(func_name, "va_count") == 0)
-        {
-            if (!analyzer->current_function || !analyzer->current_function->fun_stmt.is_variadic)
-            {
-                semantic_error(analyzer, expr, "va_count() used outside a variadic function");
-                return NULL;
-            }
-            if (expr->call_expr.args && expr->call_expr.args->count != 0)
-            {
-                semantic_error(analyzer, expr, "va_count() expects no arguments");
-                return NULL;
-            }
             expr->type = type_u64();
             return expr->type;
         }
 
-        // handle va_arg(i) intrinsic - pointer to i-th variadic argument (as untyped ptr)
-        if (strcmp(func_name, "va_arg") == 0)
+        if (strcmp(intr_name, "align_of") == 0)
         {
-            if (!analyzer->current_function || !analyzer->current_function->fun_stmt.is_variadic)
+            if (arg_count != 1)
             {
-                semantic_error(analyzer, expr, "va_arg() used outside a variadic function");
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "align_of expects exactly one argument");
                 return NULL;
             }
-            if (!expr->call_expr.args || expr->call_expr.args->count != 1)
+
+            AstNode *arg      = expr->call_expr.args->items[0];
+            Type    *arg_type = analyze_expr(driver, ctx, arg);
+            if (!arg_type)
+                return NULL;
+
+            expr->type = type_u64();
+            return expr->type;
+        }
+
+        if (strcmp(intr_name, "va_count") == 0)
+        {
+            if (!ctx->current_function || !ctx->current_function->type || !ctx->current_function->type->function.is_variadic)
             {
-                semantic_error(analyzer, expr, "va_arg() expects exactly one argument (index)");
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "va_count used outside variadic function");
                 return NULL;
             }
-            AstNode *idx = expr->call_expr.args->items[0];
-            Type    *it  = semantic_analyze_expr(analyzer, idx);
-            if (!it || !type_is_integer(it))
+
+            if (arg_count != 0)
             {
-                semantic_error(analyzer, expr, "va_arg() index must be integer");
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "va_count expects no arguments");
                 return NULL;
             }
-            expr->type = type_ptr();
+
+            expr->type = type_u64();
+            return expr->type;
+        }
+
+        if (strcmp(intr_name, "va_arg") == 0)
+        {
+            if (!ctx->current_function || !ctx->current_function->type || !ctx->current_function->type->function.is_variadic)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "va_arg used outside variadic function");
+                return NULL;
+            }
+
+            if (arg_count != 1)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "va_arg expects exactly one argument");
+                return NULL;
+            }
+
+            AstNode *index_expr = expr->call_expr.args->items[0];
+            Type    *index_type = analyze_expr(driver, ctx, index_expr);
+            if (!index_type)
+                return NULL;
+
+            index_type = type_resolve_alias(index_type);
+            if (!type_is_integer(index_type))
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "va_arg index must be integer");
+                return NULL;
+            }
+
+            expr->type = type_pointer_create(type_u8());
             return expr->type;
         }
     }
 
-    Type *func_type = semantic_analyze_expr(analyzer, expr->call_expr.func);
+    Type *func_type = analyze_expr(driver, ctx, expr->call_expr.func);
     if (!func_type)
         return NULL;
 
-    Symbol *target_symbol = expr->call_expr.func->symbol;
-    if (target_symbol && target_symbol->kind == SYMBOL_FUNC && target_symbol->func.is_generic)
+    func_type = type_resolve_alias(func_type);
+    if (!func_type)
+        return NULL;
+
+    Symbol *func_sym       = expr->call_expr.func ? expr->call_expr.func->symbol : NULL;
+    Symbol *base_sym       = func_sym && func_sym->import_origin ? func_sym->import_origin : func_sym;
+    size_t  type_arg_count = expr->call_expr.type_args ? expr->call_expr.type_args->count : 0;
+
+    // specialize generic functions on demand (e.g. mem.alloc<T>)
+    if (base_sym && base_sym->kind == SYMBOL_FUNC && base_sym->func.is_generic)
     {
-        if (!expr->call_expr.type_args || expr->call_expr.type_args->count == 0)
+        AstNode *decl                = base_sym->decl;
+        size_t   generic_param_count = (decl && decl->kind == AST_STMT_FUN && decl->fun_stmt.generics) ? (size_t)decl->fun_stmt.generics->count : 0;
+        if (generic_param_count == 0)
         {
-            semantic_error(analyzer, expr, "generic function '%s' requires explicit type arguments", target_symbol->name);
-            return NULL;
+            // defensive: symbol marked generic but no params
+            base_sym->func.is_generic = false;
         }
-
-        size_t expected_count = target_symbol->func.generic_param_count;
-        int    provided_count = expr->call_expr.type_args->count;
-
-        if ((size_t)provided_count != expected_count)
+        else
         {
-            semantic_error(analyzer, expr, "generic function '%s' expects %zu type arguments (got %d)", target_symbol->name, expected_count, provided_count);
-            return NULL;
-        }
-
-        Type **type_args = malloc(sizeof(Type *) * expected_count);
-        if (!type_args)
-        {
-            semantic_error(analyzer, expr, "failed to allocate type argument buffer");
-            return NULL;
-        }
-
-        for (size_t i = 0; i < expected_count; i++)
-        {
-            AstNode *type_arg_node = expr->call_expr.type_args->items[i];
-            Type    *resolved      = resolve_type(analyzer, type_arg_node);
-            if (!resolved)
+            if (type_arg_count != generic_param_count)
             {
-                free(type_args);
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "generic function '%s' requires %zu type arguments, got %zu", base_sym->name, generic_param_count, type_arg_count);
                 return NULL;
             }
-            type_args[i] = resolved;
-        }
 
-        Symbol *existing = semantic_find_generic_specialization(target_symbol, type_args, expected_count);
-        if (!existing)
-        {
-            InstantiationRequest request = {
-                .kind = INSTANTIATION_FUNCTION,
-                .generic_symbol = target_symbol,
-                .type_args = type_args,
-                .type_arg_count = expected_count,
-                .call_site = expr,
-                .unique_id = NULL,
-                .next = NULL
-            };
-
-            existing = semantic_instantiate_generic_function_from_request(analyzer, &request);
-            if (!existing)
+            Type **type_args = NULL;
+            if (type_arg_count > 0)
             {
-                free(type_args);
+                type_args = malloc(sizeof(Type *) * type_arg_count);
+                for (size_t i = 0; i < type_arg_count; i++)
+                {
+                    AstNode *type_arg_node = expr->call_expr.type_args->items[i];
+                    type_args[i]           = resolve_type_in_context(driver, ctx, type_arg_node);
+                    if (!type_args[i])
+                    {
+                        free(type_args);
+                        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to resolve type argument for generic call");
+                        return NULL;
+                    }
+                }
+            }
+
+            Symbol *specialized = instantiate_generic_function(driver, ctx, base_sym, type_args, type_arg_count);
+            free(type_args);
+
+            if (!specialized)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to instantiate generic function '%s'", base_sym->name);
                 return NULL;
             }
+
+            func_sym  = specialized;
+            base_sym  = specialized;
+            func_type = specialized->type;
+
+            if (expr->call_expr.func)
+            {
+                expr->call_expr.func->symbol = specialized;
+                expr->call_expr.func->type   = func_type;
+            }
         }
-
-        free(type_args);
-
-        expr->call_expr.func->symbol = existing;
-        expr->call_expr.func->type   = existing->type;
-        func_type                   = existing->type;
     }
 
-    // resolve aliases to get the underlying type
-    Type *resolved_type = type_resolve_alias(func_type);
-    if (!resolved_type)
+    if (func_type->kind != TYPE_FUNCTION)
     {
-        semantic_error(analyzer, expr, "expression is not callable");
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "cannot call non-function type");
         return NULL;
     }
 
-    if (resolved_type->kind != TYPE_FUNCTION)
+    if (func_sym)
+        expr->symbol = func_sym;
+
+    // check argument count
+    size_t expected = func_type->function.param_count;
+    size_t provided = expr->call_expr.args ? expr->call_expr.args->count : 0;
+
+    if (!func_type->function.is_variadic && provided != expected)
     {
-        semantic_error(analyzer, expr, "expression is not callable");
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "function expects %zu arguments, got %zu", expected, provided);
         return NULL;
     }
 
-    if (!semantic_check_function_call(analyzer, resolved_type, expr->call_expr.args, expr))
+    // type check arguments
+    for (size_t i = 0; i < provided && i < expected; i++)
     {
-        return NULL;
+        AstNode *arg_node = expr->call_expr.args->items[i];
+        Type    *arg_type = analyze_expr(driver, ctx, arg_node);
+        if (!arg_type)
+            return NULL;
+
+        Type *param_type = func_type->function.param_types[i];
+        if (!type_equals(arg_type, param_type) && !type_can_assign_to(arg_type, param_type))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr->call_expr.args->items[i], ctx->file_path, "argument %zu has incompatible type", i + 1);
+            return NULL;
+        }
     }
 
-    // functions with no return type are valid but have no expression type
-    expr->type = resolved_type->function.return_type;
-    return resolved_type->function.return_type ? resolved_type->function.return_type : type_ptr(); // return dummy type for void functions
+    expr->type = func_type->function.return_type;
+    return expr->type;
 }
 
-Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr)
+static Type *analyze_field_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
 {
-    Type *array_type = semantic_analyze_expr(analyzer, expr->index_expr.array);
-    Type *index_type = semantic_analyze_expr(analyzer, expr->index_expr.index);
-
-    if (!array_type || !index_type)
-        return NULL;
-
-    // check index type
-    if (!type_is_integer(index_type))
-    {
-        semantic_error(analyzer, expr, "array index must be integer");
-        return NULL;
-    }
-
-    // resolve type aliases before checking array type
-    Type *resolved_type = type_resolve_alias(array_type);
-    if (!resolved_type)
-        resolved_type = array_type;
-
-    // check array type
-    if (resolved_type->kind == TYPE_ARRAY)
-    {
-        // all arrays are fat pointers, so no compile-time bounds check
-        expr->type = resolved_type->array.elem_type;
-        return expr->type;
-    }
-    else if (resolved_type->kind == TYPE_POINTER)
-    {
-        expr->type = resolved_type->pointer.base;
-        return expr->type;
-    }
-    else
-    {
-        semantic_error(analyzer, expr, "subscripted value is not an array or pointer");
-        return NULL;
-    }
-}
-
-Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
-{
-    Type *evaluated_type = semantic_analyze_expr(analyzer, expr->field_expr.object);
-
-    // check if this is module member access
     if (expr->field_expr.object->kind == AST_EXPR_IDENT)
     {
-        Symbol *object_symbol = expr->field_expr.object->symbol;
-        if (object_symbol && object_symbol->kind == SYMBOL_MODULE)
+        const char *name = expr->field_expr.object->ident_expr.name;
+        Symbol     *sym  = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, name);
+        if (sym && sym->kind == SYMBOL_MODULE)
         {
-            Symbol *member = semantic_lookup_module_member(analyzer, object_symbol, expr->field_expr.field);
-
+            const char *member_name = expr->field_expr.field;
+            Symbol     *member      = symbol_lookup_scope(sym->module.scope, member_name);
             if (!member)
             {
-                semantic_error(analyzer, expr, "no symbol named '%s' in module '%s'", expr->field_expr.field, object_symbol->name);
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "module '%s' has no member '%s'", name, member_name);
+                return NULL;
+            }
+            if (!member->is_public)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "member '%s' of module '%s' is not public", member_name, name);
                 return NULL;
             }
 
-            expr->type   = member->type;
-            expr->symbol = member;
-            return member->type;
+            Symbol *target = member;
+            if ((!member->type || member->type->kind == TYPE_ERROR) && member->import_origin && member->import_origin->type)
+                member->type = member->import_origin->type;
+            if (member->import_origin && member->import_origin->type)
+                target = member->import_origin;
+            if (!member->has_const_i64 && member->import_origin && member->import_origin->has_const_i64)
+            {
+                member->has_const_i64 = true;
+                member->const_i64     = member->import_origin->const_i64;
+            }
+
+            expr->symbol = target;
+            expr->type   = target->type;
+            return expr->type;
         }
     }
 
-    if (!evaluated_type)
-        return NULL;
-
-    bool receiver_is_pointer = false;
-    Type *method_type        = evaluated_type;
-    if (method_type && method_type->kind == TYPE_POINTER)
-    {
-        receiver_is_pointer = true;
-        method_type         = method_type->pointer.base;
-    }
-
-    Symbol *method_owner = semantic_find_type_symbol_from_type(analyzer, method_type);
-
-    Type *object_type = evaluated_type ? type_resolve_alias(evaluated_type) : NULL;
-
-    if (object_type && object_type->kind == TYPE_POINTER)
-    {
-        object_type = type_resolve_alias(object_type->pointer.base);
-    }
-
+    Type *object_type = analyze_expr(driver, ctx, expr->field_expr.object);
     if (!object_type)
         return NULL;
+
+    if (object_type->kind == TYPE_POINTER)
+        object_type = object_type->pointer.base;
+
+    object_type = type_resolve_alias(object_type);
 
     if (object_type->kind == TYPE_ARRAY)
     {
@@ -4739,1129 +3267,979 @@ Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr)
             expr->type = type_pointer_create(object_type->array.elem_type);
             return expr->type;
         }
-
-        semantic_error(analyzer, expr, "no member named '%s' on array", expr->field_expr.field);
-        return NULL;
     }
 
-    // handle pointer to struct dereference
     if (object_type->kind != TYPE_STRUCT && object_type->kind != TYPE_UNION)
     {
-        semantic_error(analyzer, expr, "member access on non-struct/union type");
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "member access on non-composite type");
         return NULL;
     }
 
-    // find field in type
     for (Symbol *field = object_type->composite.fields; field; field = field->next)
     {
         if (field->name && strcmp(field->name, expr->field_expr.field) == 0)
         {
-            expr->type   = field->type;
             expr->symbol = field;
+            expr->type   = field->type;
             return field->type;
         }
     }
 
-    if (method_owner)
-    {
-        Symbol *method_symbol = type_find_method(method_owner, expr->field_expr.field, receiver_is_pointer);
-        if (method_symbol)
-        {
-            expr->field_expr.is_method = true;
-            expr->symbol               = method_symbol;
-            expr->type                 = method_symbol->type;
-            return method_symbol->type;
-        }
-    }
-
-    if (object_type && (object_type->kind == TYPE_STRUCT || object_type->kind == TYPE_UNION))
-    {
-        size_t field_count = object_type->composite.field_count;
-        fprintf(stderr, "debug: no member named %s on type %s (fields=%zu)\n",
-                expr->field_expr.field,
-                object_type->name ? object_type->name : "<anon>",
-                field_count);
-        fflush(stderr);
-    }
-
-    semantic_error(analyzer, expr, "no member named '%s'", expr->field_expr.field);
+    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "no member named '%s'", expr->field_expr.field);
     return NULL;
 }
 
-Type *semantic_analyze_cast_expr(SemanticAnalyzer *analyzer, AstNode *expr)
+static Type *analyze_index_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
 {
-    Type *source_type = semantic_analyze_expr(analyzer, expr->cast_expr.expr);
-    Type *target_type = resolve_type(analyzer, expr->cast_expr.type);
+    Type *array_type = analyze_expr(driver, ctx, expr->index_expr.array);
+    Type *index_type = analyze_expr(driver, ctx, expr->index_expr.index);
 
-    if (!source_type || !target_type)
+    if (!array_type || !index_type)
         return NULL;
 
-    // store resolved target type in the cast type node
-    if (expr->cast_expr.type)
-    {
-        expr->cast_expr.type->type = target_type;
-    }
+    // dereference pointer
+    if (array_type->kind == TYPE_POINTER)
+        array_type = array_type->pointer.base;
 
-    if (!type_can_cast_to(source_type, target_type))
-    {
-        char source_str[256] = {0};
-        char target_str[256] = {0};
-        format_type_name(source_type, source_str, sizeof(source_str));
-        format_type_name(target_type, target_str, sizeof(target_str));
+    array_type = type_resolve_alias(array_type);
 
-        semantic_error(analyzer, expr, "invalid cast from `%s` to `%s`", source_str, target_str);
+    if (array_type->kind != TYPE_ARRAY)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "cannot index non-array type");
         return NULL;
     }
 
-    expr->type = target_type;
-    return target_type;
-}
-
-Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr)
-{
-    if (expr->symbol && expr->symbol->kind == SYMBOL_FUNC && expr->symbol->func.is_method)
+    if (!type_is_integer(index_type))
     {
-        expr->type = expr->symbol->type;
-        return expr->symbol->type;
-    }
-
-    const char *name   = expr->ident_expr.name;
-    Symbol     *symbol = symbol_lookup(&analyzer->symbol_table, name);
-
-    if (!symbol)
-    {
-        Type *generic_type = semantic_lookup_generic_binding(analyzer, name);
-        if (generic_type)
-        {
-            expr->symbol = NULL;
-            expr->type   = generic_type;
-            return generic_type;
-        }
-        semantic_error(analyzer, expr, "undefined identifier '%s'", name);
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr->index_expr.index, ctx->file_path, "array index must be integer");
         return NULL;
     }
 
-    expr->symbol = symbol;
-
-    // module symbols don't have a regular type, but they're valid for field access
-    if (symbol->kind == SYMBOL_MODULE)
-    {
-        expr->type = NULL; // modules don't have a type per se
-        return type_ptr(); // return a dummy type to indicate success
-    }
-
-    expr->type = symbol->type;
-    return symbol->type;
+    expr->type = array_type->array.elem_type;
+    return expr->type;
 }
 
-Type *semantic_analyze_lit_expr(SemanticAnalyzer *analyzer, AstNode *expr)
+static Type *analyze_cast_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
 {
-    return semantic_analyze_lit_expr_with_hint(analyzer, expr, NULL);
-}
+    Type *source = analyze_expr(driver, ctx, expr->cast_expr.expr);
+    Type *target = resolve_type_in_context(driver, ctx, expr->cast_expr.type);
 
-Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type)
-{
-    (void)analyzer; // unused
-
-    switch (expr->lit_expr.kind)
-    {
-    case TOKEN_LIT_INT:
-        // determine integer type based on value and context
-        {
-            unsigned long long value = expr->lit_expr.int_val;
-            Type              *int_type;
-
-            // allow 0 (including 'nil') to adopt expected pointer type in context
-            if (expected_type && type_is_pointer_like(expected_type) && value == 0)
-            {
-                expr->type = expected_type;
-                return expected_type;
-            }
-
-            // if we have an expected integer type and value fits, use it
-            Type *resolved_expected = expected_type ? type_resolve_alias(expected_type) : NULL;
-            if (resolved_expected && type_is_integer(resolved_expected))
-            {
-                bool fits = false;
-                switch (resolved_expected->kind)
-                {
-                case TYPE_U8:
-                    fits = (value <= UINT8_MAX);
-                    break;
-                case TYPE_U16:
-                    fits = (value <= UINT16_MAX);
-                    break;
-                case TYPE_U32:
-                    fits = (value <= UINT32_MAX);
-                    break;
-                case TYPE_U64:
-                    fits = true;
-                    break;
-                case TYPE_I8:
-                    fits = (value <= INT8_MAX);
-                    break;
-                case TYPE_I16:
-                    fits = (value <= INT16_MAX);
-                    break;
-                case TYPE_I32:
-                    fits = (value <= INT32_MAX);
-                    break;
-                case TYPE_I64:
-                    fits = (value <= INT64_MAX);
-                    break;
-                default:
-                    fits = false;
-                    break;
-                }
-
-                if (fits)
-                {
-                    expr->type = expected_type;
-                    return expected_type;
-                }
-            }
-
-            // fall back to smallest type that can hold the value
-            if (value <= UINT8_MAX)
-            {
-                int_type = type_u8();
-            }
-            else if (value <= UINT16_MAX)
-            {
-                int_type = type_u16();
-            }
-            else if (value <= UINT32_MAX)
-            {
-                int_type = type_u32();
-            }
-            else
-            {
-                int_type = type_u64();
-            }
-
-            if (type_sizeof(int_type) < type_sizeof(type_u32()))
-            {
-                int_type = type_u32();
-            }
-
-            expr->type = int_type;
-            return int_type;
-        }
-
-    case TOKEN_LIT_FLOAT:
-        // if we have an expected float type, use it
-        if (expected_type && type_is_float(expected_type))
-        {
-            expr->type = expected_type;
-            return expected_type;
-        }
-        // default to f64
-        expr->type = type_f64();
-        return type_f64();
-
-    case TOKEN_LIT_CHAR:
-        // if we have an expected integer type that can hold a char, use it
-        if (expected_type && type_is_integer(expected_type) && expected_type->size >= 1)
-        {
-            expr->type = expected_type;
-            return expected_type;
-        }
-        // default to u8
-        expr->type = type_u8();
-        return type_u8();
-
-    case TOKEN_LIT_STRING:
-        expr->type = type_array_create(type_u8());
-        return expr->type;
-
-    default:
+    if (!source || !target)
         return NULL;
-    }
-}
 
-static Type *semantic_analyze_null_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type)
-{
-    Type *resolved = NULL;
+    // validate cast is legal
+    bool valid = false;
 
-    if (expected_type)
+    // same size types can always be cast (reinterpret bits)
+    if (source->size == target->size)
+        valid = true;
+
+    // numeric to numeric (different sizes - truncate or extend)
+    else if (type_is_numeric(source) && type_is_numeric(target))
+        valid = true;
+
+    // pointer to pointer (always allowed)
+    else if (source->kind == TYPE_POINTER && target->kind == TYPE_POINTER)
+        valid = true;
+
+    // integer to pointer or pointer to integer (unsafe but allowed)
+    else if ((type_is_integer(source) && target->kind == TYPE_POINTER) || (source->kind == TYPE_POINTER && type_is_integer(target)))
+        valid = true;
+
+    if (!valid)
     {
-        if (!type_is_pointer_like(expected_type))
-        {
-            semantic_error(analyzer, expr, "'nil' expects a pointer-like context");
-            return NULL;
-        }
-        resolved = expected_type;
-    }
-    else
-    {
-        resolved = type_ptr();
-    }
-
-    expr->type = resolved;
-    return resolved;
-}
-
-Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr)
-{
-    Type *specified_type = resolve_type(analyzer, expr->array_expr.type);
-    if (!specified_type)
-    {
-        semantic_error(analyzer, expr, "cannot resolve array type");
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "invalid cast from '%s' to '%s'", source->name, target->name);
         return NULL;
     }
 
-    // resolve type aliases before checking the type
-    Type *resolved_type = type_resolve_alias(specified_type);
-    if (!resolved_type)
-        resolved_type = specified_type;
-
-    // check if the resolved type is already an array type
-    if (resolved_type->kind == TYPE_ARRAY)
-    {
-        // for []T{...} or alias{...} syntax where alias resolves to array, use it directly
-        // but validate that all elements match the element type
-        Type *elem_type = resolved_type->array.elem_type;
-
-        if (expr->array_expr.elems)
-        {
-            for (int i = 0; i < expr->array_expr.elems->count; i++)
-            {
-                Type *elem_result = semantic_analyze_expr_with_hint(analyzer, expr->array_expr.elems->items[i], elem_type);
-                if (!elem_result)
-                    return NULL;
-
-                if (!semantic_check_assignment(analyzer, elem_type, elem_result, expr->array_expr.elems->items[i]))
-                {
-                    return NULL;
-                }
-            }
-        }
-
-        // return the original specified type (preserving alias)
-        expr->type = specified_type;
-        return expr->type;
-    }
-    else if (resolved_type->kind == TYPE_STRUCT || resolved_type->kind == TYPE_UNION)
-    {
-        // this is actually a struct/union literal using type{...} syntax
-        return semantic_analyze_array_as_struct(analyzer, expr, specified_type, resolved_type);
-    }
-    else
-    {
-        // for T{...} syntax, create a new array of type T
-        Type *elem_type = resolved_type;
-
-        if (expr->array_expr.elems)
-        {
-            for (int i = 0; i < expr->array_expr.elems->count; i++)
-            {
-                Type *elem_result = semantic_analyze_expr_with_hint(analyzer, expr->array_expr.elems->items[i], elem_type);
-                if (!elem_result)
-                    return NULL;
-
-                if (!semantic_check_assignment(analyzer, elem_type, elem_result, expr->array_expr.elems->items[i]))
-                {
-                    return NULL;
-                }
-            }
-        }
-
-        expr->type = type_array_create(elem_type);
-        return expr->type;
-    }
+    expr->type = target;
+    return target;
 }
 
-// helper function to convert array expression to struct initialization
-static Type *semantic_analyze_array_as_struct(SemanticAnalyzer *analyzer, AstNode *expr, Type *specified_type, Type *resolved_type)
+static Type *analyze_struct_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
 {
-    // for struct{value1, value2, ...} syntax, we need to match values to fields in order
-    if (!expr->array_expr.elems)
-    {
-        // empty initializer is valid
-        expr->type = specified_type;
-        return specified_type;
-    }
-
-    // collect struct fields in order
-    Symbol *field       = resolved_type->composite.fields;
-    int     field_count = 0;
-    while (field)
-    {
-        field_count++;
-        field = field->next;
-    }
-
-    // check that we don't have more initializers than fields
-    if (expr->array_expr.elems->count > field_count)
-    {
-        semantic_error(analyzer, expr, "too many initializers for struct (expected %d, got %d)", field_count, expr->array_expr.elems->count);
-        return NULL;
-    }
-
-    // validate each element against corresponding field type
-    field = resolved_type->composite.fields;
-    for (int i = 0; i < expr->array_expr.elems->count && field; i++, field = field->next)
-    {
-        Type *elem_result = semantic_analyze_expr_with_hint(analyzer, expr->array_expr.elems->items[i], field->type);
-        if (!elem_result)
-            return NULL;
-
-        if (!semantic_check_assignment(analyzer, field->type, elem_result, expr->array_expr.elems->items[i]))
-        {
-            return NULL;
-        }
-    }
-
-    // return the original specified type (preserving alias)
-    expr->type = specified_type;
-    return specified_type;
-}
-
-Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type)
-{
-    Type *struct_type   = NULL;
-    Type *resolved_type = NULL;
-
+    // resolve struct/union type
+    Type *struct_type = NULL;
     if (expr->struct_expr.type)
     {
-        struct_type = resolve_type(analyzer, expr->struct_expr.type);
+        struct_type = resolve_type_in_context(driver, ctx, expr->struct_expr.type);
         if (!struct_type)
         {
-            semantic_error(analyzer, expr, "cannot resolve struct type");
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "cannot resolve type in struct literal");
             return NULL;
         }
-
-        resolved_type = type_resolve_alias(struct_type);
-        if (!resolved_type)
-            resolved_type = struct_type;
+    }
+    else if (expr->type)
+    {
+        // type was pre-set by parent (e.g., field initializer)
+        struct_type = expr->type;
     }
     else
     {
-        if (!expected_type)
-        {
-            semantic_error(analyzer, expr, "cannot infer type for anonymous literal");
-            return NULL;
-        }
-
-        struct_type   = expected_type;
-        resolved_type = type_resolve_alias(struct_type);
-        if (!resolved_type)
-            resolved_type = struct_type;
+        // Type inference not yet implemented - for now require explicit type
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "struct literal requires explicit type (type inference not yet implemented)");
+        return NULL;
     }
 
+    // resolve type aliases
+    Type *resolved_type = type_resolve_alias(struct_type);
+    if (!resolved_type)
+        resolved_type = struct_type;
+
+    // validate union literal
     if (expr->struct_expr.is_union_literal && resolved_type->kind != TYPE_UNION)
     {
-        semantic_error(analyzer, expr, "'uni' literal requires a union type");
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "'uni' literal requires a union type");
         return NULL;
     }
 
-    if (resolved_type->kind == TYPE_ARRAY)
-    {
-        Type *elem_type     = resolved_type->array.elem_type;
-        Type *expected_data = type_pointer_create(elem_type);
-        Type *expected_len  = type_u64();
-
-        bool seen_data = false;
-        bool seen_len  = false;
-
-        if (expr->struct_expr.fields)
-        {
-            for (int i = 0; i < expr->struct_expr.fields->count; i++)
-            {
-                AstNode *field_init = expr->struct_expr.fields->items[i];
-                if (!field_init || field_init->kind != AST_EXPR_FIELD)
-                {
-                    semantic_error(analyzer, expr, "invalid slice field initializer");
-                    return NULL;
-                }
-
-                const char *field_name = field_init->field_expr.field;
-                AstNode    *value      = field_init->field_expr.object;
-
-                if (strcmp(field_name, "data") == 0)
-                {
-                    if (seen_data)
-                    {
-                        semantic_error(analyzer, field_init, "duplicate 'data' field in slice literal");
-                        return NULL;
-                    }
-
-                    Type *init_type = semantic_analyze_expr_with_hint(analyzer, value, expected_data);
-                    if (!init_type)
-                    {
-                        return NULL;
-                    }
-
-                    if (!semantic_check_assignment(analyzer, expected_data, init_type, value))
-                    {
-                        return NULL;
-                    }
-
-                    seen_data = true;
-                }
-                else if (strcmp(field_name, "len") == 0)
-                {
-                    if (seen_len)
-                    {
-                        semantic_error(analyzer, field_init, "duplicate 'len' field in slice literal");
-                        return NULL;
-                    }
-
-                    Type *init_type = semantic_analyze_expr_with_hint(analyzer, value, expected_len);
-                    if (!init_type)
-                    {
-                        return NULL;
-                    }
-
-                    if (!semantic_check_assignment(analyzer, expected_len, init_type, value))
-                    {
-                        return NULL;
-                    }
-
-                    seen_len = true;
-                }
-                else
-                {
-                    semantic_error(analyzer, field_init, "unknown slice field '%s'", field_name);
-                    return NULL;
-                }
-            }
-        }
-
-        expr->type = struct_type;
-        return struct_type;
-    }
-
-    if (resolved_type->kind != TYPE_STRUCT && resolved_type->kind != TYPE_UNION)
-    {
-        semantic_error(analyzer, expr, "not a struct or union type");
-        return NULL;
-    }
-
-    bool *initialized_fields = NULL;
-    if (resolved_type->kind == TYPE_STRUCT && resolved_type->composite.field_count > 0)
-    {
-        initialized_fields = calloc(resolved_type->composite.field_count, sizeof(bool));
-        if (!initialized_fields)
-        {
-            semantic_error(analyzer, expr, "failed to allocate struct field tracking");
-            return NULL;
-        }
-    }
-
-    bool union_field_set = false;
-
-    if (expr->struct_expr.fields)
+    // analyze field initializers
+    // Look up field types from the struct/union and use them for type inference
+    if (expr->struct_expr.fields && resolved_type->kind == TYPE_STRUCT)
     {
         for (int i = 0; i < expr->struct_expr.fields->count; i++)
         {
             AstNode *field_init = expr->struct_expr.fields->items[i];
-            if (!field_init || field_init->kind != AST_EXPR_FIELD)
+            if (field_init && field_init->kind == AST_EXPR_FIELD)
             {
-                const char *kind_str = (resolved_type->kind == TYPE_UNION) ? "union" : "struct";
-                semantic_error(analyzer, expr, "invalid %s field initializer", kind_str);
-                if (initialized_fields)
-                    free(initialized_fields);
-                return NULL;
-            }
+                const char *field_name = field_init->field_expr.field;
+                AstNode    *value_expr = field_init->field_expr.object;
 
-            const char *field_name = field_init->field_expr.field;
-
-            Symbol *field_sym     = NULL;
-            int     matched_index = -1;
-            int     cursor_index  = 0;
-            for (Symbol *field = resolved_type->composite.fields; field; field = field->next, cursor_index++)
-            {
-                if (field->name && strcmp(field->name, field_name) == 0)
+                // find field in struct type
+                Symbol *field_sym  = resolved_type->composite.fields;
+                Type   *field_type = NULL;
+                while (field_sym)
                 {
-                    field_sym     = field;
-                    matched_index = cursor_index;
-                    break;
-                }
-            }
-
-            if (!field_sym)
-            {
-                const char *kind_str = (resolved_type->kind == TYPE_UNION) ? "union" : "struct";
-                semantic_error(analyzer, field_init, "no field named '%s' in %s", field_name, kind_str);
-                if (initialized_fields)
-                    free(initialized_fields);
-                return NULL;
-            }
-
-            Type *init_type = semantic_analyze_expr_with_hint(analyzer, field_init->field_expr.object, field_sym->type);
-            if (!init_type)
-            {
-                if (initialized_fields)
-                    free(initialized_fields);
-                return NULL;
-            }
-
-            if (!semantic_check_assignment(analyzer, field_sym->type, init_type, field_init))
-            {
-                if (initialized_fields)
-                    free(initialized_fields);
-                return NULL;
-            }
-
-            if (resolved_type->kind == TYPE_STRUCT)
-            {
-                if (matched_index >= 0 && matched_index < (int)resolved_type->composite.field_count)
-                {
-                    if (initialized_fields[matched_index])
+                    if (strcmp(field_sym->name, field_name) == 0)
                     {
-                        semantic_error(analyzer, field_init, "duplicate initializer for field '%s'", field_name);
-                        if (initialized_fields)
-                            free(initialized_fields);
-                        return NULL;
+                        field_type = field_sym->type;
+                        break;
                     }
-                    initialized_fields[matched_index] = true;
+                    field_sym = field_sym->next;
                 }
-            }
-            else
-            {
-                if (union_field_set)
-                {
-                    semantic_error(analyzer, field_init, "multiple fields initialized in union literal");
-                    if (initialized_fields)
-                        free(initialized_fields);
+
+                // if value is also a struct literal without type, inject the field's type
+                Type *value_type = analyze_expr_with_hint(driver, ctx, value_expr, field_type);
+                if (!value_type)
                     return NULL;
-                }
-                union_field_set = true;
+
+                if (!ensure_assignable(driver, ctx, field_type, value_type, value_expr, "field initializer"))
+                    return NULL;
             }
         }
     }
-
-    if (initialized_fields)
-        free(initialized_fields);
+    else if (expr->struct_expr.fields)
+    {
+        // for unions or other cases, just analyze without inference
+        for (int i = 0; i < expr->struct_expr.fields->count; i++)
+        {
+            AstNode *field_init = expr->struct_expr.fields->items[i];
+            if (field_init && field_init->kind == AST_EXPR_FIELD)
+            {
+                if (!analyze_expr(driver, ctx, field_init->field_expr.object))
+                    return NULL;
+            }
+        }
+    }
 
     expr->type = struct_type;
     return struct_type;
 }
 
-bool semantic_check_assignment(SemanticAnalyzer *analyzer, Type *target, Type *source, AstNode *node)
+static bool ensure_assignable(SemanticDriver *driver, const AnalysisContext *ctx, Type *expected, Type *actual, AstNode *site, const char *what)
 {
-    if (type_equals(target, source))
+    if (!expected || !actual)
+        return false;
+
+    if (type_equals(expected, actual) || type_can_assign_to(actual, expected))
         return true;
 
-    // for assignments, be more restrictive than general casting
-    if (!type_can_assign_to(source, target))
-    {
-        char target_str[256] = {0};
-        char source_str[256] = {0};
-        format_type_name(target, target_str, sizeof(target_str));
-        format_type_name(source, source_str, sizeof(source_str));
+    char *expected_str = type_to_string(expected);
+    char *actual_str   = type_to_string(actual);
+    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, site, ctx->file_path, "%s has incompatible type (expected %s, got %s)", what ? what : "value", expected_str ? expected_str : "<unknown>", actual_str ? actual_str : "<unknown>");
+    free(expected_str);
+    free(actual_str);
+    return false;
+}
 
-        semantic_error(analyzer, node, "incompatible types in assignment: expected `%s`, got `%s`", target_str, source_str);
-        return false;
+static Type *analyze_array_as_struct(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr, Type *specified_type, Type *resolved_type)
+{
+    if (!expr->array_expr.elems)
+    {
+        expr->type = specified_type;
+        return specified_type;
     }
 
+    size_t field_count = 0;
+    for (Symbol *field = resolved_type->composite.fields; field; field = field->next)
+        field_count++;
+
+    size_t elem_count = (size_t)expr->array_expr.elems->count;
+    if (elem_count > field_count)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "too many initializers for composite literal (expected %zu, got %zu)", field_count, elem_count);
+        return NULL;
+    }
+
+    Symbol *field_sym = resolved_type->composite.fields;
+    for (size_t i = 0; i < elem_count && field_sym; i++, field_sym = field_sym->next)
+    {
+        AstNode *value      = expr->array_expr.elems->items[i];
+        Type    *value_type = analyze_expr_with_hint(driver, ctx, value, field_sym->type);
+        if (!value_type)
+            return NULL;
+
+        if (!ensure_assignable(driver, ctx, field_sym->type, value_type, value, "initializer"))
+            return NULL;
+    }
+
+    expr->type = specified_type;
+    return specified_type;
+}
+
+static Type *analyze_array_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
+{
+    if (!expr->array_expr.type)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "array literal requires an explicit type");
+        return NULL;
+    }
+
+    Type *specified_type = resolve_type_in_context(driver, ctx, expr->array_expr.type);
+    if (!specified_type)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "cannot resolve array literal type");
+        return NULL;
+    }
+
+    Type *resolved_type = type_resolve_alias(specified_type);
+    if (!resolved_type)
+        resolved_type = specified_type;
+
+    if (resolved_type->kind == TYPE_ARRAY)
+    {
+        size_t elem_count     = expr->array_expr.elems ? (size_t)expr->array_expr.elems->count : 0;
+        bool   treat_as_slice = false;
+
+        if (expr->array_expr.type && expr->array_expr.type->kind == AST_TYPE_ARRAY)
+        {
+            treat_as_slice = (expr->array_expr.type->type_array.size == NULL);
+        }
+        else if ((!expr->array_expr.type || expr->array_expr.type->kind == AST_TYPE_NAME) && elem_count <= 2)
+        {
+            // type aliases to slices appear as names; treat them as slices as well
+            treat_as_slice = true;
+        }
+
+        Type *elem_type = resolved_type->array.elem_type;
+
+        if (treat_as_slice)
+        {
+            expr->array_expr.is_slice_literal = true;
+
+            Type *data_type = type_pointer_create(elem_type);
+            Type *len_type  = type_u64();
+
+            if (elem_count == 0)
+            {
+                expr->type = specified_type;
+                return specified_type;
+            }
+
+            if (elem_count > 2)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "slice literal expects at most data and length expressions");
+                return NULL;
+            }
+
+            AstNode *data_expr = expr->array_expr.elems->items[0];
+            Type    *data_val  = analyze_expr_with_hint(driver, ctx, data_expr, data_type);
+            if (!data_val)
+                return NULL;
+            if (!ensure_assignable(driver, ctx, data_type, data_val, data_expr, "slice data"))
+                return NULL;
+
+            if (elem_count == 1)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "slice literal missing length expression");
+                return NULL;
+            }
+
+            AstNode *len_expr = expr->array_expr.elems->items[1];
+            Type    *len_val  = analyze_expr_with_hint(driver, ctx, len_expr, len_type);
+            if (!len_val)
+                return NULL;
+            if (!ensure_assignable(driver, ctx, len_type, len_val, len_expr, "slice length"))
+                return NULL;
+
+            expr->type = specified_type;
+            return specified_type;
+        }
+
+        for (size_t i = 0; i < elem_count; i++)
+        {
+            AstNode *elem       = expr->array_expr.elems->items[i];
+            Type    *value_type = analyze_expr_with_hint(driver, ctx, elem, elem_type);
+            if (!value_type)
+                return NULL;
+
+            if (!ensure_assignable(driver, ctx, elem_type, value_type, elem, "array element"))
+                return NULL;
+        }
+
+        expr->type = specified_type;
+        return specified_type;
+    }
+
+    if (resolved_type->kind == TYPE_STRUCT || resolved_type->kind == TYPE_UNION)
+        return analyze_array_as_struct(driver, ctx, expr, specified_type, resolved_type);
+
+    Type  *elem_type  = resolved_type;
+    size_t elem_count = expr->array_expr.elems ? (size_t)expr->array_expr.elems->count : 0;
+
+    for (size_t i = 0; i < elem_count; i++)
+    {
+        AstNode *elem       = expr->array_expr.elems->items[i];
+        Type    *value_type = analyze_expr_with_hint(driver, ctx, elem, elem_type);
+        if (!value_type)
+            return NULL;
+
+        if (!ensure_assignable(driver, ctx, elem_type, value_type, elem, "array element"))
+            return NULL;
+    }
+
+    expr->type = type_array_create(elem_type);
+    return expr->type;
+}
+
+static Type *analyze_expr_with_hint(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr, Type *expected)
+{
+    if (!expr)
+        return NULL;
+
+    switch (expr->kind)
+    {
+    case AST_EXPR_LIT:
+        return analyze_lit_expr_with_hint(driver, ctx, expr, expected);
+    case AST_EXPR_NULL:
+        return analyze_null_expr_with_hint(driver, ctx, expr, expected);
+    case AST_EXPR_ARRAY:
+        return analyze_array_expr(driver, ctx, expr);
+    case AST_EXPR_STRUCT:
+        if (expected && !expr->struct_expr.type)
+            expr->type = expected;
+        return analyze_struct_expr(driver, ctx, expr);
+    default:
+        return analyze_expr(driver, ctx, expr);
+    }
+}
+
+static Type *analyze_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
+{
+    if (!expr)
+        return NULL;
+
+    switch (expr->kind)
+    {
+    case AST_EXPR_LIT:
+        return analyze_lit_expr_with_hint(driver, ctx, expr, NULL);
+    case AST_EXPR_IDENT:
+        return analyze_ident_expr(driver, ctx, expr);
+    case AST_EXPR_BINARY:
+        return analyze_binary_expr(driver, ctx, expr);
+    case AST_EXPR_UNARY:
+        return analyze_unary_expr(driver, ctx, expr);
+    case AST_EXPR_CALL:
+        return analyze_call_expr(driver, ctx, expr);
+    case AST_EXPR_FIELD:
+        return analyze_field_expr(driver, ctx, expr);
+    case AST_EXPR_INDEX:
+        return analyze_index_expr(driver, ctx, expr);
+    case AST_EXPR_CAST:
+        return analyze_cast_expr(driver, ctx, expr);
+    case AST_EXPR_STRUCT:
+        return analyze_struct_expr(driver, ctx, expr);
+    case AST_EXPR_ARRAY:
+        return analyze_array_expr(driver, ctx, expr);
+    case AST_EXPR_VARARGS:
+        // varargs forwarding - TODO: implement properly
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "varargs forwarding not yet implemented");
+        return NULL;
+    case AST_EXPR_NULL:
+        return analyze_null_expr_with_hint(driver, ctx, expr, NULL);
+    default:
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "unsupported expression kind");
+        return NULL;
+    }
+}
+
+// statement analysis
+static bool analyze_block_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    if (!stmt->block_stmt.stmts)
+        return true;
+
+    // create a new scope for the block
+    Scope          *block_scope = scope_create(ctx->current_scope, "block");
+    AnalysisContext block_ctx   = analysis_context_with_scope(ctx, block_scope);
+
+    bool success = true;
+    for (int i = 0; i < stmt->block_stmt.stmts->count; i++)
+    {
+        AstNode *inner = stmt->block_stmt.stmts->items[i];
+        if (!analyze_stmt(driver, &block_ctx, inner))
+        {
+            success = false;
+        }
+    }
+
+    // note: we don't free the scope - it's owned by the parent scope's children
+    return success;
+}
+
+static bool analyze_expr_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    Type *type = analyze_expr(driver, ctx, stmt->expr_stmt.expr);
+    if (!type)
+    {
+        if (stmt->expr_stmt.expr && stmt->expr_stmt.expr->kind == AST_EXPR_CALL)
+        {
+            Type *func_type = NULL;
+            if (stmt->expr_stmt.expr->symbol && stmt->expr_stmt.expr->symbol->type && stmt->expr_stmt.expr->symbol->type->kind == TYPE_FUNCTION)
+            {
+                func_type = stmt->expr_stmt.expr->symbol->type;
+            }
+            else if (stmt->expr_stmt.expr->call_expr.func && stmt->expr_stmt.expr->call_expr.func->type && stmt->expr_stmt.expr->call_expr.func->type->kind == TYPE_FUNCTION)
+            {
+                func_type = stmt->expr_stmt.expr->call_expr.func->type;
+            }
+
+            if (func_type && func_type->function.return_type == NULL)
+            {
+                // void call used as expression is valid
+                return true;
+            }
+        }
+
+        return false;
+    }
     return true;
 }
 
-bool semantic_check_binary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *left, Type *right, AstNode *node)
+static bool analyze_var_stmt_body(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
 {
-    switch (op)
+    const char *name   = stmt->var_stmt.name;
+    bool        is_val = stmt->var_stmt.is_val;
+
+    // check if this is a global variable (symbol already created in Pass A)
+    if (stmt->symbol && stmt->symbol->kind != SYMBOL_PARAM && ((stmt->symbol->kind == SYMBOL_VAR || stmt->symbol->kind == SYMBOL_VAL) && stmt->symbol->var.is_global))
     {
-    case TOKEN_PLUS:
-    case TOKEN_MINUS:
-    case TOKEN_STAR:
-    case TOKEN_SLASH:
-    case TOKEN_PERCENT:
-        if (!type_is_numeric(left) || !type_is_numeric(right))
+        // global variable - just analyze initializer
+        if (stmt->var_stmt.init)
         {
-            semantic_error(analyzer, node, "arithmetic requires numeric operands");
-            return false;
-        }
-        return true;
-
-    case TOKEN_EQUAL_EQUAL:
-    case TOKEN_BANG_EQUAL:
-        if (!type_equals(left, right) && !type_can_cast_to(left, right) && !type_can_cast_to(right, left))
-        {
-            char left_str[256]  = {0};
-            char right_str[256] = {0};
-            format_type_name(left, left_str, sizeof(left_str));
-            format_type_name(right, right_str, sizeof(right_str));
-
-            semantic_error(analyzer, node, "incompatible types for comparison: `%s` and `%s`", left_str, right_str);
-            return false;
-        }
-        return true;
-
-    case TOKEN_LESS:
-    case TOKEN_LESS_EQUAL:
-    case TOKEN_GREATER:
-    case TOKEN_GREATER_EQUAL:
-        if (!type_is_numeric(left) || !type_is_numeric(right))
-        {
-            semantic_error(analyzer, node, "ordering comparison requires numeric operands");
-            return false;
-        }
-        return true;
-
-    case TOKEN_AMPERSAND_AMPERSAND:
-    case TOKEN_PIPE_PIPE:
-    case TOKEN_KW_OR:
-        // in Mach, logical operators work on any type (truthiness)
-        return true;
-
-    case TOKEN_AMPERSAND:
-    case TOKEN_PIPE:
-    case TOKEN_CARET:
-    case TOKEN_LESS_LESS:
-    case TOKEN_GREATER_GREATER:
-        if (!type_is_integer(left) || !type_is_integer(right))
-        {
-            semantic_error(analyzer, node, "bitwise operations require integer operands");
-            return false;
-        }
-        return true;
-
-    case TOKEN_EQUAL:
-        // assignment: check if right can be assigned to left
-        if (!semantic_check_assignment(analyzer, left, right, node))
-        {
-            return false;
-        }
-        return true;
-
-    default:
-        semantic_error(analyzer, node, "unknown binary operator");
-        return false;
-    }
-}
-
-bool semantic_check_unary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *operand, AstNode *node)
-{
-    switch (op)
-    {
-    case TOKEN_PLUS:
-    case TOKEN_MINUS:
-        if (!type_is_numeric(operand))
-        {
-            semantic_error(analyzer, node, "arithmetic unary requires numeric operand");
-            return false;
-        }
-        return true;
-
-    case TOKEN_BANG:
-        // logical not works on any type
-        return true;
-
-    case TOKEN_TILDE:
-        if (!type_is_integer(operand))
-        {
-            semantic_error(analyzer, node, "bitwise not requires integer operand");
-            return false;
-        }
-        return true;
-
-    case TOKEN_QUESTION:
-        if (!is_lvalue(node->unary_expr.expr))
-        {
-            semantic_error(analyzer, node, "address-of operator requires an lvalue");
-            return false;
-        }
-        return true;
-
-    case TOKEN_AT:
-        if (!type_is_pointer_like(operand))
-        {
-            semantic_error(analyzer, node, "dereference requires pointer-like operand");
-            return false;
-        }
-        return true;
-
-    default:
-        semantic_error(analyzer, node, "unknown unary operator");
-        return false;
-    }
-}
-
-bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, AstList *args, AstNode *node)
-{
-    size_t fixed_count  = func_type->function.param_count;
-    size_t actual_count = args ? args->count : 0;
-    bool   is_variadic  = func_type->function.is_variadic;
-
-    bool   forwards_varargs = false;
-    size_t forward_index     = SIZE_MAX;
-
-    if (args)
-    {
-        for (size_t i = 0; i < actual_count; i++)
-        {
-            AstNode *arg = args->items[i];
-            if (arg && arg->kind == AST_EXPR_VARARGS)
+            Type *var_type  = stmt->type;
+            Type *init_type = analyze_expr(driver, ctx, stmt->var_stmt.init);
+            if (!init_type)
             {
-                if (forwards_varargs)
-                {
-                    semantic_error(analyzer, node, "multiple '...' arguments are not allowed");
-                    return false;
-                }
-                forwards_varargs = true;
-                forward_index    = i;
-            }
-        }
-    }
-
-    if (!is_variadic)
-    {
-        if (forwards_varargs)
-        {
-            semantic_error(analyzer, node, "'...' cannot be used with non-variadic functions");
-            return false;
-        }
-        if (fixed_count != actual_count)
-        {
-            semantic_error(analyzer, node, "function expects %zu arguments, got %zu", fixed_count, actual_count);
-            return false;
-        }
-    }
-    else
-    {
-        if (actual_count < fixed_count)
-        {
-            semantic_error(analyzer, node, "variadic function expects at least %zu arguments, got %zu", fixed_count, actual_count);
-            return false;
-        }
-    }
-
-    if (forwards_varargs)
-    {
-        if (!analyzer->current_function || !analyzer->current_function->symbol || !analyzer->current_function->fun_stmt.is_variadic)
-        {
-            semantic_error(analyzer, node, "'...' used outside a variadic function");
-            return false;
-        }
-
-        if (forward_index < fixed_count)
-        {
-            semantic_error(analyzer, node, "'...' cannot satisfy required parameters");
-            return false;
-        }
-
-        if (forward_index != actual_count - 1)
-        {
-            semantic_error(analyzer, node, "'...' must be the final argument");
-            return false;
-        }
-
-        if (actual_count > fixed_count + 1)
-        {
-            semantic_error(analyzer, node, "additional arguments are not allowed when forwarding '...'");
-            return false;
-        }
-
-        Symbol *callee_symbol = (node && node->call_expr.func) ? node->call_expr.func->symbol : NULL;
-        bool    callee_uses_mach_varargs = is_variadic;
-        if (callee_symbol && callee_symbol->kind == SYMBOL_FUNC)
-        {
-            callee_uses_mach_varargs = callee_symbol->func.uses_mach_varargs;
-        }
-
-        if (!callee_uses_mach_varargs)
-        {
-            semantic_error(analyzer, node, "'...' forwarding requires a Mach variadic function");
-            return false;
-        }
-    }
-
-    // check fixed arguments
-    for (size_t i = 0; i < fixed_count; i++)
-    {
-        AstNode *arg_node = args ? args->items[i] : NULL;
-        if (!arg_node)
-        {
-            semantic_error(analyzer, node, "missing argument for parameter %zu", i);
-            return false;
-        }
-        if (arg_node->kind == AST_EXPR_VARARGS)
-        {
-            semantic_error(analyzer, arg_node, "'...' cannot bind to a fixed parameter");
-            return false;
-        }
-        Type *param_type = func_type->function.param_types[i];
-        Type *arg_type   = semantic_analyze_expr_with_hint(analyzer, arg_node, param_type);
-        if (!arg_type)
-            return false;
-        if (!semantic_check_assignment(analyzer, param_type, arg_type, arg_node))
-            return false;
-    }
-
-    // analyze variadic arguments for side effects and basic validity
-    if (is_variadic)
-    {
-        for (size_t i = fixed_count; i < actual_count; i++)
-        {
-            AstNode *arg_node = args->items[i];
-            if (arg_node->kind == AST_EXPR_VARARGS)
-            {
-                continue;
-            }
-            if (forwards_varargs)
-            {
-                semantic_error(analyzer, arg_node, "additional arguments are not allowed when forwarding '...'");
                 return false;
             }
-            // no type checking beyond being a valid expression
-            if (!semantic_analyze_expr(analyzer, arg_node))
+
+            if (var_type && !type_equals(var_type, init_type) && !type_can_assign_to(init_type, var_type))
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "incompatible initializer type for variable '%s'", name);
                 return false;
+            }
         }
+        return true;
     }
 
-    return true;
-}
+    // local variable - create symbol and analyze
+    Type *var_type  = stmt->type;
+    Type *init_type = NULL;
 
-void semantic_error_list_init(SemanticErrorList *list)
-{
-    list->errors   = NULL;
-    list->count    = 0;
-    list->capacity = 0;
-}
-
-void semantic_error_list_dnit(SemanticErrorList *list)
-{
-    for (int i = 0; i < list->count; i++)
+    if (!var_type)
     {
-        if (list->errors[i].token)
+        if (stmt->var_stmt.type)
         {
-            token_dnit(list->errors[i].token);
-            free(list->errors[i].token);
+            // explicit type annotation
+            var_type = resolve_type_in_context(driver, ctx, stmt->var_stmt.type);
+            if (!var_type)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "cannot resolve type for variable '%s'", name);
+                var_type = type_error();
+            }
         }
-        free(list->errors[i].message);
-        free(list->errors[i].file_path);
-    }
-    free(list->errors);
-}
-
-void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *message, const char *file_path)
-{
-    if (list->count >= list->capacity)
-    {
-        list->capacity = list->capacity ? list->capacity * 2 : 8;
-        list->errors   = realloc(list->errors, sizeof(SemanticError) * list->capacity);
-    }
-
-    Token *error_token = NULL;
-    if (token)
-    {
-        error_token = malloc(sizeof(Token));
-        if (error_token)
+        else if (stmt->var_stmt.init)
         {
-            token_copy(token, error_token);
-        }
-    }
-
-    list->errors[list->count].token     = error_token;
-    list->errors[list->count].message   = strdup(message);
-    list->errors[list->count].file_path = file_path ? strdup(file_path) : NULL;
-    list->count++;
-}
-
-static bool semantic_fetch_file_context(const char *file_path, int pos, int *line_out, int *col_out, char **line_text_out)
-{
-    if (!file_path)
-        return false;
-
-    FILE *fp = fopen(file_path, "rb");
-    if (!fp)
-        return false;
-
-    if (fseek(fp, 0, SEEK_END) != 0)
-    {
-        fclose(fp);
-        return false;
-    }
-
-    long size = ftell(fp);
-    if (size < 0)
-    {
-        fclose(fp);
-        return false;
-    }
-
-    if (fseek(fp, 0, SEEK_SET) != 0)
-    {
-        fclose(fp);
-        return false;
-    }
-
-    char *buffer = malloc((size_t)size + 1);
-    if (!buffer)
-    {
-        fclose(fp);
-        return false;
-    }
-
-    size_t read = fread(buffer, 1, (size_t)size, fp);
-    fclose(fp);
-    buffer[read] = '\0';
-
-    if (pos < 0)
-        pos = 0;
-    if ((size_t)pos > read)
-        pos = (int)read;
-
-    size_t index = 0;
-    int    line  = 1;
-    int    col   = 1;
-    while (index < (size_t)pos && index < read)
-    {
-        if (buffer[index] == '\n')
-        {
-            line++;
-            col = 1;
+            // infer type from initializer
+            init_type = analyze_expr(driver, ctx, stmt->var_stmt.init);
+            if (!init_type)
+                init_type = type_error();
+            var_type = init_type;
         }
         else
         {
-            col++;
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "variable '%s' has no type or initializer", name);
+            var_type = type_error();
         }
-        index++;
+
+        stmt->type = var_type;
     }
 
-    size_t caret_index = (size_t)pos;
-    if (caret_index >= read && read > 0)
-        caret_index = read - 1;
-
-    size_t line_start = caret_index;
-    while (line_start > 0 && buffer[line_start - 1] != '\n' && buffer[line_start - 1] != '\r')
-        line_start--;
-
-    size_t line_end = caret_index;
-    while (line_end < read && buffer[line_end] != '\n' && buffer[line_end] != '\r')
-        line_end++;
-
-    size_t len = line_end > line_start ? (line_end - line_start) : 0;
-    char  *line_text = malloc(len + 1);
-    if (!line_text)
+    // check for redefinition in current scope before installing symbol
+    Symbol *existing = symbol_lookup_scope(ctx->current_scope, name);
+    if (existing)
     {
-        free(buffer);
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "redefinition of '%s'", name);
         return false;
     }
 
-    if (len > 0)
-        memcpy(line_text, buffer + line_start, len);
-    line_text[len] = '\0';
+    // ensure symbol exists even if initializer fails, to avoid cascading undefined identifier errors
+    SymbolKind kind       = is_val ? SYMBOL_VAL : SYMBOL_VAR;
+    Symbol    *symbol     = symbol_create(kind, name, var_type, stmt);
+    symbol->var.is_global = false;
+    symbol->var.is_const  = is_val;
+    symbol->home_scope    = ctx->current_scope;
+    symbol_add(ctx->current_scope, symbol);
+    stmt->symbol = symbol;
 
-    free(buffer);
+    // analyze initializer (if annotation present we may not have inspected yet)
+    if (stmt->var_stmt.init && !init_type)
+    {
+        init_type = analyze_expr(driver, ctx, stmt->var_stmt.init);
+        if (!init_type)
+            return false;
+    }
 
-    if (line_out)
-        *line_out = line;
-    if (col_out)
-        *col_out = col;
-    if (line_text_out)
-        *line_text_out = line_text;
-    else
-        free(line_text);
+    if (init_type && init_type != type_error() && var_type && var_type != type_error())
+    {
+        if (!type_equals(var_type, init_type) && !type_can_assign_to(init_type, var_type))
+        {
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "incompatible initializer type for variable '%s'", name);
+            return false;
+        }
+    }
+
+    if (!var_type || var_type == type_error())
+    {
+        return false;
+    }
+
+    symbol->type = var_type;
+    stmt->type   = var_type;
 
     return true;
 }
 
-void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char *file_path)
+static bool analyze_ret_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
 {
-    for (int i = 0; i < list->count; i++)
+    if (!ctx->current_function)
     {
-        Token      *token           = list->errors[i].token;
-        const char *error_file_path = list->errors[i].file_path ? list->errors[i].file_path : file_path;
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "return statement outside function");
+        return false;
+    }
 
-        fprintf(stderr, "error: %s\n", list->errors[i].message);
+    Type *func_ret = ctx->current_function->type->function.return_type;
 
-        if (token && error_file_path)
+    if (!stmt->ret_stmt.expr)
+    {
+        if (func_ret)
         {
-            if (lexer && file_path && strcmp(error_file_path, file_path) == 0)
-            {
-                int   line      = lexer_get_pos_line(lexer, token->pos);
-                int   col       = lexer_get_pos_line_offset(lexer, token->pos);
-                char *line_text = lexer_get_line_text(lexer, line);
-
-                if (!line_text)
-                {
-                    line_text = strdup("unable to retrieve line text");
-                }
-
-                fprintf(stderr, "%s:%d:%d\n", error_file_path, line + 1, col);
-                fprintf(stderr, "%5d | %s\n", line + 1, line_text);
-                fprintf(stderr, "      | %*s^\n", col > 1 ? col - 1 : 0, "");
-
-                free(line_text);
-            }
-            else
-            {
-                int   line_num = 0;
-                int   col_num  = 0;
-                char *line_text = NULL;
-
-                if (semantic_fetch_file_context(error_file_path, token->pos, &line_num, &col_num, &line_text))
-                {
-                    fprintf(stderr, "%s:%d:%d\n", error_file_path, line_num, col_num);
-                    fprintf(stderr, "%5d | %s\n", line_num, line_text ? line_text : "");
-                    fprintf(stderr, "      | %*s^\n", col_num > 1 ? col_num - 1 : 0, "");
-                    free(line_text);
-                }
-                else
-                {
-                    fprintf(stderr, "%s:pos:%d\n", error_file_path, token->pos);
-                    fprintf(stderr, "      | (from imported module)\n");
-                }
-            }
+            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "function must return a value");
+            return false;
         }
-        else if (error_file_path)
+        return true;
+    }
+
+    Type *ret_type = analyze_expr(driver, ctx, stmt->ret_stmt.expr);
+    if (!ret_type)
+        return false;
+
+    if (!func_ret)
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "void function cannot return a value");
+        return false;
+    }
+
+    if (!type_equals(ret_type, func_ret) && !type_can_assign_to(ret_type, func_ret))
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "incompatible return type");
+        return false;
+    }
+
+    return true;
+}
+
+static bool analyze_if_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    Type *cond_type = NULL;
+    if (stmt->cond_stmt.cond)
+    {
+        cond_type = analyze_expr(driver, ctx, stmt->cond_stmt.cond);
+        if (!cond_type)
         {
-            fprintf(stderr, "%s\n", error_file_path);
-            fprintf(stderr, "      | (location unavailable)\n");
+            return false;
         }
+    }
+
+    bool success = analyze_stmt(driver, ctx, stmt->cond_stmt.body);
+
+    if (stmt->cond_stmt.stmt_or)
+        success = analyze_stmt(driver, ctx, stmt->cond_stmt.stmt_or) && success;
+
+    return success;
+}
+
+static bool analyze_for_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    if (stmt->for_stmt.cond)
+    {
+        Type *cond_type = analyze_expr(driver, ctx, stmt->for_stmt.cond);
+        if (!cond_type)
+        {
+            return false;
+        }
+    }
+
+    return analyze_stmt(driver, ctx, stmt->for_stmt.body);
+}
+
+static bool analyze_stmt(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
+{
+    if (!stmt)
+        return true;
+
+    switch (stmt->kind)
+    {
+    case AST_STMT_BLOCK:
+        return analyze_block_stmt(driver, ctx, stmt);
+    case AST_STMT_EXPR:
+        return analyze_expr_stmt(driver, ctx, stmt);
+    case AST_STMT_VAR:
+    case AST_STMT_VAL:
+        return analyze_var_stmt_body(driver, ctx, stmt);
+    case AST_STMT_RET:
+        return analyze_ret_stmt(driver, ctx, stmt);
+    case AST_STMT_IF:
+    case AST_STMT_OR:
+        return analyze_if_stmt(driver, ctx, stmt);
+    case AST_STMT_FOR:
+        return analyze_for_stmt(driver, ctx, stmt);
+    default:
+        return true;
     }
 }
 
-void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...)
+static bool analyze_function_body(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *stmt)
 {
-    analyzer->has_errors = true;
+    if (!stmt->fun_stmt.body)
+        return true; // external function
 
-    // format the message
-    va_list args;
-    va_start(args, fmt);
+    // create a dedicated scope for function-local symbols
+    const char *scope_name = stmt->fun_stmt.name ? stmt->fun_stmt.name : "<lambda>";
+    Scope      *func_scope = scope_create(ctx->current_scope, scope_name);
 
-    size_t len = vsnprintf(NULL, 0, fmt, args) + 1;
-    va_end(args);
+    // analysis context for function body
+    AnalysisContext func_ctx = analysis_context_with_function(ctx, stmt->symbol);
+    func_ctx                 = analysis_context_with_scope(&func_ctx, func_scope);
 
-    char *message = malloc(len);
-    va_start(args, fmt);
-    vsnprintf(message, len, fmt, args);
-    va_end(args);
+    // add parameters to function local scope
+    if (stmt->fun_stmt.params)
+    {
+        size_t param_count        = (size_t)stmt->fun_stmt.params->count;
+        Type **symbol_params      = NULL;
+        size_t symbol_param_count = 0;
+        if (stmt->symbol && stmt->symbol->type && stmt->symbol->type->kind == TYPE_FUNCTION)
+        {
+            symbol_params      = stmt->symbol->type->function.param_types;
+            symbol_param_count = stmt->symbol->type->function.param_count;
+        }
 
-    // add to error list
-    Token *token = (node && node->token) ? node->token : NULL;
-    semantic_error_list_add(&analyzer->errors, token, message, NULL);
+        for (size_t i = 0; i < param_count; i++)
+        {
+            AstNode *param = stmt->fun_stmt.params->items[i];
+            if (param->kind != AST_STMT_PARAM)
+                continue;
 
-    free(message);
+            // parameter type already resolved in Pass B
+            Type *param_type = param->type;
+            if (!param_type && symbol_params && i < symbol_param_count)
+                param_type = symbol_params[i];
+            if (!param_type)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, param, ctx->file_path, "parameter '%s' has no resolved type", param->param_stmt.name);
+                continue;
+            }
+            param->type = param_type;
+
+            if (symbol_lookup_scope(func_ctx.current_scope, param->param_stmt.name))
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, param, ctx->file_path, "parameter '%s' conflicts with existing symbol", param->param_stmt.name);
+                continue;
+            }
+
+            // parameters behave like immutable locals
+            Symbol *param_sym      = symbol_create(SYMBOL_PARAM, param->param_stmt.name, param_type, param);
+            param_sym->param.index = (size_t)i;
+            symbol_add(func_ctx.current_scope, param_sym);
+        }
+    }
+
+    bool success = analyze_stmt(driver, &func_ctx, stmt->fun_stmt.body);
+
+    // function scope currently leaks; TODO: manage scope lifetime if needed
+    return success;
 }
 
-void semantic_warning(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...)
+static bool analyze_pass_c_bodies(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *root)
 {
-    (void)analyzer; // unused for now
-    (void)node;     // unused for now
+    if (!root || root->kind != AST_PROGRAM)
+        return false;
 
-    printf("semantic warning: ");
+    bool success = true;
 
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
-    va_end(args);
+    // analyze global initializers
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
 
-    printf("\n");
+        if ((stmt->kind == AST_STMT_VAL || stmt->kind == AST_STMT_VAR) && stmt->var_stmt.init)
+        {
+            if (!analyze_var_stmt_body(driver, ctx, stmt))
+            {
+                fprintf(stderr, "error: failed to analyze global variable '%s'\n", stmt->var_stmt.name ? stmt->var_stmt.name : "<anon>");
+                success = false;
+            }
+        }
+    }
+
+    // analyze function bodies (including methods)
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+
+        if (stmt->kind == AST_STMT_FUN && stmt->symbol && !stmt->symbol->func.is_generic)
+        {
+            if (!analyze_function_body(driver, ctx, stmt))
+            {
+                fprintf(stderr, "error: failed to analyze function '%s'\n", stmt->fun_stmt.name ? stmt->fun_stmt.name : "<anon>");
+                success = false;
+            }
+        }
+    }
+
+    return success;
 }
 
-void semantic_mark_fatal(SemanticAnalyzer *analyzer)
+bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *module_name, const char *module_path)
 {
-    if (!analyzer)
-        return;
+    driver->program_root      = root;
+    driver->entry_module_name = module_path;
 
-    analyzer->has_fatal_error = true;
-}
+    // initialize type system
+    type_system_init();
 
-bool semantic_has_fatal_error(SemanticAnalyzer *analyzer)
-{
-    return analyzer ? analyzer->has_fatal_error : false;
+    // create global scope and store in driver for codegen
+    symbol_table_init(&driver->symbol_table);
+
+    Scope          *global_scope = driver->symbol_table.global_scope;
+    AnalysisContext ctx          = analysis_context_create(global_scope, NULL, module_name, module_path);
+
+    bool success = true;
+
+    // ==== PHASE 1: COLLECT ALL MODULES ====
+    // Enqueue dependencies from entry module
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+        if (stmt->kind == AST_STMT_USE)
+        {
+            const char *dep_path = stmt->use_stmt.module_path;
+            if (dep_path && !enqueue_module(driver, dep_path))
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, module_path, "failed to load module '%s'", dep_path);
+                success = false;
+            }
+        }
+    }
+
+    if (!success)
+    {
+        if (driver->diagnostics.count > 0)
+            diagnostic_print_all(&driver->diagnostics);
+        return false;
+    }
+
+    // ==== PHASE 2: PASS A ON ALL MODULES (DECLARE SYMBOLS) ====
+    // First, declare symbols in entry module
+    if (!analyze_pass_a_declarations(driver, &ctx, root))
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module_path, "declaration pass failed for entry module");
+        success = false;
+    }
+
+    // Then, declare symbols in all loaded modules
+    FOR_EACH_MODULE(&driver->module_manager, module)
+    {
+        if (success && module->ast && module->ast->kind == AST_PROGRAM)
+        {
+            Scope          *module_scope = module->symbols->global_scope;
+            AnalysisContext module_ctx   = analysis_context_create(module_scope, module_scope, module->name, module->file_path);
+
+            if (!analyze_pass_a_declarations(driver, &module_ctx, module->ast))
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module->name, "declaration pass failed for module '%s'", module->name);
+                success = false;
+            }
+        }
+    }
+
+    if (!success)
+    {
+        if (driver->diagnostics.count > 0)
+            diagnostic_print_all(&driver->diagnostics);
+        return false;
+    }
+
+    // ==== PHASE 3: IMPORT RESOLUTION (PROCESS USE STATEMENTS) ====
+    // Process imports in entry module
+    for (int i = 0; i < root->program.stmts->count; i++)
+    {
+        AstNode *stmt = root->program.stmts->items[i];
+        if (stmt->kind == AST_STMT_USE)
+        {
+            if (!process_use_statement(driver, &ctx, stmt))
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, module_path, "failed to process use statement");
+                success = false;
+            }
+        }
+    }
+
+    // Process imports in all loaded modules
+    FOR_EACH_MODULE(&driver->module_manager, module)
+    {
+        if (success && module->ast && module->ast->kind == AST_PROGRAM)
+        {
+            Scope          *module_scope = module->symbols->global_scope;
+            AnalysisContext module_ctx   = analysis_context_create(module_scope, module_scope, module->name, module->file_path);
+
+            for (int j = 0; j < module->ast->program.stmts->count; j++)
+            {
+                AstNode *stmt = module->ast->program.stmts->items[j];
+                if (stmt->kind == AST_STMT_USE)
+                {
+                    if (!process_use_statement(driver, &module_ctx, stmt))
+                    {
+                        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, module->name, "failed to process use statement in module '%s'", module->name);
+                        success = false;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!success)
+    {
+        if (driver->diagnostics.count > 0)
+            diagnostic_print_all(&driver->diagnostics);
+        return false;
+    }
+
+    // ==== PHASE 4: PASS B ON ALL MODULES (RESOLVE SIGNATURES) ====
+    // Resolve signatures in entry module
+    if (!analyze_pass_b_signatures(driver, &ctx, root))
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module_path, "signature resolution pass failed for entry module");
+        success = false;
+    }
+
+    // Resolve signatures in all loaded modules
+    FOR_EACH_MODULE(&driver->module_manager, module)
+    {
+        if (success && module->ast && module->ast->kind == AST_PROGRAM)
+        {
+            Scope          *module_scope = module->symbols->global_scope;
+            AnalysisContext module_ctx   = analysis_context_create(module_scope, module_scope, module->name, module->file_path);
+
+            if (!analyze_pass_b_signatures(driver, &module_ctx, module->ast))
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module->name, "signature resolution pass failed for module '%s'", module->name);
+                success = false;
+            }
+        }
+    }
+
+    if (!success)
+    {
+        if (driver->diagnostics.count > 0)
+            diagnostic_print_all(&driver->diagnostics);
+        return false;
+    }
+
+    // ==== PHASE 5: PASS C ON ALL MODULES (ANALYZE BODIES) ====
+    // Analyze bodies in entry module
+    if (!analyze_pass_c_bodies(driver, &ctx, root))
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module_path, "body analysis pass failed for entry module");
+        success = false;
+    }
+
+    // Analyze bodies in all loaded modules
+    FOR_EACH_MODULE(&driver->module_manager, module)
+    {
+        if (success && module->ast && module->ast->kind == AST_PROGRAM)
+        {
+            Scope          *module_scope = module->symbols->global_scope;
+            AnalysisContext module_ctx   = analysis_context_create(module_scope, module_scope, module->name, module->file_path);
+
+            if (!analyze_pass_c_bodies(driver, &module_ctx, module->ast))
+            {
+                fprintf(stderr, "error: body analysis failed in module '%s'\n", module->name ? module->name : "<unknown>");
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module->name, "body analysis pass failed for module '%s'", module->name);
+                success = false;
+            }
+        }
+    }
+
+    if (!success)
+    {
+        if (driver->diagnostics.count > 0)
+            diagnostic_print_all(&driver->diagnostics);
+        return false;
+    }
+
+    // Mark all modules as analyzed
+    FOR_EACH_MODULE(&driver->module_manager, module)
+    {
+        module->is_analyzed = true;
+    }
+
+    // ==== PHASE 6: PROCESS GENERIC INSTANTIATIONS ====
+    if (!process_instantiation_queue(driver, &ctx))
+    {
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module_path, "generic instantiation failed");
+        success = false;
+    }
+
+    // print diagnostics
+    if (driver->diagnostics.count > 0)
+    {
+        // count actual errors
+        size_t error_count = 0;
+        for (size_t i = 0; i < driver->diagnostics.count; i++)
+        {
+            if (driver->diagnostics.entries[i].level == DIAG_ERROR)
+                error_count++;
+        }
+
+        diagnostic_print_all(&driver->diagnostics);
+
+        if (error_count > 0)
+        {
+            fprintf(stderr, "semantic analysis failed with %zu error(s)\n", error_count);
+        }
+    }
+
+    return success && !driver->diagnostics.has_errors;
 }

@@ -552,13 +552,13 @@ static AstNode *ast_clone_checked(const AstNode *node)
         break;
 
     case AST_STMT_EXT:
-        clone->ext_stmt.name       = ast_strdup(node->ext_stmt.name);
-        clone->ext_stmt.convention = ast_strdup(node->ext_stmt.convention);
-        clone->ext_stmt.symbol     = ast_strdup(node->ext_stmt.symbol);
-        clone->fun_stmt.is_method    = node->fun_stmt.is_method;
+        clone->ext_stmt.name            = ast_strdup(node->ext_stmt.name);
+        clone->ext_stmt.convention      = ast_strdup(node->ext_stmt.convention);
+        clone->ext_stmt.symbol          = ast_strdup(node->ext_stmt.symbol);
+        clone->fun_stmt.is_method       = node->fun_stmt.is_method;
         clone->fun_stmt.method_receiver = ast_clone_checked(node->fun_stmt.method_receiver);
-        clone->ext_stmt.type       = ast_clone_checked(node->ext_stmt.type);
-        clone->ext_stmt.is_public  = node->ext_stmt.is_public;
+        clone->ext_stmt.type            = ast_clone_checked(node->ext_stmt.type);
+        clone->ext_stmt.is_public       = node->ext_stmt.is_public;
         break;
 
     case AST_STMT_DEF:
@@ -569,38 +569,38 @@ static AstNode *ast_clone_checked(const AstNode *node)
 
     case AST_STMT_VAL:
     case AST_STMT_VAR:
-        clone->var_stmt.name      = ast_strdup(node->var_stmt.name);
-        clone->var_stmt.type      = ast_clone_checked(node->var_stmt.type);
-        clone->var_stmt.init      = ast_clone_checked(node->var_stmt.init);
-        clone->var_stmt.is_val    = node->var_stmt.is_val;
-        clone->var_stmt.is_public = node->var_stmt.is_public;
+        clone->var_stmt.name        = ast_strdup(node->var_stmt.name);
+        clone->var_stmt.type        = ast_clone_checked(node->var_stmt.type);
+        clone->var_stmt.init        = ast_clone_checked(node->var_stmt.init);
+        clone->var_stmt.is_val      = node->var_stmt.is_val;
+        clone->var_stmt.is_public   = node->var_stmt.is_public;
         clone->var_stmt.mangle_name = ast_strdup(node->var_stmt.mangle_name);
         break;
 
     case AST_STMT_FUN:
-        clone->fun_stmt.name      = ast_strdup(node->fun_stmt.name);
-        clone->fun_stmt.params    = ast_list_clone(node->fun_stmt.params);
-        clone->fun_stmt.generics  = ast_list_clone(node->fun_stmt.generics);
-        clone->fun_stmt.return_type = ast_clone_checked(node->fun_stmt.return_type);
-        clone->fun_stmt.body        = ast_clone_checked(node->fun_stmt.body);
-        clone->fun_stmt.is_variadic = node->fun_stmt.is_variadic;
-        clone->fun_stmt.is_public   = node->fun_stmt.is_public;
-        clone->fun_stmt.mangle_name = ast_strdup(node->fun_stmt.mangle_name);
-        clone->fun_stmt.is_method   = node->fun_stmt.is_method;
+        clone->fun_stmt.name            = ast_strdup(node->fun_stmt.name);
+        clone->fun_stmt.params          = ast_list_clone(node->fun_stmt.params);
+        clone->fun_stmt.generics        = ast_list_clone(node->fun_stmt.generics);
+        clone->fun_stmt.return_type     = ast_clone_checked(node->fun_stmt.return_type);
+        clone->fun_stmt.body            = ast_clone_checked(node->fun_stmt.body);
+        clone->fun_stmt.is_variadic     = node->fun_stmt.is_variadic;
+        clone->fun_stmt.is_public       = node->fun_stmt.is_public;
+        clone->fun_stmt.mangle_name     = ast_strdup(node->fun_stmt.mangle_name);
+        clone->fun_stmt.is_method       = node->fun_stmt.is_method;
         clone->fun_stmt.method_receiver = ast_clone_checked(node->fun_stmt.method_receiver);
         break;
 
     case AST_STMT_STR:
-        clone->str_stmt.name   = ast_strdup(node->str_stmt.name);
-        clone->str_stmt.generics = ast_list_clone(node->str_stmt.generics);
-        clone->str_stmt.fields = ast_list_clone(node->str_stmt.fields);
+        clone->str_stmt.name      = ast_strdup(node->str_stmt.name);
+        clone->str_stmt.generics  = ast_list_clone(node->str_stmt.generics);
+        clone->str_stmt.fields    = ast_list_clone(node->str_stmt.fields);
         clone->str_stmt.is_public = node->str_stmt.is_public;
         break;
 
     case AST_STMT_UNI:
-        clone->uni_stmt.name   = ast_strdup(node->uni_stmt.name);
-        clone->uni_stmt.generics = ast_list_clone(node->uni_stmt.generics);
-        clone->uni_stmt.fields = ast_list_clone(node->uni_stmt.fields);
+        clone->uni_stmt.name      = ast_strdup(node->uni_stmt.name);
+        clone->uni_stmt.generics  = ast_list_clone(node->uni_stmt.generics);
+        clone->uni_stmt.fields    = ast_list_clone(node->uni_stmt.fields);
         clone->uni_stmt.is_public = node->uni_stmt.is_public;
         break;
 
@@ -660,9 +660,9 @@ static AstNode *ast_clone_checked(const AstNode *node)
         break;
 
     case AST_EXPR_CALL:
-        clone->call_expr.func      = ast_clone_checked(node->call_expr.func);
-        clone->call_expr.args      = ast_list_clone(node->call_expr.args);
-        clone->call_expr.type_args = ast_list_clone(node->call_expr.type_args);
+        clone->call_expr.func           = ast_clone_checked(node->call_expr.func);
+        clone->call_expr.args           = ast_list_clone(node->call_expr.args);
+        clone->call_expr.type_args      = ast_list_clone(node->call_expr.type_args);
         clone->call_expr.is_method_call = node->call_expr.is_method_call;
         break;
 
@@ -672,8 +672,8 @@ static AstNode *ast_clone_checked(const AstNode *node)
         break;
 
     case AST_EXPR_FIELD:
-        clone->field_expr.object = ast_clone_checked(node->field_expr.object);
-        clone->field_expr.field  = ast_strdup(node->field_expr.field);
+        clone->field_expr.object    = ast_clone_checked(node->field_expr.object);
+        clone->field_expr.field     = ast_strdup(node->field_expr.field);
         clone->field_expr.is_method = node->field_expr.is_method;
         break;
 
@@ -718,10 +718,10 @@ static AstNode *ast_clone_checked(const AstNode *node)
         break;
 
     case AST_EXPR_STRUCT:
-        clone->struct_expr.type   = ast_clone_checked(node->struct_expr.type);
-        clone->struct_expr.fields = ast_list_clone(node->struct_expr.fields);
-        clone->struct_expr.is_union_literal      = node->struct_expr.is_union_literal;
-        clone->struct_expr.is_anonymous_literal  = node->struct_expr.is_anonymous_literal;
+        clone->struct_expr.type                 = ast_clone_checked(node->struct_expr.type);
+        clone->struct_expr.fields               = ast_list_clone(node->struct_expr.fields);
+        clone->struct_expr.is_union_literal     = node->struct_expr.is_union_literal;
+        clone->struct_expr.is_anonymous_literal = node->struct_expr.is_anonymous_literal;
         break;
 
     case AST_TYPE_NAME:
@@ -1135,9 +1135,9 @@ void ast_print(AstNode *node, int indent)
         {
             ast_print(node->type_fun.params->items[i], indent + 2);
 
-    case AST_TYPE_PARAM:
-        printf("TYPE_PARAM %s\n", node->type_param.name ? node->type_param.name : "<anon>");
-        break;
+        case AST_TYPE_PARAM:
+            printf("TYPE_PARAM %s\n", node->type_param.name ? node->type_param.name : "<anon>");
+            break;
         }
         if (node->type_fun.return_type)
         {
@@ -1607,9 +1607,9 @@ static void ast_print_to_file(AstNode *node, FILE *file, int indent)
         for (int i = 0; i < node->type_fun.params->count; i++)
         {
             ast_print_to_file(node->type_fun.params->items[i], file, indent + 2);
-    case AST_TYPE_PARAM:
-        fprintf(file, "TYPE_PARAM %s\n", node->type_param.name ? node->type_param.name : "<anon>");
-        break;
+        case AST_TYPE_PARAM:
+            fprintf(file, "TYPE_PARAM %s\n", node->type_param.name ? node->type_param.name : "<anon>");
+            break;
         }
         if (node->type_fun.return_type)
         {

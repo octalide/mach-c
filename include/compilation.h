@@ -5,7 +5,7 @@
 #include "codegen.h"
 #include "config.h"
 #include "module.h"
-#include "semantic_new.h"
+#include "semantic.h"
 #include <stdbool.h>
 
 typedef struct

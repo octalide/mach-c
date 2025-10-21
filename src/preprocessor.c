@@ -136,7 +136,7 @@ static bool preprocessor_buffer_append_char(PreprocessorBuffer *buffer, char c)
 
 static char *preprocessor_buffer_take(PreprocessorBuffer *buffer)
 {
-    char *data = buffer->data;
+    char *data       = buffer->data;
     buffer->data     = NULL;
     buffer->length   = 0;
     buffer->capacity = 0;
@@ -167,8 +167,8 @@ static bool preprocessor_frame_stack_push(PreprocessorFrameStack *stack, Preproc
 {
     if (stack->count >= stack->capacity)
     {
-        size_t new_capacity = stack->capacity == 0 ? 4 : stack->capacity * 2;
-        PreprocessorFrame *items = realloc(stack->items, new_capacity * sizeof(PreprocessorFrame));
+        size_t             new_capacity = stack->capacity == 0 ? 4 : stack->capacity * 2;
+        PreprocessorFrame *items        = realloc(stack->items, new_capacity * sizeof(PreprocessorFrame));
         if (!items)
         {
             return false;
@@ -205,10 +205,7 @@ static PreprocessorFrame *preprocessor_frame_stack_top(PreprocessorFrameStack *s
     return &stack->items[stack->count - 1];
 }
 
-static long long preprocessor_constant_lookup(const PreprocessorConstant *constants,
-                                              size_t                      constant_count,
-                                              const char                 *name,
-                                              bool                       *found)
+static long long preprocessor_constant_lookup(const PreprocessorConstant *constants, size_t constant_count, const char *name, bool *found)
 {
     for (size_t i = 0; i < constant_count; i++)
     {
@@ -250,8 +247,7 @@ static void preprocessor_expr_scanner_init(PreprocessorExprScanner *scanner, con
 
 static void preprocessor_expr_skip_ws(PreprocessorExprScanner *scanner)
 {
-    while (scanner->pos < scanner->len &&
-           (scanner->text[scanner->pos] == ' ' || scanner->text[scanner->pos] == '\t'))
+    while (scanner->pos < scanner->len && (scanner->text[scanner->pos] == ' ' || scanner->text[scanner->pos] == '\t'))
     {
         scanner->pos++;
     }
@@ -312,8 +308,7 @@ static PreprocessorExprToken preprocessor_expr_next_token(PreprocessorExprScanne
     if (isalpha((unsigned char)c) || c == '_')
     {
         size_t start = scanner->pos;
-        while (scanner->pos < scanner->len &&
-               (isalnum((unsigned char)scanner->text[scanner->pos]) || scanner->text[scanner->pos] == '_'))
+        while (scanner->pos < scanner->len && (isalnum((unsigned char)scanner->text[scanner->pos]) || scanner->text[scanner->pos] == '_'))
         {
             scanner->pos++;
         }
@@ -402,8 +397,8 @@ static long long preprocessor_parse_number(const char *text, bool *ok)
     }
     clean[j] = '\0';
 
-    char *endptr = NULL;
-    long long value = strtoll(clean, &endptr, 0);
+    char     *endptr = NULL;
+    long long value  = strtoll(clean, &endptr, 0);
     if (endptr == clean)
     {
         if (ok)
@@ -422,40 +417,22 @@ static long long preprocessor_parse_number(const char *text, bool *ok)
     return value;
 }
 
-static long long preprocessor_expr_parse_or(PreprocessorExprScanner *scanner,
-                                            const PreprocessorConstant *constants,
-                                            size_t constant_count,
-                                            bool  *ok);
-static long long preprocessor_expr_parse_and(PreprocessorExprScanner *scanner,
-                                             const PreprocessorConstant *constants,
-                                             size_t constant_count,
-                                             bool  *ok);
-static long long preprocessor_expr_parse_equality(PreprocessorExprScanner *scanner,
-                                                  const PreprocessorConstant *constants,
-                                                  size_t constant_count,
-                                                  bool  *ok);
-static long long preprocessor_expr_parse_unary(PreprocessorExprScanner *scanner,
-                                               const PreprocessorConstant *constants,
-                                               size_t constant_count,
-                                               bool  *ok);
-static long long preprocessor_expr_parse_primary(PreprocessorExprScanner *scanner,
-                                                 const PreprocessorConstant *constants,
-                                                 size_t constant_count,
-                                                 bool  *ok);
+static long long preprocessor_expr_parse_or(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok);
+static long long preprocessor_expr_parse_and(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok);
+static long long preprocessor_expr_parse_equality(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok);
+static long long preprocessor_expr_parse_unary(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok);
+static long long preprocessor_expr_parse_primary(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok);
 
-static long long preprocessor_expr_parse_primary(PreprocessorExprScanner *scanner,
-                                                 const PreprocessorConstant *constants,
-                                                 size_t constant_count,
-                                                 bool  *ok)
+static long long preprocessor_expr_parse_primary(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok)
 {
     preprocessor_expr_skip_ws(scanner);
-    size_t snapshot = scanner->pos;
-    PreprocessorExprToken token = preprocessor_expr_next_token(scanner);
+    size_t                snapshot = scanner->pos;
+    PreprocessorExprToken token    = preprocessor_expr_next_token(scanner);
 
     if (token.kind == PREPROC_EXPR_TOKEN_NUMBER)
     {
-        bool local_ok = false;
-        long long value = preprocessor_parse_number(token.text, &local_ok);
+        bool      local_ok = false;
+        long long value    = preprocessor_parse_number(token.text, &local_ok);
         preprocessor_expr_token_dnit(&token);
         if (!local_ok)
         {
@@ -474,7 +451,7 @@ static long long preprocessor_expr_parse_primary(PreprocessorExprScanner *scanne
 
     if (token.kind == PREPROC_EXPR_TOKEN_IDENTIFIER)
     {
-        bool found = false;
+        bool      found = false;
         long long value = preprocessor_constant_lookup(constants, constant_count, token.text, &found);
         preprocessor_expr_token_dnit(&token);
         if (ok)
@@ -514,10 +491,7 @@ static long long preprocessor_expr_parse_primary(PreprocessorExprScanner *scanne
     return 0;
 }
 
-static long long preprocessor_expr_parse_unary(PreprocessorExprScanner *scanner,
-                                               const PreprocessorConstant *constants,
-                                               size_t constant_count,
-                                               bool  *ok)
+static long long preprocessor_expr_parse_unary(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok)
 {
     preprocessor_expr_skip_ws(scanner);
     if (scanner->pos < scanner->len && scanner->text[scanner->pos] == '!')
@@ -534,13 +508,10 @@ static long long preprocessor_expr_parse_unary(PreprocessorExprScanner *scanner,
     return preprocessor_expr_parse_primary(scanner, constants, constant_count, ok);
 }
 
-static long long preprocessor_expr_parse_equality(PreprocessorExprScanner *scanner,
-                                                  const PreprocessorConstant *constants,
-                                                  size_t constant_count,
-                                                  bool  *ok)
+static long long preprocessor_expr_parse_equality(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok)
 {
-    bool       local_ok = false;
-    long long  left     = preprocessor_expr_parse_unary(scanner, constants, constant_count, &local_ok);
+    bool      local_ok = false;
+    long long left     = preprocessor_expr_parse_unary(scanner, constants, constant_count, &local_ok);
     if (!local_ok)
     {
         if (ok)
@@ -596,10 +567,7 @@ static long long preprocessor_expr_parse_equality(PreprocessorExprScanner *scann
     return left;
 }
 
-static long long preprocessor_expr_parse_and(PreprocessorExprScanner *scanner,
-                                             const PreprocessorConstant *constants,
-                                             size_t constant_count,
-                                             bool  *ok)
+static long long preprocessor_expr_parse_and(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok)
 {
     bool      local_ok = false;
     long long left     = preprocessor_expr_parse_equality(scanner, constants, constant_count, &local_ok);
@@ -642,10 +610,7 @@ static long long preprocessor_expr_parse_and(PreprocessorExprScanner *scanner,
     return left;
 }
 
-static long long preprocessor_expr_parse_or(PreprocessorExprScanner *scanner,
-                                            const PreprocessorConstant *constants,
-                                            size_t constant_count,
-                                            bool  *ok)
+static long long preprocessor_expr_parse_or(PreprocessorExprScanner *scanner, const PreprocessorConstant *constants, size_t constant_count, bool *ok)
 {
     bool      local_ok = false;
     long long left     = preprocessor_expr_parse_and(scanner, constants, constant_count, &local_ok);
@@ -688,10 +653,7 @@ static long long preprocessor_expr_parse_or(PreprocessorExprScanner *scanner,
     return left;
 }
 
-static long long preprocessor_eval_condition(const char                 *expr,
-                                             const PreprocessorConstant *constants,
-                                             size_t                      constant_count,
-                                             bool                       *ok)
+static long long preprocessor_eval_condition(const char *expr, const PreprocessorConstant *constants, size_t constant_count, bool *ok)
 {
     PreprocessorExprScanner scanner;
     preprocessor_expr_scanner_init(&scanner, expr);
@@ -751,17 +713,11 @@ void preprocessor_output_dnit(PreprocessorOutput *output)
     output->line    = 0;
 }
 
-static bool preprocessor_handle_if(const char                 *rest,
-                                   const PreprocessorConstant *constants,
-                                   size_t                      constant_count,
-                                   PreprocessorFrameStack     *frames,
-                                   bool                       *global_active,
-                                   PreprocessorOutput         *output,
-                                   int                         line_no)
+static bool preprocessor_handle_if(const char *rest, const PreprocessorConstant *constants, size_t constant_count, PreprocessorFrameStack *frames, bool *global_active, PreprocessorOutput *output, int line_no)
 {
-    bool parent_active = *global_active;
-    bool cond_ok       = false;
-    long long cond     = preprocessor_eval_condition(rest, constants, constant_count, &cond_ok);
+    bool      parent_active = *global_active;
+    bool      cond_ok       = false;
+    long long cond          = preprocessor_eval_condition(rest, constants, constant_count, &cond_ok);
     if (!cond_ok)
     {
         output->message = strdup("invalid #@if expression");
@@ -772,8 +728,8 @@ static bool preprocessor_handle_if(const char                 *rest,
     bool branch_active = parent_active && (cond != 0);
 
     PreprocessorFrame frame;
-    frame.parent_active = parent_active;
-    frame.branch_taken  = branch_active;
+    frame.parent_active  = parent_active;
+    frame.branch_taken   = branch_active;
     frame.current_active = branch_active;
 
     if (!preprocessor_frame_stack_push(frames, frame))
@@ -787,13 +743,7 @@ static bool preprocessor_handle_if(const char                 *rest,
     return true;
 }
 
-static bool preprocessor_handle_or(const char                 *rest,
-                                   const PreprocessorConstant *constants,
-                                   size_t                      constant_count,
-                                   PreprocessorFrameStack     *frames,
-                                   bool                       *global_active,
-                                   PreprocessorOutput         *output,
-                                   int                         line_no)
+static bool preprocessor_handle_or(const char *rest, const PreprocessorConstant *constants, size_t constant_count, PreprocessorFrameStack *frames, bool *global_active, PreprocessorOutput *output, int line_no)
 {
     PreprocessorFrame *frame = preprocessor_frame_stack_top(frames);
     if (!frame)
@@ -803,8 +753,8 @@ static bool preprocessor_handle_or(const char                 *rest,
         return false;
     }
 
-    bool cond_ok = false;
-    long long cond = preprocessor_eval_condition(rest, constants, constant_count, &cond_ok);
+    bool      cond_ok = false;
+    long long cond    = preprocessor_eval_condition(rest, constants, constant_count, &cond_ok);
     if (!cond_ok)
     {
         output->message = strdup("invalid #@or expression");
@@ -815,7 +765,7 @@ static bool preprocessor_handle_or(const char                 *rest,
     bool branch_active = false;
     if (frame->parent_active && !frame->branch_taken && cond != 0)
     {
-        branch_active     = true;
+        branch_active       = true;
         frame->branch_taken = true;
     }
 
@@ -824,10 +774,7 @@ static bool preprocessor_handle_or(const char                 *rest,
     return true;
 }
 
-static bool preprocessor_handle_end(PreprocessorFrameStack *frames,
-                                    bool                   *global_active,
-                                    PreprocessorOutput     *output,
-                                    int                     line_no)
+static bool preprocessor_handle_end(PreprocessorFrameStack *frames, bool *global_active, PreprocessorOutput *output, int line_no)
 {
     PreprocessorFrame frame;
     if (!preprocessor_frame_stack_pop(frames, &frame))
@@ -853,10 +800,7 @@ static bool preprocessor_is_directive(const char *trimmed)
     return trimmed && trimmed[0] == '#' && trimmed[1] == '@';
 }
 
-bool preprocessor_run(const char *source,
-                      const PreprocessorConstant *constants,
-                      size_t constant_count,
-                      PreprocessorOutput *output)
+bool preprocessor_run(const char *source, const PreprocessorConstant *constants, size_t constant_count, PreprocessorOutput *output)
 {
     if (!output)
     {
@@ -874,10 +818,10 @@ bool preprocessor_run(const char *source,
     PreprocessorFrameStack frames;
     preprocessor_frame_stack_init(&frames);
 
-    bool global_active = true;
-    size_t offset      = 0;
-    int    line_no     = 1;
-    bool   ok          = true;
+    bool   global_active = true;
+    size_t offset        = 0;
+    int    line_no       = 1;
+    bool   ok            = true;
 
     while (offset <= len && ok)
     {
@@ -918,12 +862,12 @@ bool preprocessor_run(const char *source,
                 if (strncmp(directive, "if", 2) == 0 && (directive[2] == '\0' || directive[2] == ' ' || directive[2] == '\t' || directive[2] == '('))
                 {
                     const char *expr = directive + 2;
-                    ok = preprocessor_handle_if(expr, constants, constant_count, &frames, &global_active, output, line_no);
+                    ok               = preprocessor_handle_if(expr, constants, constant_count, &frames, &global_active, output, line_no);
                 }
                 else if (strncmp(directive, "or", 2) == 0 && (directive[2] == '\0' || directive[2] == ' ' || directive[2] == '\t' || directive[2] == '('))
                 {
                     const char *expr = directive + 2;
-                    ok = preprocessor_handle_or(expr, constants, constant_count, &frames, &global_active, output, line_no);
+                    ok               = preprocessor_handle_or(expr, constants, constant_count, &frames, &global_active, output, line_no);
                 }
                 else if (strncmp(directive, "end", 3) == 0 && (directive[3] == '\0' || directive[3] == ' ' || directive[3] == '\t'))
                 {

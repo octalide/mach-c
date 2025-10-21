@@ -8,12 +8,12 @@
 
 // builtin types storage
 static Type *g_builtin_types[TYPE_PTR + 1] = {0};
-static Type *g_error_type                 = NULL;
+static Type *g_error_type                  = NULL;
 
 typedef struct PointerCacheEntry
 {
-    Type                   *base;
-    Type                   *pointer;
+    Type                     *base;
+    Type                     *pointer;
     struct PointerCacheEntry *next;
 } PointerCacheEntry;
 
@@ -79,11 +79,11 @@ void type_system_init(void)
 
     if (!g_error_type)
     {
-        g_error_type          = malloc(sizeof(Type));
-        g_error_type->kind    = TYPE_ERROR;
-        g_error_type->size    = 0;
+        g_error_type            = malloc(sizeof(Type));
+        g_error_type->kind      = TYPE_ERROR;
+        g_error_type->size      = 0;
         g_error_type->alignment = 1;
-        g_error_type->name    = strdup("<error>");
+        g_error_type->name      = strdup("<error>");
     }
 }
 
@@ -204,10 +204,10 @@ Type *type_pointer_create(Type *base)
     type->pointer.base = base;
 
     PointerCacheEntry *entry = malloc(sizeof(PointerCacheEntry));
-    entry->base    = base;
-    entry->pointer = type;
-    entry->next    = g_pointer_cache;
-    g_pointer_cache = entry;
+    entry->base              = base;
+    entry->pointer           = type;
+    entry->next              = g_pointer_cache;
+    g_pointer_cache          = entry;
 
     return type;
 }
@@ -592,8 +592,8 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
             }
         }
 
-    bool  is_variadic = type_node->type_fun.is_variadic;
-    Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
+        bool  is_variadic = type_node->type_fun.is_variadic;
+        Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
         free(param_types); // function_create makes its own copy
         return func_type;
     }
@@ -639,8 +639,8 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
 
                 Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
 
-                size_t field_align = type_alignof(field_type);
-                offset              = type_align_to(offset, field_align);
+                size_t field_align         = type_alignof(field_type);
+                offset                     = type_align_to(offset, field_align);
                 field_symbol->field.offset = offset;
 
                 if (!head)
@@ -692,11 +692,11 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
             return NULL;
         }
 
-        Type   *union_type = type_union_create(NULL);
-        Symbol *head       = NULL;
-        Symbol *tail       = NULL;
-        size_t  max_size   = 0;
-        size_t  max_align  = 1;
+        Type   *union_type  = type_union_create(NULL);
+        Symbol *head        = NULL;
+        Symbol *tail        = NULL;
+        size_t  max_size    = 0;
+        size_t  max_align   = 1;
         size_t  field_count = 0;
 
         if (type_node->type_uni.fields)
@@ -713,7 +713,7 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
                     return NULL;
                 }
 
-                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+                Symbol *field_symbol       = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
                 field_symbol->field.offset = 0;
 
                 if (!head)
@@ -726,8 +726,8 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
                     tail       = field_symbol;
                 }
 
-                size_t field_size   = type_sizeof(field_type);
-                size_t field_align  = type_alignof(field_type);
+                size_t field_size  = type_sizeof(field_type);
+                size_t field_align = type_alignof(field_type);
                 if (field_size > max_size)
                 {
                     max_size = field_size;

@@ -914,8 +914,6 @@ char *config_resolve_src_dir(ProjectConfig *config, const char *project_dir)
     return path;
 }
 
-
-
 char *config_resolve_out_dir(ProjectConfig *config, const char *project_dir)
 {
     if (!config || !config->out_dir)
@@ -974,8 +972,6 @@ char *config_resolve_obj_dir(ProjectConfig *config, const char *project_dir, con
     free(out_dir);
     return path;
 }
-
-
 
 static bool ensure_directory_exists(const char *path)
 {
@@ -1127,12 +1123,12 @@ static const char *config_get_dep_alias(ProjectConfig *config, const char *alias
 {
     if (!config || !alias)
         return NULL;
-    
+
     // check if alias matches a dependency name
     DepSpec *dep = config_get_dep(config, alias);
     if (dep)
         return dep->name; // dependency name IS the module prefix
-    
+
     return NULL;
 }
 

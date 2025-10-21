@@ -6,8 +6,6 @@
 #include "lexer.h"
 #include "preprocessor.h"
 #include "symbol.h"
-
-#include "semantic_new.h"
 #include <llvm-c/Core.h>
 #include <llvm-c/Target.h>
 #include <stdint.h>
@@ -23,8 +21,6 @@ static char       *append_os_suffix(const char *path, const char *os_name);
 static const char *normalize_os_name(const char *os_part);
 static bool        path_has_platform_suffix(const char *path, const char *os_name);
 static void        split_triple(const char *triple, char **arch_out, char **os_out);
-static const char *detect_module_platform(ModuleManager *manager, const char *module_name, const char *file_path);
-static bool        module_name_has_component(const char *module_name, const char *component);
 
 // error handling functions
 void module_error_list_init(ModuleErrorList *list)
@@ -101,9 +97,9 @@ static Module *module_manager_find_canonical(ModuleManager *manager, const char 
 
 static void module_manager_resize(ModuleManager *manager)
 {
-    int       old_capacity = manager->capacity;
-    Module  **old_modules  = manager->modules;
-    
+    int      old_capacity = manager->capacity;
+    Module **old_modules  = manager->modules;
+
     manager->capacity = old_capacity * 2;
     manager->modules  = calloc(manager->capacity, sizeof(Module *));
 
@@ -113,11 +109,11 @@ static void module_manager_resize(ModuleManager *manager)
         Module *module = old_modules[i];
         while (module)
         {
-            Module      *next  = module->next;
-            unsigned int index = hash_module_name(module->name, manager->capacity);
-            module->next       = manager->modules[index];
+            Module      *next       = module->next;
+            unsigned int index      = hash_module_name(module->name, manager->capacity);
+            module->next            = manager->modules[index];
             manager->modules[index] = module;
-            module = next;
+            module                  = next;
         }
     }
 
@@ -446,44 +442,6 @@ static char *build_module_path(const char *base, const char *head, size_t head_l
     }
 
     free(path);
-    return NULL;
-}
-
-static bool module_name_has_component(const char *module_name, const char *component)
-{
-    if (!module_name || !component || !*component)
-        return false;
-
-    size_t      comp_len = strlen(component);
-    const char *cursor   = module_name;
-
-    while (cursor && *cursor)
-    {
-        const char *next = strchr(cursor, '.');
-        size_t      len  = next ? (size_t)(next - cursor) : strlen(cursor);
-        if (len == comp_len && strncmp(cursor, component, len) == 0)
-            return true;
-        if (!next)
-            break;
-        cursor = next + 1;
-    }
-
-    return false;
-}
-
-static const char *detect_module_platform(ModuleManager *manager, const char *module_name, const char *file_path)
-{
-    (void)manager;
-    (void)file_path;
-    static const char *known_platforms[] = {"linux", "darwin", "windows", "freebsd", "netbsd", "openbsd", "dragonfly", "wasm"};
-
-    for (size_t i = 0; i < sizeof(known_platforms) / sizeof(known_platforms[0]); i++)
-    {
-        const char *tag = known_platforms[i];
-        if (module_name_has_component(module_name, tag))
-            return tag;
-    }
-
     return NULL;
 }
 
@@ -1130,62 +1088,6 @@ static char *generate_target_module_source(ModuleManager *manager)
     return out;
 }
 
-bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *program, const char *base_dir)
-{
-    if (program->kind != AST_PROGRAM)
-    {
-        return false;
-    }
-
-    // find all use statements
-    for (int i = 0; i < program->program.stmts->count; i++)
-    {
-        AstNode *stmt = program->program.stmts->items[i];
-        if (stmt->kind == AST_STMT_USE)
-        {
-            char *normalized = module_manager_expand_module(manager, stmt->use_stmt.module_path);
-            if (!normalized)
-            {
-                module_error_list_add(&manager->errors, stmt->use_stmt.module_path, "<unknown>", "could not resolve module path");
-                manager->had_error = true;
-                return false;
-            }
-
-            char *original             = stmt->use_stmt.module_path;
-            stmt->use_stmt.module_path = normalized;
-            free(original);
-
-            // load the module
-            Module *module = module_manager_load_module_internal(manager, stmt->use_stmt.module_path, base_dir);
-            if (!module)
-            {
-                // error already recorded in load_module_internal
-                return false;
-            }
-
-            const char *module_platform = detect_module_platform(manager, module->name, module->file_path);
-            const char *target_platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0) ? manager->target_os : NULL;
-
-            if (module_platform && target_platform && strcmp(module_platform, target_platform) != 0)
-            {
-                module->needs_linking = false;
-            }
-            else
-            {
-                module->needs_linking = true;
-            }
-
-            // recursively resolve dependencies of the loaded module
-            if (!module_manager_resolve_dependencies(manager, module->ast, base_dir))
-            {
-                return false;
-            }
-        }
-    }
-
-    return !manager->had_error;
-}
-
 void module_init(Module *module, const char *name, const char *file_path)
 {
     module->name          = strdup(name);
@@ -1452,25 +1354,7 @@ static bool compile_module_to_object(ModuleManager *manager, Module *module, con
         ctx.source_lexer = debug_lexer_ptr;
     }
 
-    SemanticDriver *stub_driver = NULL;
-    if (module->symbols)
-    {
-        stub_driver                             = semantic_driver_create();
-        stub_driver->symbol_table               = *module->symbols;
-        stub_driver->symbol_table.current_scope = stub_driver->symbol_table.global_scope;
-        stub_driver->symbol_table.module_scope  = module->symbols->module_scope;
-    }
-
-    bool success = codegen_generate(&ctx, module->ast, stub_driver);
-
-    // prevent driver from freeing the borrowed symbol table
-    if (stub_driver)
-    {
-        stub_driver->symbol_table.global_scope  = NULL;
-        stub_driver->symbol_table.current_scope = NULL;
-        stub_driver->symbol_table.module_scope  = NULL;
-        semantic_driver_destroy(stub_driver);
-    }
+    bool success = codegen_generate(&ctx, module->ast, module->symbols);
 
     if (success)
     {

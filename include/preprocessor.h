@@ -21,9 +21,6 @@ typedef struct PreprocessorOutput
 void preprocessor_output_init(PreprocessorOutput *output);
 void preprocessor_output_dnit(PreprocessorOutput *output);
 
-bool preprocessor_run(const char *source,
-                      const PreprocessorConstant *constants,
-                      size_t constant_count,
-                      PreprocessorOutput *output);
+bool preprocessor_run(const char *source, const PreprocessorConstant *constants, size_t constant_count, PreprocessorOutput *output);
 
 #endif

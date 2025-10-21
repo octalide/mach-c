@@ -300,7 +300,7 @@ bool compilation_codegen(CompilationContext *ctx)
     ctx->codegen.source_file  = ctx->options->input_file;
     ctx->codegen.source_lexer = &ctx->lexer;
 
-    if (!codegen_generate(&ctx->codegen, ctx->ast, ctx->driver))
+    if (!codegen_generate(&ctx->codegen, ctx->ast, &ctx->driver->symbol_table))
     {
         fprintf(stderr, "code generation failed:\n");
         codegen_print_errors(&ctx->codegen);

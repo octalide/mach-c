@@ -1,19 +1,19 @@
 #include "codegen.h"
+#include "symbol.h"
 #include "token.h"
 #include "type.h"
-#include "symbol.h"
+#include <limits.h>
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Transforms/PassBuilder.h>
-#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static LLVMValueRef codegen_load_rvalue(CodegenContext *ctx, LLVMValueRef value, Type *type, AstNode *source_expr);
-static void         codegen_debug_init(CodegenContext *ctx);
-static void         codegen_debug_finalize(CodegenContext *ctx);
-static void         codegen_set_debug_location(CodegenContext *ctx, AstNode *node);
+static LLVMValueRef    codegen_load_rvalue(CodegenContext *ctx, LLVMValueRef value, Type *type, AstNode *source_expr);
+static void            codegen_debug_init(CodegenContext *ctx);
+static void            codegen_debug_finalize(CodegenContext *ctx);
+static void            codegen_set_debug_location(CodegenContext *ctx, AstNode *node);
 static LLVMMetadataRef codegen_get_current_scope(CodegenContext *ctx);
 static LLVMMetadataRef codegen_debug_get_unknown_type(CodegenContext *ctx);
 static LLVMMetadataRef codegen_debug_create_subprogram(CodegenContext *ctx, AstNode *stmt, LLVMValueRef func, const char *display_name, const char *link_name, size_t param_count);
@@ -381,7 +381,7 @@ static void codegen_debug_init(CodegenContext *ctx)
         return;
     }
 
-    char resolved[PATH_MAX];
+    char  resolved[PATH_MAX];
     char *full_path = NULL;
     if (realpath(source_path, resolved))
         full_path = strdup(resolved);
@@ -419,34 +419,15 @@ static void codegen_debug_init(CodegenContext *ctx)
 
     ctx->di_unknown_type = NULL;
 
-    LLVMValueRef debug_version_val = LLVMConstInt(LLVMInt32TypeInContext(ctx->context), LLVMDebugMetadataVersion(), false);
-    LLVMMetadataRef debug_version = LLVMValueAsMetadata(debug_version_val);
+    LLVMValueRef    debug_version_val = LLVMConstInt(LLVMInt32TypeInContext(ctx->context), LLVMDebugMetadataVersion(), false);
+    LLVMMetadataRef debug_version     = LLVMValueAsMetadata(debug_version_val);
     LLVMAddModuleFlag(ctx->module, LLVMModuleFlagBehaviorWarning, "Debug Info Version", strlen("Debug Info Version"), debug_version);
-    LLVMValueRef dwarf_version_val = LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 5, false);
-    LLVMMetadataRef dwarf_version = LLVMValueAsMetadata(dwarf_version_val);
+    LLVMValueRef    dwarf_version_val = LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 5, false);
+    LLVMMetadataRef dwarf_version     = LLVMValueAsMetadata(dwarf_version_val);
     LLVMAddModuleFlag(ctx->module, LLVMModuleFlagBehaviorWarning, "Dwarf Version", strlen("Dwarf Version"), dwarf_version);
 
-    ctx->di_file = LLVMDIBuilderCreateFile(ctx->di_builder, ctx->debug_file, strlen(ctx->debug_file), ctx->debug_dir, strlen(ctx->debug_dir));
-    ctx->di_compile_unit = LLVMDIBuilderCreateCompileUnit(
-        ctx->di_builder,
-        LLVMDWARFSourceLanguageC,
-        ctx->di_file,
-        "mach-c",
-        strlen("mach-c"),
-        ctx->opt_level > 0,
-        "",
-        0,
-        0,
-        "",
-        0,
-    LLVMDWARFEmissionFull,
-    0,
-    false,
-    false,
-    "",
-    0,
-    "",
-    0);
+    ctx->di_file         = LLVMDIBuilderCreateFile(ctx->di_builder, ctx->debug_file, strlen(ctx->debug_file), ctx->debug_dir, strlen(ctx->debug_dir));
+    ctx->di_compile_unit = LLVMDIBuilderCreateCompileUnit(ctx->di_builder, LLVMDWARFSourceLanguageC, ctx->di_file, "mach-c", strlen("mach-c"), ctx->opt_level > 0, "", 0, 0, "", 0, LLVMDWARFEmissionFull, 0, false, false, "", 0, "", 0);
 
     ctx->current_di_scope = ctx->di_compile_unit;
     ctx->debug_finalized  = false;
@@ -474,8 +455,8 @@ static void codegen_set_debug_location(CodegenContext *ctx, AstNode *node)
     if (!node || !node->token || !ctx->source_lexer)
         return;
 
-    int line = lexer_get_pos_line(ctx->source_lexer, node->token->pos);
-    int col  = lexer_get_pos_line_offset(ctx->source_lexer, node->token->pos);
+    int             line  = lexer_get_pos_line(ctx->source_lexer, node->token->pos);
+    int             col   = lexer_get_pos_line_offset(ctx->source_lexer, node->token->pos);
     LLVMMetadataRef scope = codegen_get_current_scope(ctx);
     if (!scope)
         return;
@@ -492,7 +473,7 @@ static LLVMMetadataRef codegen_debug_get_unknown_type(CodegenContext *ctx)
         return NULL;
     if (!ctx->di_unknown_type)
     {
-        const char *name = "u64";
+        const char *name     = "u64";
         ctx->di_unknown_type = LLVMDIBuilderCreateBasicType(ctx->di_builder, name, strlen(name), 0, 64, 0);
     }
     return ctx->di_unknown_type;
@@ -511,8 +492,8 @@ static LLVMMetadataRef codegen_debug_create_subprogram(CodegenContext *ctx, AstN
     if (stmt && stmt->token && ctx->source_lexer)
         line = (unsigned)(lexer_get_pos_line(ctx->source_lexer, stmt->token->pos) + 1);
 
-    size_t total_params = param_count + 1; // include return type slot
-    LLVMMetadataRef *param_types = malloc(sizeof(LLVMMetadataRef) * total_params);
+    size_t           total_params = param_count + 1; // include return type slot
+    LLVMMetadataRef *param_types  = malloc(sizeof(LLVMMetadataRef) * total_params);
     if (!param_types)
         return NULL;
 
@@ -530,20 +511,7 @@ static LLVMMetadataRef codegen_debug_create_subprogram(CodegenContext *ctx, AstN
     const char *disp = display_name && display_name[0] ? display_name : (link_name && link_name[0] ? link_name : "<function>");
     const char *link = link_name && link_name[0] ? link_name : disp;
 
-    LLVMMetadataRef subprogram = LLVMDIBuilderCreateFunction(ctx->di_builder,
-        scope,
-        disp,
-        strlen(disp),
-        link,
-        strlen(link),
-        ctx->di_file,
-        line,
-        subroutine_type,
-        false,
-        true,
-        line,
-        LLVMDIFlagZero,
-        ctx->opt_level > 0);
+    LLVMMetadataRef subprogram = LLVMDIBuilderCreateFunction(ctx->di_builder, scope, disp, strlen(disp), link, strlen(link), ctx->di_file, line, subroutine_type, false, true, line, LLVMDIFlagZero, ctx->opt_level > 0);
 
     LLVMSetSubprogram(func, subprogram);
     return subprogram;
@@ -557,6 +525,10 @@ static void codegen_declare_function_symbol(CodegenContext *ctx, Symbol *sym)
     if (sym->kind != SYMBOL_FUNC)
         return;
 
+    // skip generic templates - only declare concrete functions and specialized instances
+    if (sym->func.is_generic && !sym->func.is_specialized_instance)
+        return;
+
     if (codegen_get_symbol_value(ctx, sym))
         return;
 
@@ -566,9 +538,9 @@ static void codegen_declare_function_symbol(CodegenContext *ctx, Symbol *sym)
 
     LLVMTypeRef return_type = func_type->function.return_type ? codegen_get_llvm_type(ctx, func_type->function.return_type) : LLVMVoidTypeInContext(ctx->context);
 
-    bool        uses_mach_varargs = sym->func.uses_mach_varargs;
-    size_t      fixed_params      = func_type->function.param_count;
-    size_t      llvm_param_count  = fixed_params + (uses_mach_varargs ? 2 : 0);
+    bool   uses_mach_varargs = sym->func.uses_mach_varargs;
+    size_t fixed_params      = func_type->function.param_count;
+    size_t llvm_param_count  = fixed_params + (uses_mach_varargs ? 2 : 0);
 
     LLVMTypeRef *param_types = NULL;
     if (llvm_param_count > 0)
@@ -584,8 +556,8 @@ static void codegen_declare_function_symbol(CodegenContext *ctx, Symbol *sym)
 
         if (uses_mach_varargs)
         {
-            LLVMTypeRef i64ty  = LLVMInt64TypeInContext(ctx->context);
-            LLVMTypeRef i8_ptr = LLVMPointerTypeInContext(ctx->context, 0);
+            LLVMTypeRef i64ty             = LLVMInt64TypeInContext(ctx->context);
+            LLVMTypeRef i8_ptr            = LLVMPointerTypeInContext(ctx->context, 0);
             param_types[fixed_params]     = i64ty;
             param_types[fixed_params + 1] = LLVMPointerType(i8_ptr, 0);
         }
@@ -627,10 +599,71 @@ static void codegen_declare_functions_in_scope(CodegenContext *ctx, Scope *scope
     }
 }
 
+static void codegen_generate_specialized_function(Symbol *sym, void *user_data)
+{
+    CodegenContext *ctx = (CodegenContext *)user_data;
+
+    // only generate specialized functions
+    if (sym->kind != SYMBOL_FUNC || !sym->func.is_specialized_instance || !sym->func.is_defined || !sym->decl)
+        return;
+
+    // check if the function already exists in the LLVM module by name
+    // (multiple Symbol objects may exist for the same specialized function)
+    const char  *func_name          = sym->func.mangled_name ? sym->func.mangled_name : sym->name;
+    LLVMValueRef existing_in_module = LLVMGetNamedFunction(ctx->module, func_name);
+    if (existing_in_module && !LLVMIsDeclaration(existing_in_module))
+    {
+        // already has a body in the module, skip and update symbol mapping
+        codegen_set_symbol_value(ctx, sym, existing_in_module);
+        return;
+    }
+
+    // check if function has already been declared (we'll generate the body anyway if it's just a declaration)
+    LLVMValueRef existing = codegen_get_symbol_value(ctx, sym);
+    if (existing && !LLVMIsDeclaration(existing))
+    {
+        // already has a body, skip
+        return;
+    }
+
+    // generate the function using its own cloned, analyzed AST
+    // (each specialization has its own AST with correct scope bindings)
+    codegen_stmt_fun(ctx, sym->decl);
+}
+
+static void codegen_generate_specialized_functions_in_scope(CodegenContext *ctx, Scope *scope)
+{
+    if (!scope)
+        return;
+
+    // walk all symbols and generate bodies for specialized function instances
+    for (Symbol *sym = scope->symbols; sym; sym = sym->next)
+    {
+        codegen_generate_specialized_function(sym, ctx);
+    }
+}
+
 void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_pie)
 {
     ctx->context = LLVMContextCreate();
-    ctx->module  = LLVMModuleCreateWithNameInContext(module_name, ctx->context);
+
+    // normalize module name for LLVM module: replace dots and slashes with underscores
+    char *normalized_name = NULL;
+    if (module_name)
+    {
+        size_t len      = strlen(module_name);
+        normalized_name = malloc(len + 1);
+        for (size_t i = 0; i < len; i++)
+        {
+            char ch            = module_name[i];
+            normalized_name[i] = (ch == '.' || ch == '/') ? '_' : ch;
+        }
+        normalized_name[len] = '\0';
+    }
+
+    ctx->module = LLVMModuleCreateWithNameInContext(normalized_name ? normalized_name : "module", ctx->context);
+    free(normalized_name);
+
     ctx->builder = LLVMCreateBuilderInContext(ctx->context);
     ctx->no_pie  = no_pie;
 
@@ -656,6 +689,8 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
     LLVMSetModuleDataLayout(ctx->module, ctx->data_layout);
     LLVMSetTarget(ctx->module, LLVMGetDefaultTargetTriple());
 
+    ctx->spec_cache = NULL;
+
     // initialize maps
     ctx->symbol_map.symbols  = NULL;
     ctx->symbol_map.values   = NULL;
@@ -678,24 +713,24 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
     ctx->errors     = NULL;
     ctx->has_errors = false;
 
-    ctx->opt_level      = 2;
-    ctx->debug_info     = false;
-    ctx->debug_finalized = false;
+    ctx->opt_level             = 2;
+    ctx->debug_info            = false;
+    ctx->debug_finalized       = false;
     ctx->di_builder            = NULL;
     ctx->di_compile_unit       = NULL;
     ctx->di_file               = NULL;
     ctx->current_di_scope      = NULL;
     ctx->current_di_subprogram = NULL;
-    ctx->debug_full_path  = NULL;
-    ctx->debug_dir        = NULL;
-    ctx->debug_file       = NULL;
-    ctx->di_unknown_type  = NULL;
+    ctx->debug_full_path       = NULL;
+    ctx->debug_dir             = NULL;
+    ctx->debug_file            = NULL;
+    ctx->di_unknown_type       = NULL;
 
     ctx->current_vararg_count_value = NULL;
     ctx->current_vararg_array       = NULL;
     ctx->current_fixed_param_count  = 0;
-    ctx->source_file               = NULL;
-    ctx->source_lexer              = NULL;
+    ctx->source_file                = NULL;
+    ctx->source_lexer               = NULL;
 }
 
 void codegen_context_dnit(CodegenContext *ctx)
@@ -735,7 +770,9 @@ void codegen_context_dnit(CodegenContext *ctx)
     // no heap state for varargs
 }
 
-bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *analyzer)
+static void codegen_generate_specialized_functions_in_scope(CodegenContext *ctx, Scope *scope);
+
+bool codegen_generate(CodegenContext *ctx, AstNode *root, SymbolTable *symbols)
 {
     if (root->kind != AST_PROGRAM)
     {
@@ -746,10 +783,10 @@ bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *anal
     if (ctx->debug_info)
         codegen_debug_init(ctx);
 
-    if (analyzer)
+    if (symbols)
     {
-        codegen_declare_functions_in_scope(ctx, analyzer->symbol_table.global_scope);
-        codegen_declare_functions_in_scope(ctx, analyzer->symbol_table.module_scope);
+        codegen_declare_functions_in_scope(ctx, symbols->global_scope);
+        codegen_declare_functions_in_scope(ctx, symbols->module_scope);
     }
 
     // generate top-level statements
@@ -757,6 +794,22 @@ bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *anal
     {
         AstNode *stmt = root->program.stmts->items[i];
         codegen_stmt(ctx, stmt);
+    }
+
+    // generate specialized generic function instances from local scopes
+    if (symbols)
+    {
+        codegen_generate_specialized_functions_in_scope(ctx, symbols->global_scope);
+        codegen_generate_specialized_functions_in_scope(ctx, symbols->module_scope);
+    }
+
+    // generate ALL specialized functions from global cache
+    // Each specialization has its own cloned AST with proper scope bindings,
+    // so we can safely generate them in any module. The linker will deduplicate
+    // via linkonce_odr linkage (standard C++ template model)
+    if (ctx->spec_cache)
+    {
+        specialization_cache_foreach(ctx->spec_cache, codegen_generate_specialized_function, ctx);
     }
 
     if (ctx->debug_info)
@@ -769,7 +822,7 @@ bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *anal
         fprintf(stderr, "error: module verification failed: %s\n", error);
         LLVMDisposeMessage(error);
         const char *debug_path = "/tmp/cmach_verify.ll";
-        char        *dump_error = NULL;
+        char       *dump_error = NULL;
         if (LLVMPrintModuleToFile(ctx->module, debug_path, &dump_error) != 0)
         {
             fprintf(stderr, "error: failed to dump module IR: %s\n", dump_error);
@@ -868,8 +921,10 @@ void codegen_print_errors(CodegenContext *ctx)
             {
                 fprintf(stderr, "%s\n", text);
                 // simple caret underline
-                for (int i = 0; i < col - 1; i++) fputc(' ', stderr);
-                fputc('^', stderr); fputc('\n', stderr);
+                for (int i = 0; i < col - 1; i++)
+                    fputc(' ', stderr);
+                fputc('^', stderr);
+                fputc('\n', stderr);
                 free(text);
             }
         }
@@ -939,7 +994,7 @@ LLVMTypeRef codegen_get_llvm_type(CodegenContext *ctx, Type *type)
         break;
     case TYPE_ARRAY:
     {
-    // all arrays are fat pointers: {ptr data, u64 length}
+        // all arrays are fat pointers: {ptr data, u64 length}
         LLVMTypeRef fat_ptr_fields[2] = {
             LLVMPointerTypeInContext(ctx->context, 0), // data pointer
             LLVMInt64TypeInContext(ctx->context)       // length (u64)
@@ -1142,10 +1197,10 @@ LLVMValueRef codegen_stmt(CodegenContext *ctx, AstNode *stmt)
                 size_t code_len = strlen(stmt->asm_stmt.code);
                 if (code_len > 0)
                 {
-                    size_t existing_len = ctx->module_inline_asm_len;
-                    size_t need_leading_newline = (existing_len > 0 && ctx->module_inline_asm[existing_len - 1] != '\n') ? 1 : 0;
+                    size_t existing_len          = ctx->module_inline_asm_len;
+                    size_t need_leading_newline  = (existing_len > 0 && ctx->module_inline_asm[existing_len - 1] != '\n') ? 1 : 0;
                     size_t need_trailing_newline = (stmt->asm_stmt.code[code_len - 1] != '\n') ? 1 : 0;
-                    size_t new_len = existing_len + need_leading_newline + code_len + need_trailing_newline;
+                    size_t new_len               = existing_len + need_leading_newline + code_len + need_trailing_newline;
 
                     char *combined = malloc(new_len + 1);
                     if (!combined)
@@ -1223,10 +1278,10 @@ LLVMValueRef codegen_stmt_ext(CodegenContext *ctx, AstNode *stmt)
     // create LLVM function type
     LLVMTypeRef return_type = func_type->function.return_type ? codegen_get_llvm_type(ctx, func_type->function.return_type) : LLVMVoidTypeInContext(ctx->context);
 
-    LLVMTypeRef *param_types = NULL;
-    bool        uses_mach_varargs = stmt->symbol && stmt->symbol->func.uses_mach_varargs;
-    size_t      fixed_params      = func_type->function.param_count;
-    size_t      llvm_param_count  = fixed_params + (uses_mach_varargs ? 2 : 0);
+    LLVMTypeRef *param_types       = NULL;
+    bool         uses_mach_varargs = stmt->symbol && stmt->symbol->func.uses_mach_varargs;
+    size_t       fixed_params      = func_type->function.param_count;
+    size_t       llvm_param_count  = fixed_params + (uses_mach_varargs ? 2 : 0);
     if (llvm_param_count > 0)
     {
         param_types = malloc(sizeof(LLVMTypeRef) * llvm_param_count);
@@ -1236,8 +1291,8 @@ LLVMValueRef codegen_stmt_ext(CodegenContext *ctx, AstNode *stmt)
         }
         if (uses_mach_varargs)
         {
-            LLVMTypeRef i64ty  = LLVMInt64TypeInContext(ctx->context);
-            LLVMTypeRef i8_ptr = LLVMPointerTypeInContext(ctx->context, 0);
+            LLVMTypeRef i64ty             = LLVMInt64TypeInContext(ctx->context);
+            LLVMTypeRef i8_ptr            = LLVMPointerTypeInContext(ctx->context, 0);
             param_types[fixed_params]     = i64ty;
             param_types[fixed_params + 1] = LLVMPointerType(i8_ptr, 0);
         }
@@ -1289,9 +1344,7 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
     if (!ctx->current_function)
     {
         // top-level: create a true LLVM global
-        const char *gname = stmt->symbol && stmt->symbol->var.mangled_name && stmt->symbol->var.mangled_name[0]
-                                ? stmt->symbol->var.mangled_name
-                                : stmt->var_stmt.name;
+        const char  *gname  = stmt->symbol && stmt->symbol->var.mangled_name && stmt->symbol->var.mangled_name[0] ? stmt->symbol->var.mangled_name : stmt->var_stmt.name;
         LLVMValueRef global = LLVMGetNamedGlobal(ctx->module, gname);
         if (!global)
         {
@@ -1309,7 +1362,7 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
         if (stmt->var_stmt.init)
         {
             // handle constants specially without emitting instructions
-            AstNode *init = stmt->var_stmt.init;
+            AstNode     *init       = stmt->var_stmt.init;
             LLVMValueRef const_init = NULL;
             if (init->kind == AST_EXPR_LIT)
             {
@@ -1335,9 +1388,10 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
                     // build fat pointer constant: { i8* data, i64 len }
                     if (type_resolve_alias(stmt->type)->kind == TYPE_ARRAY)
                     {
-                        size_t len     = strlen(init->lit_expr.string_val);
+                        size_t      len    = strlen(init->lit_expr.string_val);
                         LLVMTypeRef arr_ty = LLVMArrayType(LLVMInt8TypeInContext(ctx->context), (unsigned)len);
-                        char gbuf[128]; snprintf(gbuf, sizeof(gbuf), "%s.str", gname);
+                        char        gbuf[128];
+                        snprintf(gbuf, sizeof(gbuf), "%s.str", gname);
                         LLVMValueRef data_g = LLVMGetNamedGlobal(ctx->module, gbuf);
                         if (!data_g)
                         {
@@ -1347,11 +1401,11 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
                             LLVMValueRef str_c = LLVMConstStringInContext(ctx->context, init->lit_expr.string_val, (unsigned)len, true);
                             LLVMSetInitializer(data_g, str_c);
                         }
-                        LLVMValueRef idxs[2] = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false)};
-                        LLVMValueRef data_ptr = LLVMConstGEP2(arr_ty, data_g, idxs, 2);
-                        data_ptr              = LLVMConstPointerCast(data_ptr, LLVMPointerTypeInContext(ctx->context, 0));
+                        LLVMValueRef idxs[2]   = {LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false), LLVMConstInt(LLVMInt32TypeInContext(ctx->context), 0, false)};
+                        LLVMValueRef data_ptr  = LLVMConstGEP2(arr_ty, data_g, idxs, 2);
+                        data_ptr               = LLVMConstPointerCast(data_ptr, LLVMPointerTypeInContext(ctx->context, 0));
                         LLVMValueRef fields[2] = {data_ptr, LLVMConstInt(LLVMInt64TypeInContext(ctx->context), len, false)};
-                        const_init              = LLVMConstStructInContext(ctx->context, fields, 2, false);
+                        const_init             = LLVMConstStructInContext(ctx->context, fields, 2, false);
                     }
                     break;
                 }
@@ -1411,14 +1465,25 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
 
 LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
 {
-    if (!stmt->symbol || !stmt->type)
+    // skip generic function templates (they're instantiated on demand)
+    // specialized instances have their own cloned ASTs and should be generated
+    if (stmt->symbol)
     {
-        codegen_error(ctx, stmt, "function declaration missing symbol or type info");
+        if (stmt->symbol->func.is_generic && !stmt->symbol->func.is_specialized_instance)
+        {
+            // this is a generic template - skip it
+            return NULL;
+        }
+    }
+    else if (stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0)
+    {
+        // AST has generics but no symbol - skip it
         return NULL;
     }
 
-    if ((stmt->fun_stmt.generics && stmt->fun_stmt.generics->count > 0) || (stmt->symbol && stmt->symbol->func.is_generic))
+    if (!stmt->symbol || !stmt->type)
     {
+        codegen_error(ctx, stmt, "function declaration missing symbol or type info");
         return NULL;
     }
 
@@ -1428,11 +1493,11 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
     else
         func_name = stmt->fun_stmt.name;
 
-    Type *func_type           = stmt->type;
-    bool  uses_mach_varargs   = stmt->symbol && stmt->symbol->func.uses_mach_varargs;
-    size_t fixed_param_count  = func_type->function.param_count;
-    size_t llvm_param_count   = fixed_param_count + (uses_mach_varargs ? 2 : 0);
-    LLVMTypeRef return_type   = func_type->function.return_type ? codegen_get_llvm_type(ctx, func_type->function.return_type) : LLVMVoidTypeInContext(ctx->context);
+    Type       *func_type         = stmt->type;
+    bool        uses_mach_varargs = stmt->symbol && stmt->symbol->func.uses_mach_varargs;
+    size_t      fixed_param_count = func_type->function.param_count;
+    size_t      llvm_param_count  = fixed_param_count + (uses_mach_varargs ? 2 : 0);
+    LLVMTypeRef return_type       = func_type->function.return_type ? codegen_get_llvm_type(ctx, func_type->function.return_type) : LLVMVoidTypeInContext(ctx->context);
 
     LLVMTypeRef *param_types = NULL;
     if (llvm_param_count > 0)
@@ -1444,10 +1509,10 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
         }
         if (uses_mach_varargs)
         {
-            LLVMTypeRef i64ty   = LLVMInt64TypeInContext(ctx->context);
-            LLVMTypeRef i8_ptr  = LLVMPointerTypeInContext(ctx->context, 0);
-            param_types[fixed_param_count]     = i64ty;                              // hidden count parameter
-            param_types[fixed_param_count + 1] = LLVMPointerType(i8_ptr, 0);         // hidden i8** array pointer
+            LLVMTypeRef i64ty                  = LLVMInt64TypeInContext(ctx->context);
+            LLVMTypeRef i8_ptr                 = LLVMPointerTypeInContext(ctx->context, 0);
+            param_types[fixed_param_count]     = i64ty;                      // hidden count parameter
+            param_types[fixed_param_count + 1] = LLVMPointerType(i8_ptr, 0); // hidden i8** array pointer
         }
     }
 
@@ -1545,7 +1610,7 @@ LLVMValueRef codegen_stmt_fun(CodegenContext *ctx, AstNode *stmt)
 
         if (uses_mach_varargs)
         {
-            unsigned count_index = (unsigned)fixed_params;
+            unsigned count_index            = (unsigned)fixed_params;
             ctx->current_vararg_count_value = LLVMGetParam(func, count_index);
             ctx->current_vararg_array       = LLVMGetParam(func, count_index + 1);
             LLVMSetValueName2(ctx->current_vararg_count_value, "__mach_vararg_count", strlen("__mach_vararg_count"));
@@ -1599,7 +1664,7 @@ LLVMValueRef codegen_stmt_ret(CodegenContext *ctx, AstNode *stmt)
             codegen_error(ctx, stmt, "failed to generate return value");
             return NULL;
         }
-    value = codegen_load_rvalue(ctx, value, stmt->ret_stmt.expr->type, stmt->ret_stmt.expr);
+        value = codegen_load_rvalue(ctx, value, stmt->ret_stmt.expr->type, stmt->ret_stmt.expr);
         // cast to declared return type if available (prefer Mach function type)
         LLVMTypeRef rty = NULL;
         if (ctx->current_function_type && ctx->current_function_type->kind == TYPE_FUNCTION && ctx->current_function_type->function.return_type)
@@ -1896,7 +1961,7 @@ LLVMValueRef codegen_expr_lit(CodegenContext *ctx, AstNode *expr)
         Type *resolved_type = type_resolve_alias(expr->type);
         if (resolved_type && resolved_type->kind == TYPE_ARRAY)
         {
-    // create fat pointer: { ptr data, u64 length }
+            // create fat pointer: { ptr data, u64 length }
             LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, expr->type);
             LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
 
@@ -1949,11 +2014,9 @@ LLVMValueRef codegen_expr_ident(CodegenContext *ctx, AstNode *expr)
         // declare external global for module-level val/var
         if (expr->symbol->kind == SYMBOL_VAR || expr->symbol->kind == SYMBOL_VAL)
         {
-            LLVMTypeRef ty = codegen_get_llvm_type(ctx, expr->symbol->type);
-            const char   *gname = expr->symbol->var.mangled_name && expr->symbol->var.mangled_name[0]
-                                     ? expr->symbol->var.mangled_name
-                                     : expr->ident_expr.name;
-            value                = LLVMGetNamedGlobal(ctx->module, gname);
+            LLVMTypeRef ty    = codegen_get_llvm_type(ctx, expr->symbol->type);
+            const char *gname = expr->symbol->var.mangled_name && expr->symbol->var.mangled_name[0] ? expr->symbol->var.mangled_name : expr->ident_expr.name;
+            value             = LLVMGetNamedGlobal(ctx->module, gname);
             if (!value)
             {
                 value = LLVMAddGlobal(ctx->module, ty, gname);
@@ -1991,8 +2054,8 @@ LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr)
         // special-case deref on LHS: @ptr = value
         if (expr->binary_expr.left->kind == AST_EXPR_UNARY && expr->binary_expr.left->unary_expr.op == TOKEN_AT)
         {
-            AstNode    *ptr_node = expr->binary_expr.left->unary_expr.expr;
-            LLVMValueRef dest    = codegen_expr(ctx, ptr_node);
+            AstNode     *ptr_node = expr->binary_expr.left->unary_expr.expr;
+            LLVMValueRef dest     = codegen_expr(ctx, ptr_node);
             if (!dest)
             {
                 codegen_error(ctx, expr, "failed to generate destination pointer for store");
@@ -2025,7 +2088,7 @@ LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr)
         }
 
         // load rhs value if needed
-    rhs = codegen_load_if_needed(ctx, rhs, expr->binary_expr.right->type, expr->binary_expr.right);
+        rhs = codegen_load_if_needed(ctx, rhs, expr->binary_expr.right->type, expr->binary_expr.right);
 
         LLVMBuildStore(ctx->builder, rhs, lhs);
         return rhs;
@@ -2070,12 +2133,12 @@ LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr)
     }
 
     // generate operation based on operator and types
-    bool lhs_is_float        = type_is_float(lhs_type);
-    bool rhs_is_float        = type_is_float(rhs_type);
-    bool operands_are_float  = lhs_is_float || rhs_is_float;
-    bool lhs_is_signed       = type_is_signed(lhs_type);
-    bool rhs_is_signed       = type_is_signed(rhs_type);
-    bool is_signed           = type_is_signed(expr->type) || lhs_is_signed || rhs_is_signed;
+    bool lhs_is_float       = type_is_float(lhs_type);
+    bool rhs_is_float       = type_is_float(rhs_type);
+    bool operands_are_float = lhs_is_float || rhs_is_float;
+    bool lhs_is_signed      = type_is_signed(lhs_type);
+    bool rhs_is_signed      = type_is_signed(rhs_type);
+    bool is_signed          = type_is_signed(expr->type) || lhs_is_signed || rhs_is_signed;
 
     // untyped pointer comparisons (ptr == int): cast integer to pointer type
     if ((expr->binary_expr.op == TOKEN_EQUAL_EQUAL || expr->binary_expr.op == TOKEN_BANG_EQUAL))
@@ -2083,12 +2146,12 @@ LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr)
         if (type_is_pointer_like(lhs_type) && type_is_integer(rhs_type))
         {
             LLVMTypeRef lhs_ty = LLVMTypeOf(lhs);
-            rhs                 = LLVMBuildIntToPtr(ctx->builder, rhs, lhs_ty, "int2ptr");
+            rhs                = LLVMBuildIntToPtr(ctx->builder, rhs, lhs_ty, "int2ptr");
         }
         else if (type_is_integer(lhs_type) && type_is_pointer_like(rhs_type))
         {
             LLVMTypeRef rhs_ty = LLVMTypeOf(rhs);
-            lhs                 = LLVMBuildIntToPtr(ctx->builder, lhs, rhs_ty, "int2ptr");
+            lhs                = LLVMBuildIntToPtr(ctx->builder, lhs, rhs_ty, "int2ptr");
         }
         else if (type_is_integer(lhs_type) && type_is_integer(rhs_type))
         {
@@ -2118,9 +2181,9 @@ LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr)
         {
             index = LLVMBuildNeg(ctx->builder, rhs, "negindex");
         }
-    // byte addressing with i8 element type (opaque ptr compatible)
-    LLVMTypeRef i8ty = LLVMInt8TypeInContext(ctx->context);
-    LLVMValueRef gep  = LLVMBuildGEP2(ctx->builder, i8ty, lhs, &index, 1, "ptradd");
+        // byte addressing with i8 element type (opaque ptr compatible)
+        LLVMTypeRef  i8ty = LLVMInt8TypeInContext(ctx->context);
+        LLVMValueRef gep  = LLVMBuildGEP2(ctx->builder, i8ty, lhs, &index, 1, "ptradd");
         return gep;
     }
 
@@ -2193,7 +2256,7 @@ LLVMValueRef codegen_expr_unary(CodegenContext *ctx, AstNode *expr)
     switch (expr->unary_expr.op)
     {
     case TOKEN_MINUS:
-    operand = codegen_load_if_needed(ctx, operand, expr->unary_expr.expr->type, expr->unary_expr.expr);
+        operand = codegen_load_if_needed(ctx, operand, expr->unary_expr.expr->type, expr->unary_expr.expr);
         if (type_is_float(expr->type))
         {
             return LLVMBuildFNeg(ctx->builder, operand, "neg");
@@ -2214,7 +2277,7 @@ LLVMValueRef codegen_expr_unary(CodegenContext *ctx, AstNode *expr)
         // then dereference the pointer
         return LLVMBuildLoad2(ctx->builder, codegen_get_llvm_type(ctx, expr->type), operand, "deref");
     case TOKEN_TILDE: // bitwise not
-    operand = codegen_load_if_needed(ctx, operand, expr->unary_expr.expr->type, expr->unary_expr.expr);
+        operand = codegen_load_if_needed(ctx, operand, expr->unary_expr.expr->type, expr->unary_expr.expr);
         return LLVMBuildNot(ctx->builder, operand, "bnot");
     default:
         codegen_error(ctx, expr, "unimplemented unary operator");
@@ -2285,8 +2348,8 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
                 }
             }
 
-            LLVMTypeRef i8_ty     = LLVMInt8TypeInContext(ctx->context);
-            LLVMTypeRef i8_ptr_ty = LLVMPointerType(i8_ty, 0);
+            LLVMTypeRef  i8_ty      = LLVMInt8TypeInContext(ctx->context);
+            LLVMTypeRef  i8_ptr_ty  = LLVMPointerType(i8_ty, 0);
             LLVMValueRef indices[1] = {idx_val};
             LLVMValueRef slot       = LLVMBuildInBoundsGEP2(ctx->builder, i8_ptr_ty, ctx->current_vararg_array, indices, 1, "mach_va_slot");
             LLVMValueRef value_ptr  = LLVMBuildLoad2(ctx->builder, i8_ptr_ty, slot, "mach_va_ptr");
@@ -2424,9 +2487,9 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
         return NULL;
     }
 
-    bool uses_mach_varargs = callee_symbol && callee_symbol->kind == SYMBOL_FUNC && callee_symbol->func.uses_mach_varargs;
-    int     arg_expr_count    = expr->call_expr.args ? expr->call_expr.args->count : 0;
-    size_t  fixed_param_count = func_type->function.param_count;
+    bool   uses_mach_varargs = callee_symbol && callee_symbol->kind == SYMBOL_FUNC && callee_symbol->func.uses_mach_varargs;
+    int    arg_expr_count    = expr->call_expr.args ? expr->call_expr.args->count : 0;
+    size_t fixed_param_count = func_type->function.param_count;
 
     bool forwards_varargs = false;
     if (expr->call_expr.args)
@@ -2478,7 +2541,7 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
             codegen_error(ctx, expr, "failed to generate call argument %d", i);
             return NULL;
         }
-        value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
+        value   = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
         args[i] = value;
 
         Type *param_type = func_type->function.param_types[i];
@@ -2558,14 +2621,14 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
 
     if (uses_mach_varargs)
     {
-        LLVMTypeRef i64_ty       = LLVMInt64TypeInContext(ctx->context);
-        LLVMTypeRef i8_ty        = LLVMInt8TypeInContext(ctx->context);
-        LLVMTypeRef i8_ptr_ty    = LLVMPointerType(i8_ty, 0);
-        LLVMTypeRef i8_ptr_ptr   = LLVMPointerType(i8_ptr_ty, 0);
+        LLVMTypeRef i64_ty     = LLVMInt64TypeInContext(ctx->context);
+        LLVMTypeRef i8_ty      = LLVMInt8TypeInContext(ctx->context);
+        LLVMTypeRef i8_ptr_ty  = LLVMPointerType(i8_ty, 0);
+        LLVMTypeRef i8_ptr_ptr = LLVMPointerType(i8_ptr_ty, 0);
 
         if (forwards_varargs)
         {
-            LLVMValueRef count_val = ctx->current_vararg_count_value ? ctx->current_vararg_count_value : LLVMConstInt(i64_ty, 0, false);
+            LLVMValueRef count_val  = ctx->current_vararg_count_value ? ctx->current_vararg_count_value : LLVMConstInt(i64_ty, 0, false);
             args[fixed_param_count] = count_val;
 
             if (ctx->current_vararg_array)
@@ -2598,32 +2661,32 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
                     }
                     value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
 
-                    Type *arg_type = type_resolve_alias(arg_node->type);
+                    Type        *arg_type     = type_resolve_alias(arg_node->type);
                     LLVMValueRef stored_value = value;
-                    LLVMTypeRef value_ty = LLVMTypeOf(value);
+                    LLVMTypeRef  value_ty     = LLVMTypeOf(value);
 
                     if (arg_type && type_is_integer(arg_type) && arg_type->size < 8)
                     {
                         if (type_is_signed(arg_type))
                         {
                             stored_value = LLVMBuildSExt(ctx->builder, value, i64_ty, "vararg_promote_signed");
-                            value_ty = i64_ty;
+                            value_ty     = i64_ty;
                         }
                         else
                         {
                             stored_value = LLVMBuildZExt(ctx->builder, value, i64_ty, "vararg_promote_unsigned");
-                            value_ty = i64_ty;
+                            value_ty     = i64_ty;
                         }
                     }
 
-                    char        slot_name[32];
+                    char slot_name[32];
                     snprintf(slot_name, sizeof(slot_name), "mach_vararg_val_%d", j);
                     LLVMValueRef value_alloca = codegen_create_alloca(ctx, value_ty, slot_name);
                     LLVMBuildStore(ctx->builder, stored_value, value_alloca);
                     LLVMValueRef data_ptr = LLVMBuildBitCast(ctx->builder, value_alloca, i8_ptr_ty, "mach_vararg_cast");
 
-                    LLVMValueRef idx_val   = LLVMConstInt(i64_ty, (unsigned long long)j, false);
-                    LLVMValueRef slot      = LLVMBuildInBoundsGEP2(ctx->builder, i8_ptr_ty, array_alloc, &idx_val, 1, "mach_vararg_slot");
+                    LLVMValueRef idx_val = LLVMConstInt(i64_ty, (unsigned long long)j, false);
+                    LLVMValueRef slot    = LLVMBuildInBoundsGEP2(ctx->builder, i8_ptr_ty, array_alloc, &idx_val, 1, "mach_vararg_slot");
                     LLVMBuildStore(ctx->builder, data_ptr, slot);
                 }
 
@@ -2639,12 +2702,12 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
     {
         for (int i = (int)fixed_param_count; i < arg_expr_count; i++)
         {
-            AstNode     *arg_node = expr->call_expr.args->items[i];
+            AstNode *arg_node = expr->call_expr.args->items[i];
             if (arg_node->kind == AST_EXPR_VARARGS)
             {
                 continue;
             }
-            LLVMValueRef value    = codegen_expr(ctx, arg_node);
+            LLVMValueRef value = codegen_expr(ctx, arg_node);
             if (!value)
             {
                 free(args);
@@ -2677,8 +2740,8 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
     // build the actual function type for the call
     LLVMTypeRef return_type = func_type->function.return_type ? codegen_get_llvm_type(ctx, func_type->function.return_type) : LLVMVoidTypeInContext(ctx->context);
 
-    size_t      llvm_param_count = fixed_param_count + (uses_mach_varargs ? 2 : 0);
-    LLVMTypeRef *param_types     = NULL;
+    size_t       llvm_param_count = fixed_param_count + (uses_mach_varargs ? 2 : 0);
+    LLVMTypeRef *param_types      = NULL;
     if (llvm_param_count > 0)
     {
         param_types = malloc(sizeof(LLVMTypeRef) * llvm_param_count);
@@ -2688,8 +2751,8 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
         }
         if (uses_mach_varargs)
         {
-            LLVMTypeRef i64_ty    = LLVMInt64TypeInContext(ctx->context);
-            LLVMTypeRef i8_ptr    = LLVMPointerType(LLVMInt8TypeInContext(ctx->context), 0);
+            LLVMTypeRef i64_ty                 = LLVMInt64TypeInContext(ctx->context);
+            LLVMTypeRef i8_ptr                 = LLVMPointerType(LLVMInt8TypeInContext(ctx->context), 0);
             param_types[fixed_param_count]     = i64_ty;
             param_types[fixed_param_count + 1] = LLVMPointerType(i8_ptr, 0);
         }
@@ -2729,12 +2792,11 @@ LLVMValueRef codegen_expr_cast(CodegenContext *ctx, AstNode *expr)
 
     // for array to pointer decay, don't load the array value; otherwise load
     bool is_array_decay = (resolved_from_type->kind == TYPE_ARRAY && (resolved_to_type->kind == TYPE_POINTER || resolved_to_type->kind == TYPE_PTR));
-    bool is_address_of =
-        expr->cast_expr.expr && expr->cast_expr.expr->kind == AST_EXPR_UNARY && expr->cast_expr.expr->unary_expr.op == TOKEN_QUESTION;
+    bool is_address_of  = expr->cast_expr.expr && expr->cast_expr.expr->kind == AST_EXPR_UNARY && expr->cast_expr.expr->unary_expr.op == TOKEN_QUESTION;
 
     if (!is_array_decay && !(is_address_of && type_is_pointer_like(resolved_from_type)))
     {
-    value = codegen_load_if_needed(ctx, value, from_type, expr->cast_expr.expr);
+        value = codegen_load_if_needed(ctx, value, from_type, expr->cast_expr.expr);
     }
 
     LLVMTypeRef to_llvm_type = codegen_get_llvm_type(ctx, to_type);
@@ -2871,9 +2933,9 @@ LLVMValueRef codegen_load_if_needed(CodegenContext *ctx, LLVMValueRef value, Typ
         return value;
     }
 
-    bool is_alloca = LLVMIsAAllocaInst(value);
-    bool is_global = LLVMIsAGlobalVariable(value);
-    bool is_gep    = LLVMIsAGetElementPtrInst(value);
+    bool is_alloca       = LLVMIsAAllocaInst(value);
+    bool is_global       = LLVMIsAGlobalVariable(value);
+    bool is_gep          = LLVMIsAGetElementPtrInst(value);
     bool value_is_memory = is_alloca || is_global || is_gep;
 
     if (type->kind == TYPE_PTR || type->kind == TYPE_POINTER)
@@ -2987,8 +3049,8 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
     }
 
     // get the object type
-    Type *original_type = type_resolve_alias(object_expr->type);
-    Type *object_type   = original_type;
+    Type *original_type     = type_resolve_alias(object_expr->type);
+    Type *object_type       = original_type;
     bool  object_is_pointer = false;
 
     if (object_type && object_type->kind == TYPE_POINTER)
@@ -3010,16 +3072,38 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
 
     if (object_type->kind == TYPE_ARRAY)
     {
-        LLVMValueRef fat_ptr;
+        // array is a fat pointer (struct with data and len fields)
+        // if the object is a pointer-like value (alloca/global/gep), return GEP to field
+        // otherwise, load the value and extract the field
 
+        bool can_gep = LLVMIsAAllocaInst(object) || LLVMIsAGlobalVariable(object) || LLVMIsAGetElementPtrInst(object);
+
+        if (!can_gep && !object_is_pointer)
+        {
+            // object is a value, need to spill to memory first
+            LLVMTypeRef  array_ty = codegen_get_llvm_type(ctx, object_type);
+            LLVMValueRef tmp      = codegen_create_alloca(ctx, array_ty, "tmp_array");
+            LLVMBuildStore(ctx->builder, object, tmp);
+            object  = tmp;
+            can_gep = true;
+        }
+
+        if (can_gep)
+        {
+            // return GEP to field (works for both reading and writing)
+            LLVMTypeRef  llvm_i32  = LLVMInt32TypeInContext(ctx->context);
+            LLVMTypeRef  array_ty  = codegen_get_llvm_type(ctx, object_type);
+            int          field_idx = strcmp(expr->field_expr.field, "data") == 0 ? 0 : 1;
+            LLVMValueRef indices[] = {LLVMConstInt(llvm_i32, 0, false), LLVMConstInt(llvm_i32, field_idx, false)};
+            return LLVMBuildGEP2(ctx->builder, array_ty, object, indices, 2, "array_field");
+        }
+
+        // fallback: load and extract value (read-only)
+        LLVMValueRef fat_ptr;
         if (object_is_pointer)
         {
-            LLVMTypeRef ptr_ty = codegen_get_llvm_type(ctx, original_type);
-            if (LLVMIsAAllocaInst(object) || LLVMIsAGlobalVariable(object) || LLVMIsAGetElementPtrInst(object))
-            {
-                object = LLVMBuildLoad2(ctx->builder, ptr_ty, object, "array_ptr");
-            }
-
+            LLVMTypeRef ptr_ty   = codegen_get_llvm_type(ctx, original_type);
+            object               = LLVMBuildLoad2(ctx->builder, ptr_ty, object, "array_ptr");
             LLVMTypeRef array_ty = codegen_get_llvm_type(ctx, object_type);
             fat_ptr              = LLVMBuildLoad2(ctx->builder, array_ty, object, "array_val");
         }
@@ -3032,18 +3116,18 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
         {
             return LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
         }
-        if (strcmp(expr->field_expr.field, "length") == 0)
+        if (strcmp(expr->field_expr.field, "len") == 0)
         {
             return LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
         }
 
-        codegen_error(ctx, expr, "no field named '%s' on array", expr->field_expr.field);
+        codegen_error(ctx, expr, "unknown array field '%s'", expr->field_expr.field);
         return NULL;
     }
 
     if (object_type->kind != TYPE_STRUCT && object_type->kind != TYPE_UNION)
     {
-        codegen_error(ctx, expr, "field access on non-struct type");
+        codegen_error(ctx, expr, "field access on non-composite type");
         return NULL;
     }
 
@@ -3087,22 +3171,16 @@ LLVMValueRef codegen_expr_field(CodegenContext *ctx, AstNode *expr)
 
     if (object_type->kind == TYPE_UNION)
     {
-        LLVMValueRef indices[] = {
-            LLVMConstInt(llvm_i32, 0, false),
-            LLVMConstInt(llvm_i32, 0, false)
-        };
+        LLVMValueRef indices[] = {LLVMConstInt(llvm_i32, 0, false), LLVMConstInt(llvm_i32, 0, false)};
 
-        LLVMTypeRef union_type     = codegen_get_llvm_type(ctx, object_type);
-        LLVMValueRef storage_ptr   = LLVMBuildGEP2(ctx->builder, union_type, object, indices, 2, "union_field_storage");
-        LLVMTypeRef field_llvm     = codegen_get_llvm_type(ctx, field_symbol->type);
-        LLVMTypeRef field_ptr_type = LLVMPointerType(field_llvm, 0);
+        LLVMTypeRef  union_type     = codegen_get_llvm_type(ctx, object_type);
+        LLVMValueRef storage_ptr    = LLVMBuildGEP2(ctx->builder, union_type, object, indices, 2, "union_field_storage");
+        LLVMTypeRef  field_llvm     = codegen_get_llvm_type(ctx, field_symbol->type);
+        LLVMTypeRef  field_ptr_type = LLVMPointerType(field_llvm, 0);
         return LLVMBuildBitCast(ctx->builder, storage_ptr, field_ptr_type, "union_field");
     }
 
-    LLVMValueRef indices[] = {
-        LLVMConstInt(llvm_i32, 0, false),
-        LLVMConstInt(llvm_i32, field_index, false)
-    };
+    LLVMValueRef indices[] = {LLVMConstInt(llvm_i32, 0, false), LLVMConstInt(llvm_i32, field_index, false)};
 
     LLVMTypeRef struct_type = codegen_get_llvm_type(ctx, object_type);
     return LLVMBuildGEP2(ctx->builder, struct_type, object, indices, 2, "field");
@@ -3134,7 +3212,7 @@ LLVMValueRef codegen_expr_index(CodegenContext *ctx, AstNode *expr)
 
         // extract fat pointer fields
         LLVMValueRef fat_ptr  = codegen_load_if_needed(ctx, array, array_type, expr->index_expr.array);
-    LLVMValueRef length = LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
+        LLVMValueRef length   = LLVMBuildExtractValue(ctx->builder, fat_ptr, 1, "array_length");
         LLVMValueRef data_ptr = LLVMBuildExtractValue(ctx->builder, fat_ptr, 0, "array_data");
 
         LLVMValueRef bounds_violated;
@@ -3205,8 +3283,74 @@ LLVMValueRef codegen_expr_array(CodegenContext *ctx, AstNode *expr)
 
     if (expr->array_expr.is_slice_literal)
     {
-        codegen_error(ctx, expr, "legacy slice literal syntax no longer supported; use named fields");
-        return NULL;
+        Type       *elem_type = resolved_type->array.elem_type;
+        Type       *data_type = type_pointer_create(elem_type);
+        Type       *len_type  = type_u64();
+        LLVMTypeRef llvm_data = codegen_get_llvm_type(ctx, data_type);
+        LLVMTypeRef llvm_len  = codegen_get_llvm_type(ctx, len_type);
+        if (!llvm_data || !llvm_len)
+            return NULL;
+
+        LLVMValueRef data_value = LLVMConstNull(llvm_data);
+        LLVMValueRef len_value  = LLVMConstNull(llvm_len);
+
+        size_t elem_count = expr->array_expr.elems ? (size_t)expr->array_expr.elems->count : 0;
+
+        if (elem_count >= 1)
+        {
+            AstNode     *data_expr = expr->array_expr.elems->items[0];
+            LLVMValueRef raw_data  = codegen_expr(ctx, data_expr);
+            if (!raw_data)
+                return NULL;
+            raw_data = codegen_load_if_needed(ctx, raw_data, data_expr->type, data_expr);
+
+            LLVMTypeRef raw_type = LLVMTypeOf(raw_data);
+            switch (LLVMGetTypeKind(raw_type))
+            {
+            case LLVMPointerTypeKind:
+                if (raw_type != llvm_data)
+                    raw_data = LLVMBuildBitCast(ctx->builder, raw_data, llvm_data, "slice_data_cast");
+                break;
+            case LLVMIntegerTypeKind:
+                raw_data = LLVMBuildIntToPtr(ctx->builder, raw_data, llvm_data, "slice_data_inttoptr");
+                break;
+            default:
+                codegen_error(ctx, data_expr, "slice data expression must be pointer-like");
+                return NULL;
+            }
+
+            data_value = raw_data;
+        }
+
+        if (elem_count >= 2)
+        {
+            AstNode     *len_expr = expr->array_expr.elems->items[1];
+            LLVMValueRef raw_len  = codegen_expr(ctx, len_expr);
+            if (!raw_len)
+                return NULL;
+            raw_len = codegen_load_if_needed(ctx, raw_len, len_expr->type, len_expr);
+
+            LLVMTypeRef raw_type = LLVMTypeOf(raw_len);
+            if (LLVMGetTypeKind(raw_type) != LLVMIntegerTypeKind)
+            {
+                codegen_error(ctx, len_expr, "slice length expression must be integer");
+                return NULL;
+            }
+
+            unsigned width = LLVMGetIntTypeWidth(raw_type);
+            if (width < 64)
+                raw_len = LLVMBuildZExt(ctx->builder, raw_len, llvm_len, "slice_len_zext");
+            else if (width > 64)
+                raw_len = LLVMBuildTrunc(ctx->builder, raw_len, llvm_len, "slice_len_trunc");
+
+            len_value = raw_len;
+        }
+
+        LLVMTypeRef  fat_ptr_type = codegen_get_llvm_type(ctx, array_type);
+        LLVMValueRef fat_ptr      = LLVMGetUndef(fat_ptr_type);
+        fat_ptr                   = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_value, 0, "slice_data");
+        fat_ptr                   = LLVMBuildInsertValue(ctx->builder, fat_ptr, len_value, 1, "slice_len");
+        return fat_ptr;
     }
 
     Type       *elem_type      = resolved_type->array.elem_type;
@@ -3229,7 +3373,7 @@ LLVMValueRef codegen_expr_array(CodegenContext *ctx, AstNode *expr)
             free(elem_values);
             return NULL;
         }
-    elem_values[i] = codegen_load_if_needed(ctx, elem_values[i], expr->array_expr.elems->items[i]->type, expr->array_expr.elems->items[i]);
+        elem_values[i] = codegen_load_if_needed(ctx, elem_values[i], expr->array_expr.elems->items[i]->type, expr->array_expr.elems->items[i]);
     }
 
     // create array constant
@@ -3369,8 +3513,8 @@ LLVMValueRef codegen_expr_struct(CodegenContext *ctx, AstNode *expr)
         }
 
         LLVMValueRef fat_ptr = LLVMGetUndef(fat_ptr_type);
-        fat_ptr               = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_value, 0, "slice_data");
-        fat_ptr               = LLVMBuildInsertValue(ctx->builder, fat_ptr, len_value, 1, "slice_len");
+        fat_ptr              = LLVMBuildInsertValue(ctx->builder, fat_ptr, data_value, 0, "slice_data");
+        fat_ptr              = LLVMBuildInsertValue(ctx->builder, fat_ptr, len_value, 1, "slice_len");
         return fat_ptr;
     }
 
@@ -3422,8 +3566,8 @@ LLVMValueRef codegen_expr_struct(CodegenContext *ctx, AstNode *expr)
             }
             value = codegen_load_if_needed(ctx, value, init_value->type, init_value);
 
-            LLVMTypeRef field_llvm_type = codegen_get_llvm_type(ctx, field_symbol->type);
-            LLVMValueRef field_ptr      = LLVMBuildBitCast(ctx->builder, union_alloca, LLVMPointerType(field_llvm_type, 0), "union_field_ptr");
+            LLVMTypeRef  field_llvm_type = codegen_get_llvm_type(ctx, field_symbol->type);
+            LLVMValueRef field_ptr       = LLVMBuildBitCast(ctx->builder, union_alloca, LLVMPointerType(field_llvm_type, 0), "union_field_ptr");
             LLVMBuildStore(ctx->builder, value, field_ptr);
         }
 

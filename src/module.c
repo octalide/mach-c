@@ -1,30 +1,26 @@
 #include "module.h"
-#include "config.h"
 #include "codegen.h"
+#include "config.h"
+#include "filesystem.h"
 #include "ioutil.h"
 #include "lexer.h"
-#include "symbol.h"
 #include "preprocessor.h"
-
+#include "symbol.h"
+#include <llvm-c/Core.h>
+#include <llvm-c/Target.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include "semantic.h"
-#include <stdint.h>
-#include <llvm-c/Target.h>
-#include <llvm-c/Core.h>
 
 // forward declarations
-static char *generate_target_module_source(ModuleManager *manager);
-static void module_manager_update_target_info(ModuleManager *manager);
-static char *append_os_suffix(const char *path, const char *os_name);
-static int   module_file_exists(const char *path);
+static char       *generate_target_module_source(ModuleManager *manager);
+static void        module_manager_update_target_info(ModuleManager *manager);
+static char       *append_os_suffix(const char *path, const char *os_name);
 static const char *normalize_os_name(const char *os_part);
-static bool path_has_platform_suffix(const char *path, const char *os_name);
-static void split_triple(const char *triple, char **arch_out, char **os_out);
-static const char *detect_module_platform(ModuleManager *manager, const char *module_name, const char *file_path);
-static bool        module_name_has_component(const char *module_name, const char *component);
+static bool        path_has_platform_suffix(const char *path, const char *os_name);
+static void        split_triple(const char *triple, char **arch_out, char **os_out);
 
 // error handling functions
 void module_error_list_init(ModuleErrorList *list)
@@ -99,13 +95,64 @@ static Module *module_manager_find_canonical(ModuleManager *manager, const char 
     return NULL;
 }
 
+Module *module_manager_find_by_file_path(ModuleManager *manager, const char *file_path)
+{
+    if (!manager || !file_path)
+        return NULL;
+
+    // iterate through all modules and find by file_path
+    for (int i = 0; i < manager->capacity; i++)
+    {
+        Module *module = manager->modules[i];
+        while (module)
+        {
+            if (module->file_path && strcmp(module->file_path, file_path) == 0)
+            {
+                return module;
+            }
+            module = module->next;
+        }
+    }
+
+    return NULL;
+}
+
+static void module_manager_resize(ModuleManager *manager)
+{
+    int      old_capacity = manager->capacity;
+    Module **old_modules  = manager->modules;
+
+    manager->capacity = old_capacity * 2;
+    manager->modules  = calloc(manager->capacity, sizeof(Module *));
+
+    // rehash all modules
+    for (int i = 0; i < old_capacity; i++)
+    {
+        Module *module = old_modules[i];
+        while (module)
+        {
+            Module      *next       = module->next;
+            unsigned int index      = hash_module_name(module->name, manager->capacity);
+            module->next            = manager->modules[index];
+            manager->modules[index] = module;
+            module                  = next;
+        }
+    }
+
+    free(old_modules);
+}
+
 static char *module_manager_expand_module(ModuleManager *manager, const char *module_fqn)
 {
     if (!module_fqn)
         return NULL;
     if (!manager->config)
         return strdup(module_fqn);
-    return config_expand_module_path((ProjectConfig *)manager->config, module_fqn);
+    char *expanded = config_expand_module_path((ProjectConfig *)manager->config, module_fqn);
+    // if no expansion occurred, config returns a copy - check if it's the same
+    if (expanded && strcmp(expanded, module_fqn) == 0)
+        return expanded;
+    return expanded ? expanded : strdup(module_fqn);
 }
 
 // build a best-guess file path for diagnostics even if the file doesn't exist
@@ -124,25 +171,32 @@ static char *module_guess_file_path(ModuleManager *manager, const char *module_f
 
     const char *dot      = strchr(module_fqn, '.');
     size_t      head_len = dot ? (size_t)(dot - module_fqn) : strlen(module_fqn);
-    const char  *tail    = dot ? dot + 1 : NULL;
+    const char *tail     = dot ? dot + 1 : NULL;
 
     // alias paths take precedence
     for (int i = 0; i < manager->alias_count; i++)
     {
         if (strlen(manager->alias_names[i]) == head_len && strncmp(manager->alias_names[i], module_fqn, head_len) == 0)
         {
-            const char *base = manager->alias_paths[i];
+            const char *base     = manager->alias_paths[i];
             size_t      base_len = strlen(base);
             if (tail)
             {
                 size_t tail_len = strlen(tail);
                 char  *tail_buf = malloc(tail_len + 1);
-                if (!tail_buf) return NULL;
+                if (!tail_buf)
+                    return NULL;
                 memcpy(tail_buf, tail, tail_len + 1);
-                for (char *p = tail_buf; *p; ++p) if (*p == '.') *p = '/';
+                for (char *p = tail_buf; *p; ++p)
+                    if (*p == '.')
+                        *p = '/';
                 size_t path_len = base_len + 1 + tail_len + 5 + 1;
                 char  *path     = malloc(path_len);
-                if (!path) { free(tail_buf); return NULL; }
+                if (!path)
+                {
+                    free(tail_buf);
+                    return NULL;
+                }
                 snprintf(path, path_len, "%s/%s.mach", base, tail_buf);
                 free(tail_buf);
                 return path;
@@ -151,7 +205,8 @@ static char *module_guess_file_path(ModuleManager *manager, const char *module_f
             {
                 size_t path_len = base_len + 1 + 4 + 5 + 1; // "/" + "main" + ".mach" + NUL
                 char  *path     = malloc(path_len);
-                if (!path) return NULL;
+                if (!path)
+                    return NULL;
                 snprintf(path, path_len, "%s/main.mach", base);
                 return path;
             }
@@ -161,18 +216,25 @@ static char *module_guess_file_path(ModuleManager *manager, const char *module_f
     // fallback to first search path, if any
     if (manager->search_count > 0)
     {
-        const char *base = manager->search_paths[0];
+        const char *base     = manager->search_paths[0];
         size_t      base_len = strlen(base);
         if (tail)
         {
             size_t tail_len = strlen(tail);
             char  *tail_buf = malloc(tail_len + 1);
-            if (!tail_buf) return NULL;
+            if (!tail_buf)
+                return NULL;
             memcpy(tail_buf, tail, tail_len + 1);
-            for (char *p = tail_buf; *p; ++p) if (*p == '.') *p = '/';
+            for (char *p = tail_buf; *p; ++p)
+                if (*p == '.')
+                    *p = '/';
             size_t path_len = base_len + 1 + head_len + 1 + tail_len + 5 + 1;
             char  *path     = malloc(path_len);
-            if (!path) { free(tail_buf); return NULL; }
+            if (!path)
+            {
+                free(tail_buf);
+                return NULL;
+            }
             snprintf(path, path_len, "%s/%.*s/%s.mach", base, (int)head_len, module_fqn, tail_buf);
             free(tail_buf);
             return path;
@@ -181,7 +243,8 @@ static char *module_guess_file_path(ModuleManager *manager, const char *module_f
         {
             size_t path_len = base_len + 1 + head_len + 1 + 4 + 5 + 1;
             char  *path     = malloc(path_len);
-            if (!path) return NULL;
+            if (!path)
+                return NULL;
             snprintf(path, path_len, "%s/%.*s/main.mach", base, (int)head_len, module_fqn);
             return path;
         }
@@ -192,18 +255,22 @@ static char *module_guess_file_path(ModuleManager *manager, const char *module_f
 
 void module_manager_init(ModuleManager *manager)
 {
-    manager->capacity     = 32;
-    manager->count        = 0;
-    manager->modules      = calloc(manager->capacity, sizeof(Module *));
-    manager->search_paths = NULL;
-    manager->search_count = 0;
-    manager->alias_names  = NULL;
-    manager->alias_paths  = NULL;
-    manager->alias_count  = 0;
-    manager->config       = NULL;
-    manager->project_dir  = NULL;
+    manager->capacity      = 32;
+    manager->count         = 0;
+    manager->modules       = calloc(manager->capacity, sizeof(Module *));
+    manager->search_paths  = NULL;
+    manager->search_count  = 0;
+    manager->alias_names   = NULL;
+    manager->alias_paths   = NULL;
+    manager->alias_count   = 0;
+    manager->config        = NULL;
+    manager->project_dir   = NULL;
     manager->target_triple = NULL;
     manager->target_os     = NULL;
+    manager->target_arch   = NULL;
+
+    manager->cached_constants       = NULL;
+    manager->cached_constants_count = 0;
 
     module_error_list_init(&manager->errors);
     manager->had_error = false;
@@ -245,20 +312,12 @@ void module_manager_dnit(ModuleManager *manager)
 
     free(manager->target_triple);
     free(manager->target_os);
+    free(manager->target_arch);
+
+    free(manager->cached_constants);
 
     // clean up errors
     module_error_list_dnit(&manager->errors);
-}
-
-static int module_file_exists(const char *path)
-{
-    if (!path)
-        return 0;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    fclose(f);
-    return 1;
 }
 
 static const char *normalize_os_name(const char *os_part)
@@ -293,7 +352,7 @@ static bool path_has_platform_suffix(const char *path, const char *os_name)
     if (!ext || ext == path)
         return false;
 
-    size_t os_len  = strlen(os_name);
+    size_t os_len = strlen(os_name);
     if ((size_t)(ext - path) < os_len + 1)
         return false;
 
@@ -329,45 +388,82 @@ static char *append_os_suffix(const char *path, const char *os_name)
     return out;
 }
 
-static bool module_name_has_component(const char *module_name, const char *component)
+// helper to build path from base, module name parts, and tail
+static char *build_module_path(const char *base, const char *head, size_t head_len, const char *tail, const char *platform)
 {
-    if (!module_name || !component || !*component)
-        return false;
+    if (!base)
+        return NULL;
 
-    size_t comp_len = strlen(component);
-    const char *cursor = module_name;
+    size_t base_len = strlen(base);
+    char  *path     = NULL;
 
-    while (cursor && *cursor)
+    if (tail)
     {
-        const char *next = strchr(cursor, '.');
-        size_t       len = next ? (size_t)(next - cursor) : strlen(cursor);
-        if (len == comp_len && strncmp(cursor, component, len) == 0)
-            return true;
-        if (!next)
-            break;
-        cursor = next + 1;
+        // convert dots to slashes in tail
+        size_t tail_len = strlen(tail);
+        char  *tail_buf = malloc(tail_len + 1);
+        if (!tail_buf)
+            return NULL;
+        memcpy(tail_buf, tail, tail_len + 1);
+        for (char *p = tail_buf; *p; ++p)
+            if (*p == '.')
+                *p = '/';
+
+        if (head)
+        {
+            size_t path_len = base_len + 1 + head_len + 1 + tail_len + 5 + 1;
+            path            = malloc(path_len);
+            if (path)
+                snprintf(path, path_len, "%s/%.*s/%s.mach", base, (int)head_len, head, tail_buf);
+        }
+        else
+        {
+            size_t path_len = base_len + 1 + tail_len + 5 + 1;
+            path            = malloc(path_len);
+            if (path)
+                snprintf(path, path_len, "%s/%s.mach", base, tail_buf);
+        }
+        free(tail_buf);
+    }
+    else
+    {
+        // no tail means we want main.mach
+        if (head)
+        {
+            size_t path_len = base_len + 1 + head_len + 1 + 9 + 1;
+            path            = malloc(path_len);
+            if (path)
+                snprintf(path, path_len, "%s/%.*s/main.mach", base, (int)head_len, head);
+        }
+        else
+        {
+            size_t path_len = base_len + 1 + 9 + 1;
+            path            = malloc(path_len);
+            if (path)
+                snprintf(path, path_len, "%s/main.mach", base);
+        }
     }
 
-    return false;
-}
+    if (!path)
+        return NULL;
 
-static const char *detect_module_platform(ModuleManager *manager, const char *module_name, const char *file_path)
-{
-    (void)manager;
-    (void)file_path;
-    static const char *known_platforms[] = {
-        "linux", "darwin", "windows",
-        "freebsd", "netbsd", "openbsd",
-        "dragonfly", "wasm"
-    };
+    // check if base path exists
+    if (fs_file_exists(path))
+        return path;
 
-    for (size_t i = 0; i < sizeof(known_platforms) / sizeof(known_platforms[0]); i++)
+    // try platform-specific variant
+    if (platform)
     {
-        const char *tag = known_platforms[i];
-        if (module_name_has_component(module_name, tag))
-            return tag;
+        char *plat_path = append_os_suffix(path, platform);
+        if (plat_path && fs_file_exists(plat_path))
+        {
+            free(path);
+            return plat_path;
+        }
+        free(plat_path);
     }
 
+    free(path);
     return NULL;
 }
 
@@ -376,7 +472,7 @@ static void module_manager_update_target_info(ModuleManager *manager)
     if (!manager)
         return;
 
-    const char *triple = NULL;
+    const char *triple       = NULL;
     char       *owned_triple = NULL;
 
     if (manager->config)
@@ -406,6 +502,11 @@ static void module_manager_update_target_info(ModuleManager *manager)
         free(manager->target_os);
         manager->target_os = NULL;
     }
+    if (manager->target_arch)
+    {
+        free(manager->target_arch);
+        manager->target_arch = NULL;
+    }
 
     if (triple)
     {
@@ -415,12 +516,24 @@ static void module_manager_update_target_info(ModuleManager *manager)
         const char *norm = normalize_os_name(os_part);
         if (norm)
             manager->target_os = strdup(norm);
+        if (arch_part)
+            manager->target_arch = strdup(arch_part);
         free(arch_part);
         free(os_part);
     }
 
     if (owned_triple)
         LLVMDisposeMessage(owned_triple);
+
+    // rebuild cached constants
+    free(manager->cached_constants);
+    manager->cached_constants       = malloc(32 * sizeof(PreprocessorConstant));
+    manager->cached_constants_count = 0;
+
+    if (manager->cached_constants)
+    {
+        manager->cached_constants_count = module_manager_collect_constants(manager, manager->cached_constants, 32);
+    }
 }
 
 void module_manager_add_search_path(ModuleManager *manager, const char *path)
@@ -434,8 +547,8 @@ void module_manager_add_alias(ModuleManager *manager, const char *name, const ch
 {
     if (!name || !base_dir)
         return;
-    manager->alias_names = realloc(manager->alias_names, (manager->alias_count + 1) * sizeof(char *));
-    manager->alias_paths = realloc(manager->alias_paths, (manager->alias_count + 1) * sizeof(char *));
+    manager->alias_names                       = realloc(manager->alias_names, (manager->alias_count + 1) * sizeof(char *));
+    manager->alias_paths                       = realloc(manager->alias_paths, (manager->alias_count + 1) * sizeof(char *));
     manager->alias_names[manager->alias_count] = strdup(name);
     manager->alias_paths[manager->alias_count] = strdup(base_dir);
     manager->alias_count++;
@@ -453,9 +566,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
     if (!module_fqn)
         return NULL;
 
-    const char *platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0)
-                               ? manager->target_os
-                               : NULL;
+    const char *platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0) ? manager->target_os : NULL;
 
     // prefer config resolution if available, but still honor platform variants
     if (manager->config && manager->project_dir)
@@ -463,7 +574,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
         char *resolved = config_resolve_module_fqn((ProjectConfig *)manager->config, manager->project_dir, module_fqn);
         if (resolved)
         {
-            if (module_file_exists(resolved))
+            if (fs_file_exists(resolved))
             {
                 return resolved;
             }
@@ -471,7 +582,7 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
             if (platform)
             {
                 char *plat_path = append_os_suffix(resolved, platform);
-                if (plat_path && module_file_exists(plat_path))
+                if (plat_path && fs_file_exists(plat_path))
                 {
                     free(resolved);
                     return plat_path;
@@ -485,133 +596,25 @@ char *module_path_to_file_path(ModuleManager *manager, const char *module_fqn)
 
     const char *dot      = strchr(module_fqn, '.');
     size_t      head_len = dot ? (size_t)(dot - module_fqn) : strlen(module_fqn);
-    const char  *tail    = dot ? dot + 1 : NULL;
+    const char *tail     = dot ? dot + 1 : NULL;
 
     // aliases: name -> base dir
     for (int i = 0; i < manager->alias_count; i++)
     {
         if (strlen(manager->alias_names[i]) == head_len && strncmp(manager->alias_names[i], module_fqn, head_len) == 0)
         {
-            const char *base = manager->alias_paths[i];
-            size_t      base_len = strlen(base);
-            if (tail)
-            {
-                size_t tail_len = strlen(tail);
-                char  *tail_buf = malloc(tail_len + 1);
-                if (!tail_buf) return NULL;
-                memcpy(tail_buf, tail, tail_len + 1);
-                for (char *p = tail_buf; *p; ++p) if (*p == '.') *p = '/';
-                size_t path_len = base_len + 1 + tail_len + 5 + 1; // '/' + tail + '.mach' + NUL
-                char  *path = malloc(path_len);
-                if (!path) { free(tail_buf); return NULL; }
-                snprintf(path, path_len, "%s/%s.mach", base, tail_buf);
-                free(tail_buf);
-                if (module_file_exists(path))
-                {
-                    return path;
-                }
-
-                if (platform)
-                {
-                    char *plat_path = append_os_suffix(path, platform);
-                    if (plat_path && module_file_exists(plat_path))
-                    {
-                        free(path);
-                        return plat_path;
-                    }
-                    free(plat_path);
-                }
-
-                free(path);
-                return NULL;
-            }
-            else
-            {
-                size_t path_len = base_len + 1 + 4 + 5 + 1; // '/' + 'main' + '.mach' + NUL
-                char  *path = malloc(path_len);
-                if (!path) return NULL;
-                snprintf(path, path_len, "%s/main.mach", base);
-                if (module_file_exists(path))
-                {
-                    return path;
-                }
-
-                if (platform)
-                {
-                    char *plat_path = append_os_suffix(path, platform);
-                    if (plat_path && module_file_exists(plat_path))
-                    {
-                        free(path);
-                        return plat_path;
-                    }
-                    free(plat_path);
-                }
-
-                free(path);
-                return NULL;
-            }
+            char *path = build_module_path(manager->alias_paths[i], NULL, 0, tail, platform);
+            if (path)
+                return path;
         }
     }
 
     // search paths: base/name/(tail or main).mach
     for (int si = 0; si < manager->search_count; si++)
     {
-        const char *base = manager->search_paths[si];
-        size_t      base_len = strlen(base);
-        if (tail)
-        {
-            size_t tail_len = strlen(tail);
-            char  *tail_buf = malloc(tail_len + 1);
-            if (!tail_buf) continue;
-            memcpy(tail_buf, tail, tail_len + 1);
-            for (char *p = tail_buf; *p; ++p) if (*p == '.') *p = '/';
-            size_t path_len = base_len + 1 + head_len + 1 + tail_len + 5 + 1;
-            char  *path = malloc(path_len);
-            if (!path) { free(tail_buf); continue; }
-            snprintf(path, path_len, "%s/%.*s/%s.mach", base, (int)head_len, module_fqn, tail_buf);
-            free(tail_buf);
-            if (module_file_exists(path))
-            {
-                return path;
-            }
-
-            if (platform)
-            {
-                char *plat_path = append_os_suffix(path, platform);
-                if (plat_path && module_file_exists(plat_path))
-                {
-                    free(path);
-                    return plat_path;
-                }
-                free(plat_path);
-            }
-
-            free(path);
-        }
-        else
-        {
-            size_t path_len = base_len + 1 + head_len + 1 + 4 + 5 + 1;
-            char  *path = malloc(path_len);
-            if (!path) continue;
-            snprintf(path, path_len, "%s/%.*s/main.mach", base, (int)head_len, module_fqn);
-            if (module_file_exists(path))
-            {
-                return path;
-            }
-
-            if (platform)
-            {
-                char *plat_path = append_os_suffix(path, platform);
-                if (plat_path && module_file_exists(plat_path))
-                {
-                    free(path);
-                    return plat_path;
-                }
-                free(plat_path);
-            }
-
-            free(path);
-        }
+        char *path = build_module_path(manager->search_paths[si], module_fqn, head_len, tail, platform);
+        if (path)
+            return path;
     }
 
     return NULL;
@@ -691,13 +694,14 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
         {
             char *guess = module_guess_file_path(manager, canonical);
             module_error_list_add(&manager->errors, canonical, guess ? guess : "<unknown>", "Could not find module file");
-            if (guess) free(guess);
+            if (guess)
+                free(guess);
             manager->had_error = true;
             free(canonical);
             return NULL;
         }
 
-    // no info output
+        // no info output
 
         // read and parse module
         source = read_file(file_path);
@@ -710,14 +714,12 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
             return NULL;
         }
 
-    const char *platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0)
-                   ? manager->target_os
-                   : NULL;
+        const char *platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0) ? manager->target_os : NULL;
 
         if (platform && !path_has_platform_suffix(file_path, platform))
         {
             char *platform_path = append_os_suffix(file_path, platform);
-            if (platform_path && module_file_exists(platform_path))
+            if (platform_path && fs_file_exists(platform_path))
             {
                 char *platform_source = read_file(platform_path);
                 if (!platform_source)
@@ -757,8 +759,8 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
             free(platform_path);
         }
 
-    PreprocessorConstant constants[32];
-    size_t constant_count = module_manager_collect_constants(manager, constants, sizeof(constants) / sizeof(constants[0]));
+        PreprocessorConstant constants[32];
+        size_t               constant_count = module_manager_collect_constants(manager, constants, sizeof(constants) / sizeof(constants[0]));
 
         PreprocessorOutput pp_output;
         preprocessor_output_init(&pp_output);
@@ -835,11 +837,18 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     // create module
     Module *module = malloc(sizeof(Module));
     module_init(module, canonical, file_path);
-    module->ast         = ast;
-    module->is_parsed   = true;
+    module->ast       = ast;
+    module->source    = source; // cache source for debug info and diagnostics
+    module->is_parsed = true;
     if (is_target_builtin)
         module->needs_linking = true; // ensure builtin target object is emitted
     module->is_analyzed = false;
+
+    // resize hash table if load factor exceeds 0.75
+    if (manager->count + 1 > manager->capacity * 3 / 4)
+    {
+        module_manager_resize(manager);
+    }
 
     // add to hash table
     unsigned int index      = hash_module_name(canonical, manager->capacity);
@@ -850,7 +859,7 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
     // clean up
     parser_dnit(&parser);
     lexer_dnit(&lexer);
-    free(source);
+    // don't free source - it's now cached in module
     free(canonical);
 
     return module;
@@ -859,41 +868,63 @@ static Module *module_manager_load_module_internal(ModuleManager *manager, const
 // helper: map substring presence (case sensitive) in triple to numeric constants
 static unsigned int map_os_id(const char *os_part)
 {
-    if (!os_part) return 255u;
-    if (strstr(os_part, "linux")) return 1u;
-    if (strstr(os_part, "darwin") || strstr(os_part, "apple")) return 2u;
-    if (strstr(os_part, "windows") || strstr(os_part, "mingw") || strstr(os_part, "win32")) return 3u;
-    if (strstr(os_part, "freebsd")) return 4u;
-    if (strstr(os_part, "netbsd")) return 5u;
-    if (strstr(os_part, "openbsd")) return 6u;
-    if (strstr(os_part, "dragonfly")) return 7u;
-    if (strstr(os_part, "wasm")) return 8u;
+    if (!os_part)
+        return 255u;
+    if (strstr(os_part, "linux"))
+        return 1u;
+    if (strstr(os_part, "darwin") || strstr(os_part, "apple"))
+        return 2u;
+    if (strstr(os_part, "windows") || strstr(os_part, "mingw") || strstr(os_part, "win32"))
+        return 3u;
+    if (strstr(os_part, "freebsd"))
+        return 4u;
+    if (strstr(os_part, "netbsd"))
+        return 5u;
+    if (strstr(os_part, "openbsd"))
+        return 6u;
+    if (strstr(os_part, "dragonfly"))
+        return 7u;
+    if (strstr(os_part, "wasm"))
+        return 8u;
     return 255u; // unknown
 }
 
 static unsigned int map_arch_id(const char *arch_part)
 {
-    if (!arch_part) return 255u;
-    if (strncmp(arch_part, "x86_64", 6) == 0) return 1u;
-    if (strncmp(arch_part, "aarch64", 7) == 0) return 2u;
-    if (strncmp(arch_part, "riscv64", 7) == 0) return 3u;
-    if (strncmp(arch_part, "wasm32", 6) == 0) return 4u;
-    if (strncmp(arch_part, "wasm64", 6) == 0) return 5u;
+    if (!arch_part)
+        return 255u;
+    if (strncmp(arch_part, "x86_64", 6) == 0)
+        return 1u;
+    if (strncmp(arch_part, "aarch64", 7) == 0)
+        return 2u;
+    if (strncmp(arch_part, "riscv64", 7) == 0)
+        return 3u;
+    if (strncmp(arch_part, "wasm32", 6) == 0)
+        return 4u;
+    if (strncmp(arch_part, "wasm64", 6) == 0)
+        return 5u;
     return 255u; // unknown
 }
 
-size_t module_manager_collect_constants(ModuleManager *manager,
-                                        PreprocessorConstant  *out,
-                                        size_t                 max_count)
+size_t module_manager_collect_constants(ModuleManager *manager, PreprocessorConstant *out, size_t max_count)
 {
     if (!out || max_count == 0)
     {
         return 0;
     }
 
+    // use cached constants if available
+    if (manager && manager->cached_constants && manager->cached_constants_count > 0)
+    {
+        size_t copy_count = manager->cached_constants_count < max_count ? manager->cached_constants_count : max_count;
+        memcpy(out, manager->cached_constants, copy_count * sizeof(PreprocessorConstant));
+        return copy_count;
+    }
+
+    // fallback: build constants from scratch
     size_t count = 0;
 
-    const char *triple = manager ? manager->target_triple : NULL;
+    const char *triple    = manager ? manager->target_triple : NULL;
     char       *arch_part = NULL;
     char       *os_part   = NULL;
 
@@ -908,23 +939,23 @@ size_t module_manager_collect_constants(ModuleManager *manager,
     unsigned int ptr_width = (unsigned int)(sizeof(void *) * 8);
     union
     {
-        uint16_t v;
+        uint16_t      v;
         unsigned char b[2];
     } u;
-    u.v = 0x0102;
+    u.v                 = 0x0102;
     unsigned int endian = (u.b[0] == 0x02) ? 0u : 1u;
 
     unsigned int debug_flag = 0u;
 
-#define ADD_CONST(NAME, VALUE)                                                                  \
-    do                                                                                          \
-    {                                                                                           \
-        if (count < max_count)                                                                  \
-        {                                                                                       \
-            out[count].name  = (NAME);                                                          \
-            out[count].value = (long long)(VALUE);                                              \
-            count++;                                                                             \
-        }                                                                                       \
+#define ADD_CONST(NAME, VALUE)                     \
+    do                                             \
+    {                                              \
+        if (count < max_count)                     \
+        {                                          \
+            out[count].name  = (NAME);             \
+            out[count].value = (long long)(VALUE); \
+            count++;                               \
+        }                                          \
     } while (0)
 
     ADD_CONST("OS_LINUX", 1u);
@@ -961,7 +992,8 @@ size_t module_manager_collect_constants(ModuleManager *manager,
 static char *dup_fragment(const char *start, size_t len)
 {
     char *s = malloc(len + 1);
-    if (!s) return NULL;
+    if (!s)
+        return NULL;
     memcpy(s, start, len);
     s[len] = '\0';
     return s;
@@ -971,14 +1003,15 @@ static void split_triple(const char *triple, char **arch_out, char **os_out)
 {
     *arch_out = NULL;
     *os_out   = NULL;
-    if (!triple) return;
+    if (!triple)
+        return;
     const char *first = strchr(triple, '-');
     if (!first)
     {
         *arch_out = strdup(triple);
         return;
     }
-    *arch_out = dup_fragment(triple, (size_t)(first - triple));
+    *arch_out        = dup_fragment(triple, (size_t)(first - triple));
     const char *rest = first + 1; // vendor or os
     // find second dash to locate os portion
     const char *second = strchr(rest, '-');
@@ -1024,7 +1057,12 @@ static char *generate_target_module_source(ModuleManager *manager)
 
     // pointer width & endianness
     unsigned int ptr_width = (unsigned int)(sizeof(void *) * 8);
-    union { uint16_t v; unsigned char b[2]; } u; u.v = 0x0102;
+    union
+    {
+        uint16_t      v;
+        unsigned char b[2];
+    } u;
+    u.v                 = 0x0102;
     unsigned int endian = (u.b[0] == 0x02) ? 0u : 1u; // 0 little, 1 big
 
     // debug flag heuristic: treat non-optimized builds as debug (opt_level 0 or 1)
@@ -1033,7 +1071,8 @@ static char *generate_target_module_source(ModuleManager *manager)
 
     // build source buffer
     char buffer[2048];
-    snprintf(buffer, sizeof(buffer),
+    snprintf(buffer,
+             sizeof(buffer),
              "pub val OS_LINUX: u32 = 1;\n"
              "pub val OS_DARWIN: u32 = 2;\n"
              "pub val OS_WINDOWS: u32 = 3;\n"
@@ -1056,8 +1095,13 @@ static char *generate_target_module_source(ModuleManager *manager)
              "pub val DEBUG: u8 = %u;\n"
              "pub val OS_NAME: []u8 = \"%s\";\n"
              "pub val ARCH_NAME: []u8 = \"%s\";\n",
-             os_id, arch_id, ptr_width, endian, debug_flag,
-             os_part ? os_part : "unknown", arch_part ? arch_part : "unknown");
+             os_id,
+             arch_id,
+             ptr_width,
+             endian,
+             debug_flag,
+             os_part ? os_part : "unknown",
+             arch_part ? arch_part : "unknown");
 
     char *out = strdup(buffer);
     free(arch_part);
@@ -1066,69 +1110,12 @@ static char *generate_target_module_source(ModuleManager *manager)
     return out;
 }
 
-bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *program, const char *base_dir)
-{
-    if (program->kind != AST_PROGRAM)
-    {
-        return false;
-    }
-
-    // find all use statements
-    for (int i = 0; i < program->program.stmts->count; i++)
-    {
-        AstNode *stmt = program->program.stmts->items[i];
-        if (stmt->kind == AST_STMT_USE)
-        {
-            char *normalized = module_manager_expand_module(manager, stmt->use_stmt.module_path);
-            if (!normalized)
-            {
-                module_error_list_add(&manager->errors, stmt->use_stmt.module_path, "<unknown>", "could not resolve module path");
-                manager->had_error = true;
-                return false;
-            }
-
-            char *original = stmt->use_stmt.module_path;
-            stmt->use_stmt.module_path = normalized;
-            free(original);
-
-            // load the module
-            Module *module = module_manager_load_module_internal(manager, stmt->use_stmt.module_path, base_dir);
-            if (!module)
-            {
-                // error already recorded in load_module_internal
-                return false;
-            }
-
-            const char *module_platform = detect_module_platform(manager, module->name, module->file_path);
-            const char *target_platform = (manager->target_os && strcmp(manager->target_os, "unknown") != 0)
-                                              ? manager->target_os
-                                              : NULL;
-
-            if (module_platform && target_platform && strcmp(module_platform, target_platform) != 0)
-            {
-                module->needs_linking = false;
-            }
-            else
-            {
-                module->needs_linking = true;
-            }
-
-            // recursively resolve dependencies of the loaded module
-            if (!module_manager_resolve_dependencies(manager, module->ast, base_dir))
-            {
-                return false;
-            }
-        }
-    }
-
-    return !manager->had_error;
-}
-
 void module_init(Module *module, const char *name, const char *file_path)
 {
     module->name          = strdup(name);
     module->file_path     = strdup(file_path);
     module->object_path   = NULL;
+    module->source        = NULL;
     module->ast           = NULL;
     module->symbols       = NULL;
     module->is_parsed     = false;
@@ -1143,6 +1130,7 @@ void module_dnit(Module *module)
     free(module->name);
     free(module->file_path);
     free(module->object_path);
+    free(module->source);
     if (module->ast)
     {
         ast_node_dnit(module->ast);
@@ -1160,7 +1148,8 @@ Module *module_manager_load_module(ModuleManager *manager, const char *module_pa
     return module_manager_load_module_internal(manager, module_path, ".");
 }
 
-bool module_has_circular_dependency(ModuleManager *manager, Module *module, const char *target)
+// helper for circular dependency detection with visited tracking
+static bool module_has_circular_dependency_internal(ModuleManager *manager, Module *module, const char *target, char **visited, int *visited_count, int visited_capacity)
 {
     if (!module || !module->ast)
     {
@@ -1172,6 +1161,19 @@ bool module_has_circular_dependency(ModuleManager *manager, Module *module, cons
         return true;
     }
 
+    // check if already visited (avoid redundant work)
+    for (int i = 0; i < *visited_count; i++)
+    {
+        if (strcmp(visited[i], module->name) == 0)
+            return false;
+    }
+
+    // mark as visited
+    if (*visited_count < visited_capacity)
+    {
+        visited[(*visited_count)++] = (char *)module->name;
+    }
+
     // check all dependencies
     for (int i = 0; i < module->ast->program.stmts->count; i++)
     {
@@ -1179,7 +1181,7 @@ bool module_has_circular_dependency(ModuleManager *manager, Module *module, cons
         if (stmt->kind == AST_STMT_USE)
         {
             Module *dep = module_manager_find_module(manager, stmt->use_stmt.module_path);
-            if (dep && module_has_circular_dependency(manager, dep, target))
+            if (dep && module_has_circular_dependency_internal(manager, dep, target, visited, visited_count, visited_capacity))
             {
                 return true;
             }
@@ -1189,32 +1191,15 @@ bool module_has_circular_dependency(ModuleManager *manager, Module *module, cons
     return false;
 }
 
-// helper declarations
-static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info);
-
-static bool ensure_dirs_recursive(const char *dir)
+bool module_has_circular_dependency(ModuleManager *manager, Module *module, const char *target)
 {
-    if (!dir || !*dir)
-        return true;
-
-    char *copy = strdup(dir);
-    if (!copy)
-        return false;
-
-    for (char *p = copy + 1; *p; ++p)
-    {
-        if (*p == '/')
-        {
-            *p = '\0';
-            mkdir(copy, 0755);
-            *p = '/';
-        }
-    }
-    int r = mkdir(copy, 0755);
-    (void)r;
-    free(copy);
-    return true;
+    char *visited[256];
+    int   visited_count = 0;
+    return module_has_circular_dependency_internal(manager, module, target, visited, &visited_count, 256);
 }
+
+// helper declarations
+static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info, SpecializationCache *spec_cache);
 
 char *module_make_object_path(const char *output_dir, const char *module_name)
 {
@@ -1248,7 +1233,7 @@ char *module_make_object_path(const char *output_dir, const char *module_name)
     if (last_slash)
     {
         *last_slash = '\0';
-        ensure_dirs_recursive(path);
+        fs_ensure_dir_recursive(path);
         *last_slash = '/';
     }
 
@@ -1256,7 +1241,7 @@ char *module_make_object_path(const char *output_dir, const char *module_name)
     return path;
 }
 
-bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie, bool debug_info)
+bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie, bool debug_info, SpecializationCache *spec_cache)
 {
     if (!manager)
         return false;
@@ -1281,50 +1266,9 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
 
             if (!module->is_analyzed)
             {
-                SemanticAnalyzer analyzer;
-                semantic_analyzer_init(&analyzer);
-                
-                module_manager_set_config(&analyzer.module_manager, manager->config, manager->project_dir);
-                semantic_analyzer_set_module(&analyzer, module->name);
-
-                bool analyzed = semantic_analyze(&analyzer, module->ast);
-                if (!analyzed)
-                {
-                    // propagate semantic errors to module manager errors
-                    for (int ei = 0; ei < analyzer.errors.count; ei++)
-                    {
-                        module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", analyzer.errors.errors[ei].message ? analyzer.errors.errors[ei].message : "semantic error");
-                    }
-                    manager->had_error = true;
-                    
-                    // don't let the analyzer free the shared context
-                    semantic_analyzer_dnit(&analyzer);
-                    return false;
-                }
-
-                if (module->symbols)
-                {
-                    symbol_table_dnit(module->symbols);
-                    free(module->symbols);
-                }
-                module->symbols  = malloc(sizeof(SymbolTable));
-                *module->symbols = analyzer.symbol_table;
-                analyzer.symbol_table.global_scope  = NULL;
-                analyzer.symbol_table.current_scope = NULL;
-
-                // prevent freeing symbol tables of analyzer-managed modules
-                for (int mi = 0; mi < analyzer.module_manager.capacity; mi++)
-                {
-                    Module *m = analyzer.module_manager.modules[mi];
-                    while (m)
-                    {
-                        m->symbols = NULL;
-                        m          = m->next;
-                    }
-                }
-
-                module->is_analyzed = true;
-                semantic_analyzer_dnit(&analyzer);
+                module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", "module has not been analyzed");
+                manager->had_error = true;
+                return false;
             }
 
             if (module->is_compiled && module->object_path)
@@ -1335,7 +1279,7 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
 
             // no info output
 
-            if (!compile_module_to_object(manager, module, output_dir, opt_level, no_pie, debug_info))
+            if (!compile_module_to_object(manager, module, output_dir, opt_level, no_pie, debug_info, spec_cache))
             {
                 return false;
             }
@@ -1395,7 +1339,7 @@ bool module_manager_get_link_objects(ModuleManager *manager, char ***object_file
     return true;
 }
 
-static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info)
+static bool compile_module_to_object(ModuleManager *manager, Module *module, const char *output_dir, int opt_level, bool no_pie, bool debug_info, SpecializationCache *spec_cache)
 {
     if (!module || !module->ast)
         return false;
@@ -1421,31 +1365,20 @@ static bool compile_module_to_object(ModuleManager *manager, Module *module, con
     ctx.debug_info   = debug_info;
     ctx.source_file  = module->file_path;
     ctx.source_lexer = NULL;
+    ctx.spec_cache   = spec_cache; // pass cache to codegen for generating specialized functions
 
     Lexer *debug_lexer_ptr = NULL;
     Lexer  debug_lexer;
-    char  *debug_source = NULL;
-    if (debug_info && module->file_path && module->file_path[0] != '<')
+    if (debug_info && module->source && module->file_path && module->file_path[0] != '<')
     {
-        debug_source = read_file(module->file_path);
-        if (debug_source)
-        {
-            lexer_init(&debug_lexer, debug_source);
-            debug_lexer_ptr = &debug_lexer;
-            ctx.source_lexer = debug_lexer_ptr;
-        }
+        // use cached source instead of reading file again
+        lexer_init(&debug_lexer, module->source);
+        debug_lexer_ptr  = &debug_lexer;
+        ctx.source_lexer = debug_lexer_ptr;
     }
 
-    SemanticAnalyzer stub;
-    memset(&stub, 0, sizeof(stub));
-    if (module->symbols)
-    {
-        stub.symbol_table                  = *module->symbols;
-        stub.symbol_table.current_scope    = stub.symbol_table.global_scope;
-        stub.symbol_table.module_scope     = module->symbols->module_scope;
-    }
+    bool success = codegen_generate(&ctx, module->ast, module->symbols);
 
-    bool success = codegen_generate(&ctx, module->ast, module->symbols ? &stub : NULL);
     if (success)
     {
         success = codegen_emit_object(&ctx, module->object_path);
@@ -1467,7 +1400,7 @@ static bool compile_module_to_object(ModuleManager *manager, Module *module, con
         lexer_dnit(debug_lexer_ptr);
         ctx.source_lexer = NULL;
     }
-    free(debug_source);
+    // no need to free debug_source - using cached module source
 
     codegen_context_dnit(&ctx);
     return success;

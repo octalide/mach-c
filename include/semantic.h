@@ -1,133 +1,196 @@
-#ifndef SEMANTIC_H
-#define SEMANTIC_H
+#ifndef SEMANTIC_NEW_H
+#define SEMANTIC_NEW_H
 
 #include "ast.h"
 #include "module.h"
 #include "symbol.h"
 #include "type.h"
 #include <stdbool.h>
+#include <stddef.h>
 
 // forward declarations
-typedef struct Lexer Lexer;
+typedef struct SemanticDriver      SemanticDriver;
+typedef struct AnalysisContext     AnalysisContext;
+typedef struct DiagnosticSink      DiagnosticSink;
+typedef struct GenericBindingCtx   GenericBindingCtx;
+typedef struct SpecializationKey   SpecializationKey;
+typedef struct SpecializationCache SpecializationCache;
+typedef struct InstantiationQueue  InstantiationQueue;
 
-typedef struct SemanticError
+// diagnostic severity
+typedef enum
 {
-    Token *token;
-    char  *message;
-    char  *file_path; // file path for this error
-} SemanticError;
+    DIAG_ERROR,
+    DIAG_WARNING,
+    DIAG_NOTE
+} DiagnosticLevel;
 
-typedef struct SemanticErrorList
+// diagnostic entry
+typedef struct Diagnostic
 {
-    SemanticError *errors;
-    int            count;
-    int            capacity;
-} SemanticErrorList;
+    DiagnosticLevel level;
+    char           *message;
+    char           *file_path;
+    Token          *token;
+    int             line;
+    int             column;
+} Diagnostic;
 
+// source cache entry for diagnostic printing
+typedef struct SourceCacheEntry
+{
+    char                    *file_path;
+    char                    *source;
+    struct SourceCacheEntry *next;
+} SourceCacheEntry;
+
+// diagnostic sink: collects errors/warnings
+struct DiagnosticSink
+{
+    Diagnostic        *entries;
+    size_t             count;
+    size_t             capacity;
+    bool               has_errors;
+    bool               has_fatal;
+    SourceCacheEntry **source_cache;
+    size_t             cache_size;
+};
+
+// generic binding: immutable type parameter -> concrete type mapping
 typedef struct GenericBinding
 {
-    const char *name;
-    Type       *type;
+    const char *param_name;
+    Type       *concrete_type;
 } GenericBinding;
 
-typedef enum InstantiationKind
+// generic binding context: stack of bindings for nested generics
+struct GenericBindingCtx
 {
-    INSTANTIATION_FUNCTION,
-    INSTANTIATION_STRUCT,
-    INSTANTIATION_UNION,
+    GenericBinding *bindings;
+    size_t          count;
+    size_t          capacity;
+};
+
+// analysis context: immutable snapshot of scope + bindings
+struct AnalysisContext
+{
+    Scope            *current_scope;
+    Scope            *module_scope;
+    Scope            *global_scope;
+    GenericBindingCtx bindings;
+    const char       *module_name;
+    const char       *file_path;
+    Symbol           *current_function;
+};
+
+// specialization key: identifies unique type argument tuple
+struct SpecializationKey
+{
+    Symbol *generic_symbol;
+    Type  **type_args;
+    size_t  type_arg_count;
+};
+
+// specialization cache entry
+typedef struct SpecializationEntry
+{
+    SpecializationKey           key;
+    Symbol                     *specialized_symbol;
+    struct SpecializationEntry *next;
+} SpecializationEntry;
+
+// specialization cache: hash table of instantiated generics
+struct SpecializationCache
+{
+    SpecializationEntry **buckets;
+    size_t                bucket_count;
+    size_t                entry_count;
+};
+
+// instantiation request kinds
+typedef enum
+{
+    INST_FUNCTION,
+    INST_STRUCT,
+    INST_UNION
 } InstantiationKind;
 
+// instantiation request: deferred generic specialization
 typedef struct InstantiationRequest
 {
-    InstantiationKind kind;
-    Symbol           *generic_symbol;
-    Type            **type_args;
-    size_t            type_arg_count;
-    AstNode          *call_site;
-    char             *unique_id;
+    InstantiationKind            kind;
+    Symbol                      *generic_symbol;
+    Type                       **type_args;
+    size_t                       type_arg_count;
+    AstNode                     *call_site;
     struct InstantiationRequest *next;
 } InstantiationRequest;
 
-typedef struct InstantiationQueue
+// instantiation queue: work list for monomorphization
+struct InstantiationQueue
 {
     InstantiationRequest *head;
     InstantiationRequest *tail;
     size_t                count;
-} InstantiationQueue;
+};
 
-typedef struct SemanticAnalyzer
+// semantic driver: orchestrates multi-pass analysis
+struct SemanticDriver
 {
-    SymbolTable            symbol_table;
-    ModuleManager          module_manager;
-    SemanticErrorList      errors;
-    AstNode               *current_function;
-    AstNode               *program_root;
-    int                    loop_depth;
-    bool                   has_errors;
-    bool                   has_fatal_error;
-    const char            *current_module_name;
-    GenericBinding        *generic_bindings;
-    size_t                 generic_binding_count;
-    size_t                 generic_binding_capacity;
-    InstantiationQueue     instantiation_queue;
-} SemanticAnalyzer;
+    ModuleManager       module_manager;
+    SymbolTable         symbol_table; // for codegen compatibility
+    SpecializationCache spec_cache;
+    InstantiationQueue  inst_queue;
+    DiagnosticSink      diagnostics;
+    AstNode            *program_root;
+    const char         *entry_module_name;
+};
 
-// semantic analyzer operations
-void semantic_analyzer_init(SemanticAnalyzer *analyzer);
-void semantic_analyzer_dnit(SemanticAnalyzer *analyzer);
-void semantic_analyzer_set_module(SemanticAnalyzer *analyzer, const char *module_name);
+// driver lifecycle
+SemanticDriver *semantic_driver_create(void);
+void            semantic_driver_destroy(SemanticDriver *driver);
+
+// main entry point
+bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *module_name, const char *module_path);
+
+// diagnostics
+void diagnostic_sink_init(DiagnosticSink *sink);
+void diagnostic_sink_dnit(DiagnosticSink *sink);
+void diagnostic_emit(DiagnosticSink *sink, DiagnosticLevel level, AstNode *node, const char *file_path, const char *fmt, ...);
+void diagnostic_print_all(DiagnosticSink *sink, ModuleManager *module_manager);
+
+// generic bindings
+GenericBindingCtx generic_binding_ctx_create(void);
+void              generic_binding_ctx_destroy(GenericBindingCtx *ctx);
+GenericBindingCtx generic_binding_ctx_push(GenericBindingCtx *parent, const char *param_name, Type *concrete_type);
+Type             *generic_binding_ctx_lookup(const GenericBindingCtx *ctx, const char *param_name);
+
+// specialization cache
+void    specialization_cache_init(SpecializationCache *cache);
+void    specialization_cache_dnit(SpecializationCache *cache);
+Symbol *specialization_cache_find(SpecializationCache *cache, Symbol *generic_symbol, Type **type_args, size_t type_arg_count);
+void    specialization_cache_insert(SpecializationCache *cache, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, Symbol *specialized);
+void    specialization_cache_foreach(SpecializationCache *cache, void (*callback)(Symbol *specialized, void *user_data), void *user_data);
+
+// instantiation queue
+void                  instantiation_queue_init(InstantiationQueue *queue);
+void                  instantiation_queue_dnit(InstantiationQueue *queue);
+void                  instantiation_queue_push(InstantiationQueue *queue, InstantiationKind kind, Symbol *generic_symbol, Type **type_args, size_t type_arg_count, AstNode *call_site);
+InstantiationRequest *instantiation_queue_pop(InstantiationQueue *queue);
+
+// name mangling
+char *mangle_generic_type(const char *module_name, const char *base_name, Type **type_args, size_t type_arg_count);
+char *mangle_generic_function(const char *module_name, const char *base_name, Type **type_args, size_t type_arg_count);
+char *mangle_method(const char *module_name, const char *owner_name, const char *method_name, bool receiver_is_pointer);
+char *mangle_global_symbol(const char *module_name, const char *symbol_name);
+
+// analysis context helpers
+AnalysisContext analysis_context_create(Scope *global_scope, Scope *module_scope, const char *module_name, const char *module_path);
+AnalysisContext analysis_context_with_scope(const AnalysisContext *parent, Scope *new_scope);
+AnalysisContext analysis_context_with_bindings(const AnalysisContext *parent, GenericBindingCtx new_bindings);
+AnalysisContext analysis_context_with_function(const AnalysisContext *parent, Symbol *function);
 
 // main analysis entry point
-bool semantic_analyze(SemanticAnalyzer *analyzer, AstNode *root);
+bool semantic_analyze_new(SemanticDriver *driver, AstNode *root, const char *module_name, const char *module_path);
 
-// convenience function to print all semantic errors
-void semantic_print_errors(SemanticAnalyzer *analyzer, Lexer *lexer, const char *file_path);
-
-// statement analysis
-bool semantic_analyze_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_use_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_imported_module(SemanticAnalyzer *analyzer, AstNode *use_stmt);
-bool semantic_analyze_ext_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_def_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_var_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_fun_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_str_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_uni_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_if_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_or_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_for_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_ret_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-bool semantic_analyze_block_stmt(SemanticAnalyzer *analyzer, AstNode *stmt);
-
-// expression analysis
-Type *semantic_analyze_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
-Type *semantic_analyze_binary_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_unary_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_call_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_index_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_field_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_cast_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_ident_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_lit_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_lit_expr_with_hint(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
-Type *semantic_analyze_array_expr(SemanticAnalyzer *analyzer, AstNode *expr);
-Type *semantic_analyze_struct_expr(SemanticAnalyzer *analyzer, AstNode *expr, Type *expected_type);
-
-// type checking utilities
-bool semantic_check_assignment(SemanticAnalyzer *analyzer, Type *target, Type *source, AstNode *node);
-bool semantic_check_binary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *left, Type *right, AstNode *node);
-bool semantic_check_unary_op(SemanticAnalyzer *analyzer, TokenKind op, Type *operand, AstNode *node);
-bool semantic_check_function_call(SemanticAnalyzer *analyzer, Type *func_type, AstList *args, AstNode *node);
-
-// error handling
-void semantic_error_list_init(SemanticErrorList *list);
-void semantic_error_list_dnit(SemanticErrorList *list);
-void semantic_error_list_add(SemanticErrorList *list, Token *token, const char *message, const char *file_path);
-void semantic_error_list_print(SemanticErrorList *list, Lexer *lexer, const char *file_path);
-void semantic_error(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...);
-void semantic_warning(SemanticAnalyzer *analyzer, AstNode *node, const char *fmt, ...);
-void semantic_mark_fatal(SemanticAnalyzer *analyzer);
-bool semantic_has_fatal_error(SemanticAnalyzer *analyzer);
-
-#endif
+#endif // SEMANTIC_NEW_H

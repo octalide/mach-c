@@ -8,12 +8,12 @@
 
 // builtin types storage
 static Type *g_builtin_types[TYPE_PTR + 1] = {0};
-static Type *g_error_type                 = NULL;
+static Type *g_error_type                  = NULL;
 
 typedef struct PointerCacheEntry
 {
-    Type                   *base;
-    Type                   *pointer;
+    Type                     *base;
+    Type                     *pointer;
     struct PointerCacheEntry *next;
 } PointerCacheEntry;
 
@@ -68,22 +68,28 @@ void type_system_init(void)
     // create builtin types
     for (size_t i = 0; i < sizeof(type_info_table) / sizeof(type_info_table[0]); i++)
     {
-        Type *type      = malloc(sizeof(Type));
-        type->kind      = type_info_table[i].kind;
-        type->size      = type_info_table[i].size;
-        type->alignment = type_info_table[i].alignment;
-        type->name      = strdup(type_info_table[i].name);
+        Type *type           = malloc(sizeof(Type));
+        type->kind           = type_info_table[i].kind;
+        type->size           = type_info_table[i].size;
+        type->alignment      = type_info_table[i].alignment;
+        type->name           = strdup(type_info_table[i].name);
+        type->generic_origin = NULL;
+        type->type_args      = NULL;
+        type->type_arg_count = 0;
 
         g_builtin_types[type->kind] = type;
     }
 
     if (!g_error_type)
     {
-        g_error_type          = malloc(sizeof(Type));
-        g_error_type->kind    = TYPE_ERROR;
-        g_error_type->size    = 0;
-        g_error_type->alignment = 1;
-        g_error_type->name    = strdup("<error>");
+        g_error_type                 = malloc(sizeof(Type));
+        g_error_type->kind           = TYPE_ERROR;
+        g_error_type->size           = 0;
+        g_error_type->alignment      = 1;
+        g_error_type->name           = strdup("<error>");
+        g_error_type->generic_origin = NULL;
+        g_error_type->type_args      = NULL;
+        g_error_type->type_arg_count = 0;
     }
 }
 
@@ -196,18 +202,21 @@ Type *type_pointer_create(Type *base)
         }
     }
 
-    Type *type         = malloc(sizeof(Type));
-    type->kind         = TYPE_POINTER;
-    type->size         = 8; // 64-bit pointers
-    type->alignment    = 8;
-    type->name         = NULL;
-    type->pointer.base = base;
+    Type *type           = malloc(sizeof(Type));
+    type->generic_origin = NULL;
+    type->type_args      = NULL;
+    type->type_arg_count = 0;
+    type->kind           = TYPE_POINTER;
+    type->size           = 8; // 64-bit pointers
+    type->alignment      = 8;
+    type->name           = NULL;
+    type->pointer.base   = base;
 
     PointerCacheEntry *entry = malloc(sizeof(PointerCacheEntry));
-    entry->base    = base;
-    entry->pointer = type;
-    entry->next    = g_pointer_cache;
-    g_pointer_cache = entry;
+    entry->base              = base;
+    entry->pointer           = type;
+    entry->next              = g_pointer_cache;
+    g_pointer_cache          = entry;
 
     return type;
 }
@@ -219,6 +228,9 @@ Type *type_array_create(Type *elem_type)
     type->size            = 16; // fat pointer: {void *data, u64 len}
     type->alignment       = 8;
     type->name            = NULL;
+    type->generic_origin  = NULL;
+    type->type_args       = NULL;
+    type->type_arg_count  = 0;
     type->array.elem_type = elem_type;
     return type;
 }
@@ -230,6 +242,9 @@ Type *type_struct_create(const char *name)
     type->size                  = 0; // calculated later
     type->alignment             = 1; // calculated later
     type->name                  = name ? strdup(name) : NULL;
+    type->generic_origin        = NULL;
+    type->type_args             = NULL;
+    type->type_arg_count        = 0;
     type->composite.fields      = NULL;
     type->composite.field_count = 0;
     return type;
@@ -242,6 +257,9 @@ Type *type_union_create(const char *name)
     type->size                  = 0; // calculated later
     type->alignment             = 1; // calculated later
     type->name                  = name ? strdup(name) : NULL;
+    type->generic_origin        = NULL;
+    type->type_args             = NULL;
+    type->type_arg_count        = 0;
     type->composite.fields      = NULL;
     type->composite.field_count = 0;
     return type;
@@ -254,6 +272,9 @@ Type *type_function_create(Type *return_type, Type **param_types, size_t param_c
     type->size                 = 8; // function pointers are 8 bytes
     type->alignment            = 8;
     type->name                 = NULL;
+    type->generic_origin       = NULL;
+    type->type_args            = NULL;
+    type->type_arg_count       = 0;
     type->function.return_type = return_type;
     type->function.param_count = param_count;
     type->function.is_variadic = is_variadic;
@@ -273,12 +294,15 @@ Type *type_function_create(Type *return_type, Type **param_types, size_t param_c
 
 Type *type_alias_create(const char *name, Type *target)
 {
-    Type *type         = malloc(sizeof(Type));
-    type->kind         = TYPE_ALIAS;
-    type->size         = target->size;
-    type->alignment    = target->alignment;
-    type->name         = strdup(name);
-    type->alias.target = target;
+    Type *type           = malloc(sizeof(Type));
+    type->kind           = TYPE_ALIAS;
+    type->size           = target ? target->size : 0;
+    type->alignment      = target ? target->alignment : 0;
+    type->name           = strdup(name);
+    type->generic_origin = NULL;
+    type->type_args      = NULL;
+    type->type_arg_count = 0;
+    type->alias.target   = target;
     return type;
 }
 
@@ -388,7 +412,8 @@ bool type_is_pointer_like(Type *type)
     while (type->kind == TYPE_ALIAS)
         type = type->alias.target;
 
-    return type->kind == TYPE_PTR || type->kind == TYPE_POINTER || type->kind == TYPE_FUNCTION || type->kind == TYPE_ARRAY;
+    // slices ([]T) are fat pointers and must not participate in pointer-only coercions
+    return type->kind == TYPE_PTR || type->kind == TYPE_POINTER || type->kind == TYPE_FUNCTION;
 }
 
 bool type_is_truthy(Type *type)
@@ -477,8 +502,6 @@ bool type_can_assign_to(Type *from, Type *to)
     // numeric conversions (more restrictive than casting)
     if (type_is_numeric(from) && type_is_numeric(to))
     {
-        // only allow conversions within the same category (int↔int or float↔float)
-        // and only safe conversions: same type or smaller-to-larger
         bool from_is_float = type_is_float(from);
         bool to_is_float   = type_is_float(to);
 
@@ -486,7 +509,10 @@ bool type_can_assign_to(Type *from, Type *to)
         if (from_is_float != to_is_float)
             return false;
 
-        // within same category, only allow safe size conversions
+        // allow integer narrowing/widening; still guard floating-point to wider only
+        if (!from_is_float)
+            return true;
+
         return from->size <= to->size;
     }
 
@@ -591,8 +617,8 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
             }
         }
 
-    bool  is_variadic = type_node->type_fun.is_variadic;
-    Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
+        bool  is_variadic = type_node->type_fun.is_variadic;
+        Type *func_type   = type_function_create(return_type, param_types, param_count, is_variadic);
         free(param_types); // function_create makes its own copy
         return func_type;
     }
@@ -638,8 +664,8 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
 
                 Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
 
-                size_t field_align = type_alignof(field_type);
-                offset              = type_align_to(offset, field_align);
+                size_t field_align         = type_alignof(field_type);
+                offset                     = type_align_to(offset, field_align);
                 field_symbol->field.offset = offset;
 
                 if (!head)
@@ -691,11 +717,11 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
             return NULL;
         }
 
-        Type   *union_type = type_union_create(NULL);
-        Symbol *head       = NULL;
-        Symbol *tail       = NULL;
-        size_t  max_size   = 0;
-        size_t  max_align  = 1;
+        Type   *union_type  = type_union_create(NULL);
+        Symbol *head        = NULL;
+        Symbol *tail        = NULL;
+        size_t  max_size    = 0;
+        size_t  max_align   = 1;
         size_t  field_count = 0;
 
         if (type_node->type_uni.fields)
@@ -712,7 +738,7 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
                     return NULL;
                 }
 
-                Symbol *field_symbol = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
+                Symbol *field_symbol       = symbol_create(SYMBOL_FIELD, field_node->field_stmt.name, field_type, field_node);
                 field_symbol->field.offset = 0;
 
                 if (!head)
@@ -725,8 +751,8 @@ Type *type_resolve(AstNode *type_node, SymbolTable *symbol_table)
                     tail       = field_symbol;
                 }
 
-                size_t field_size   = type_sizeof(field_type);
-                size_t field_align  = type_alignof(field_type);
+                size_t field_size  = type_sizeof(field_type);
+                size_t field_align = type_alignof(field_type);
                 if (field_size > max_size)
                 {
                     max_size = field_size;

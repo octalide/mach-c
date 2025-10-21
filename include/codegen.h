@@ -2,8 +2,8 @@
 #define CODEGEN_H
 
 #include "ast.h"
-#include "semantic.h"
 #include "lexer.h"
+#include "semantic.h"
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/Target.h>
@@ -74,19 +74,22 @@ struct CodegenContext
     int   opt_level;
     bool  debug_info;
     bool  debug_finalized;
-    bool  no_pie;       // disable position independent executable
+    bool  no_pie; // disable position independent executable
     char *debug_full_path;
     char *debug_dir;
     char *debug_file;
 
     // source context for diagnostics
-    const char *source_file; // current file being compiled
+    const char *source_file;  // current file being compiled
     Lexer      *source_lexer; // lexer for mapping pos->line/column
 
     // variadic function support (Mach ABI)
     LLVMValueRef current_vararg_count_value; // u64 count parameter passed to current function (null if none)
     LLVMValueRef current_vararg_array;       // i8** pointing to packed variadic argument slots
     size_t       current_fixed_param_count;  // number of fixed parameters in current function
+
+    // specialization cache for cross-module generic instantiation
+    struct SpecializationCache *spec_cache;
 };
 
 // context lifecycle
@@ -94,7 +97,7 @@ void codegen_context_init(CodegenContext *ctx, const char *module_name, bool no_
 void codegen_context_dnit(CodegenContext *ctx);
 
 // main entry point
-bool codegen_generate(CodegenContext *ctx, AstNode *root, SemanticAnalyzer *analyzer);
+bool codegen_generate(CodegenContext *ctx, AstNode *root, SymbolTable *symbols);
 
 // output generation
 bool codegen_emit_object(CodegenContext *ctx, const char *filename);

@@ -6,8 +6,9 @@
 #include "preprocessor.h"
 #include <stdbool.h>
 
-typedef struct Module        Module;
-typedef struct ModuleManager ModuleManager;
+typedef struct Module              Module;
+typedef struct ModuleManager       ModuleManager;
+typedef struct SpecializationCache SpecializationCache;
 
 // forward statement
 typedef struct SymbolTable SymbolTable;
@@ -15,9 +16,10 @@ typedef struct SymbolTable SymbolTable;
 // represents a loaded module
 struct Module
 {
-    char        *name;            // module name
-    char        *file_path;       // absolute file path
-    char        *object_path;     // compiled object file path
+    char        *name;          // module name
+    char        *file_path;     // absolute file path
+    char        *object_path;   // compiled object file path
+    char        *source;        // cached source content
     AstNode     *ast;           // parsed AST
     SymbolTable *symbols;       // module's symbol table
     bool         is_parsed;     // parsing complete
@@ -45,17 +47,17 @@ typedef struct ModuleErrorList
 // manages module loading and dependency resolution
 struct ModuleManager
 {
-    Module        **modules;      // hash table of loaded modules
-    int             capacity;     // hash table size
-    int             count;        // number of loaded modules
-    char          **search_paths; // directories to search for modules
-    int             search_count; // number of search paths
+    Module **modules;      // hash table of loaded modules
+    int      capacity;     // hash table size
+    int      count;        // number of loaded modules
+    char   **search_paths; // directories to search for modules
+    int      search_count; // number of search paths
     // simple alias map for config-less resolution: name -> base directory
     char          **alias_names;
     char          **alias_paths;
     int             alias_count;
-    ModuleErrorList errors;       // accumulated errors during loading
-    bool            had_error;    // true if any module failed to load/parse
+    ModuleErrorList errors;    // accumulated errors during loading
+    bool            had_error; // true if any module failed to load/parse
 
     // configuration for dependency resolution
     void       *config;      // ProjectConfig* (void* to avoid circular includes)
@@ -63,6 +65,11 @@ struct ModuleManager
 
     char *target_triple; // cached target triple (from config or host)
     char *target_os;     // normalized os name (linux/windows/darwin/...) for platform suffix resolution
+    char *target_arch;   // normalized arch name (x86_64/aarch64/...)
+
+    // cached preprocessor constants
+    PreprocessorConstant *cached_constants;
+    size_t                cached_constants_count;
 };
 
 // module manager lifecycle
@@ -70,20 +77,18 @@ void module_manager_init(ModuleManager *manager);
 void module_manager_dnit(ModuleManager *manager);
 
 // search path management
-void module_manager_add_search_path(ModuleManager *manager, const char *path);
-void module_manager_add_alias(ModuleManager *manager, const char *name, const char *base_dir);
-void module_manager_set_config(ModuleManager *manager, void *config, const char *project_dir);
+void   module_manager_add_search_path(ModuleManager *manager, const char *path);
+void   module_manager_add_alias(ModuleManager *manager, const char *name, const char *base_dir);
+void   module_manager_set_config(ModuleManager *manager, void *config, const char *project_dir);
 size_t module_manager_collect_constants(ModuleManager *manager, PreprocessorConstant *out, size_t max_count);
 
 // module loading
 Module *module_manager_load_module(ModuleManager *manager, const char *module_path);
 Module *module_manager_find_module(ModuleManager *manager, const char *name);
-
-// dependency resolution
-bool module_manager_resolve_dependencies(ModuleManager *manager, AstNode *program, const char *base_dir);
+Module *module_manager_find_by_file_path(ModuleManager *manager, const char *file_path);
 
 // dependency compilation and linking
-bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie, bool debug_info);
+bool module_manager_compile_dependencies(ModuleManager *manager, const char *output_dir, int opt_level, bool no_pie, bool debug_info, SpecializationCache *spec_cache);
 bool module_manager_get_link_objects(ModuleManager *manager, char ***object_files, int *count);
 
 // utility helpers

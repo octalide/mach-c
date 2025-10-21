@@ -18,6 +18,7 @@ struct Module
     char        *name;          // module name
     char        *file_path;     // absolute file path
     char        *object_path;   // compiled object file path
+    char        *source;        // cached source content
     AstNode     *ast;           // parsed AST
     SymbolTable *symbols;       // module's symbol table
     bool         is_parsed;     // parsing complete
@@ -63,6 +64,11 @@ struct ModuleManager
 
     char *target_triple; // cached target triple (from config or host)
     char *target_os;     // normalized os name (linux/windows/darwin/...) for platform suffix resolution
+    char *target_arch;   // normalized arch name (x86_64/aarch64/...)
+
+    // cached preprocessor constants
+    PreprocessorConstant *cached_constants;
+    size_t                cached_constants_count;
 };
 
 // module manager lifecycle

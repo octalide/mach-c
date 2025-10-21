@@ -18,11 +18,13 @@ static bool  ensure_assignable(SemanticDriver *driver, const AnalysisContext *ct
 
 void diagnostic_sink_init(DiagnosticSink *sink)
 {
-    sink->entries    = NULL;
-    sink->count      = 0;
-    sink->capacity   = 0;
-    sink->has_errors = false;
-    sink->has_fatal  = false;
+    sink->entries      = NULL;
+    sink->count        = 0;
+    sink->capacity     = 0;
+    sink->has_errors   = false;
+    sink->has_fatal    = false;
+    sink->source_cache = calloc(16, sizeof(SourceCacheEntry *));
+    sink->cache_size   = 16;
 }
 
 void diagnostic_sink_dnit(DiagnosticSink *sink)
@@ -38,6 +40,26 @@ void diagnostic_sink_dnit(DiagnosticSink *sink)
     sink->entries  = NULL;
     sink->count    = 0;
     sink->capacity = 0;
+
+    // clean up source cache
+    if (sink->source_cache)
+    {
+        for (size_t i = 0; i < sink->cache_size; i++)
+        {
+            SourceCacheEntry *entry = sink->source_cache[i];
+            while (entry)
+            {
+                SourceCacheEntry *next = entry->next;
+                free(entry->file_path);
+                free(entry->source);
+                free(entry);
+                entry = next;
+            }
+        }
+        free(sink->source_cache);
+        sink->source_cache = NULL;
+        sink->cache_size   = 0;
+    }
 }
 
 void diagnostic_emit(DiagnosticSink *sink, DiagnosticLevel level, AstNode *node, const char *file_path, const char *fmt, ...)
@@ -87,6 +109,46 @@ void diagnostic_emit(DiagnosticSink *sink, DiagnosticLevel level, AstNode *node,
         sink->has_errors = true;
 }
 
+static unsigned int hash_file_path(const char *path)
+{
+    unsigned int hash = 5381;
+    while (*path)
+    {
+        hash = ((hash << 5) + hash) + (unsigned char)*path;
+        path++;
+    }
+    return hash;
+}
+
+static char *get_cached_source(DiagnosticSink *sink, const char *file_path)
+{
+    if (!sink->source_cache || !file_path)
+        return NULL;
+
+    unsigned int      hash  = hash_file_path(file_path) % sink->cache_size;
+    SourceCacheEntry *entry = sink->source_cache[hash];
+
+    while (entry)
+    {
+        if (strcmp(entry->file_path, file_path) == 0)
+            return entry->source;
+        entry = entry->next;
+    }
+
+    // not cached, read and cache it
+    char *source = read_file((char *)file_path);
+    if (source)
+    {
+        entry             = malloc(sizeof(SourceCacheEntry));
+        entry->file_path  = strdup(file_path);
+        entry->source     = source;
+        entry->next       = sink->source_cache[hash];
+        sink->source_cache[hash] = entry;
+    }
+
+    return source;
+}
+
 void diagnostic_print_all(DiagnosticSink *sink)
 {
     for (size_t i = 0; i < sink->count; i++)
@@ -103,8 +165,8 @@ void diagnostic_print_all(DiagnosticSink *sink)
         // if we have token and file info, calculate and display location
         if (diag->token && diag->file_path)
         {
-            // read the source file
-            char *source = read_file((char *)diag->file_path);
+            // use cached source
+            char *source = get_cached_source(sink, diag->file_path);
             if (source)
             {
                 // create a temporary lexer for this file to calculate position
@@ -129,7 +191,7 @@ void diagnostic_print_all(DiagnosticSink *sink)
                 }
 
                 lexer_dnit(&lexer);
-                free(source);
+                // don't free source - it's cached
             }
             else
             {

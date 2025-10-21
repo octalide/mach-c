@@ -36,14 +36,24 @@ typedef struct Diagnostic
     int             column;
 } Diagnostic;
 
+// source cache entry for diagnostic printing
+typedef struct SourceCacheEntry
+{
+    char                    *file_path;
+    char                    *source;
+    struct SourceCacheEntry *next;
+} SourceCacheEntry;
+
 // diagnostic sink: collects errors/warnings
 struct DiagnosticSink
 {
-    Diagnostic *entries;
-    size_t      count;
-    size_t      capacity;
-    bool        has_errors;
-    bool        has_fatal;
+    Diagnostic        *entries;
+    size_t             count;
+    size_t             capacity;
+    bool               has_errors;
+    bool               has_fatal;
+    SourceCacheEntry **source_cache;
+    size_t             cache_size;
 };
 
 // generic binding: immutable type parameter -> concrete type mapping

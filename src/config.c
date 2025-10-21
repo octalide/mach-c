@@ -300,9 +300,6 @@ TargetConfig *target_config_create(const char *name, const char *target_triple)
 void config_init(ProjectConfig *config)
 {
     memset(config, 0, sizeof(ProjectConfig));
-    config->module_aliases       = NULL;
-    config->module_alias_count   = 0;
-    config->module_alias_capacity = 0;
 }
 
 void config_dnit(ProjectConfig *config)
@@ -313,12 +310,7 @@ void config_dnit(ProjectConfig *config)
     free(config->target_name);
     free(config->default_target);
     free(config->src_dir);
-    free(config->dep_dir);
-    free(config->lib_dir);
     free(config->out_dir);
-    free(config->runtime_path);
-    free(config->runtime_module);
-    free(config->stdlib_path);
 
     // cleanup targets
     for (int i = 0; i < config->target_count; i++)
@@ -328,7 +320,7 @@ void config_dnit(ProjectConfig *config)
     }
     free(config->targets);
 
-    // cleanup explicit dependencies
+    // cleanup dependencies
     for (int i = 0; i < config->dep_count; i++)
     {
         DepSpec *d = config->deps[i];
@@ -341,13 +333,6 @@ void config_dnit(ProjectConfig *config)
         }
     }
     free(config->deps);
-
-    for (int i = 0; i < config->module_alias_count; i++)
-    {
-        free(config->module_aliases[i].name);
-        free(config->module_aliases[i].target);
-    }
-    free(config->module_aliases);
 
     memset(config, 0, sizeof(ProjectConfig));
 }
@@ -493,19 +478,10 @@ ProjectConfig *config_load(const char *config_path)
             {
                 config->src_dir = toml_parse_string(&parser);
             }
-            else if (strcmp(key, "dep-dir") == 0)
-            {
-                config->dep_dir = toml_parse_string(&parser);
-            }
-            else if (strcmp(key, "lib-dir") == 0)
-            {
-                config->lib_dir = toml_parse_string(&parser);
-            }
             else if (strcmp(key, "out-dir") == 0)
             {
                 config->out_dir = toml_parse_string(&parser);
             }
-            // bin-dir and obj-dir are now computed dynamically per target
         }
         else if (strncmp(current_section, "targets.", 8) == 0)
         {
@@ -574,36 +550,8 @@ ProjectConfig *config_load(const char *config_path)
         }
         else if (strcmp(current_section, "build") == 0)
         {
-            // legacy build section - skip for now
+            // legacy build section - skip
             toml_skip_table_value(&parser);
-        }
-        else if (strcmp(current_section, "runtime") == 0)
-        {
-            // handle runtime section keys
-            if (strcmp(key, "runtime-path") == 0)
-            {
-                config->runtime_path = toml_parse_string(&parser);
-            }
-            else if (strcmp(key, "runtime") == 0 || strcmp(key, "runtime-module") == 0)
-            {
-                config->runtime_module = toml_parse_string(&parser);
-            }
-            else if (strcmp(key, "stdlib-path") == 0)
-            {
-                config->stdlib_path = toml_parse_string(&parser);
-            }
-        }
-        else if (strcmp(current_section, "modules") == 0)
-        {
-            char *target = toml_parse_string(&parser);
-            if (target)
-            {
-                if (!config_add_module_alias(config, key, target))
-                {
-                    fprintf(stderr, "warning: failed to register module alias '%s'\n", key);
-                }
-                free(target);
-            }
         }
         else if (strcmp(current_section, "deps") == 0)
         {
@@ -643,10 +591,6 @@ ProjectConfig *config_load(const char *config_path)
                         else if (strcmp(fkey, "src") == 0 || strcmp(fkey, "src-dir") == 0)
                         {
                             dep->src_dir = toml_parse_string(&parser);
-                        }
-                        else if (strcmp(fkey, "runtime") == 0)
-                        {
-                            dep->is_runtime = toml_parse_bool(&parser);
                         }
                         else
                         {
@@ -711,8 +655,7 @@ ProjectConfig *config_load_from_dir(const char *dir_path)
         return NULL;
 
     // auto-discover dependencies in dep directory so projects work without [deps]
-    // this treats every immediate child directory under dep-dir as a dependency with src = "src"
-    const char *dep_rel = cfg->dep_dir ? cfg->dep_dir : "dep";
+    const char *dep_rel = "dep";
     char        dep_abs[1024];
     snprintf(dep_abs, sizeof(dep_abs), "%s/%s", dir_path, dep_rel);
 
@@ -742,7 +685,7 @@ ProjectConfig *config_load_from_dir(const char *dir_path)
             if (config_has_dep(cfg, ent->d_name))
                 continue;
 
-            // add discovered dep with default src = "src" and relative path = <dep-dir>/<name>
+            // add discovered dep with default src = "src" and relative path = dep/<name>
             DepSpec *dep = calloc(1, sizeof(DepSpec));
             if (!dep)
                 continue;
@@ -796,10 +739,6 @@ bool config_save(ProjectConfig *config, const char *config_path)
     fprintf(file, "\n[directories]\n");
     if (config->src_dir)
         fprintf(file, "src-dir = \"%s\"\n", config->src_dir);
-    if (config->dep_dir)
-        fprintf(file, "dep-dir = \"%s\"\n", config->dep_dir);
-    if (config->lib_dir)
-        fprintf(file, "lib-dir = \"%s\"\n", config->lib_dir);
     if (config->out_dir)
         fprintf(file, "out-dir = \"%s\"\n", config->out_dir);
 
@@ -821,28 +760,7 @@ bool config_save(ProjectConfig *config, const char *config_path)
         fprintf(file, "no-pie = %s\n", target->no_pie ? "true" : "false");
     }
 
-    if (config->runtime_path || config->runtime_module || config->stdlib_path)
-    {
-        fprintf(file, "\n[runtime]\n");
-        if (config->runtime_path)
-            fprintf(file, "runtime-path = \"%s\"\n", config->runtime_path);
-        if (config->runtime_module)
-            fprintf(file, "runtime = \"%s\"\n", config->runtime_module);
-        if (config->stdlib_path)
-            fprintf(file, "stdlib-path = \"%s\"\n", config->stdlib_path);
-    }
-
-    if (config->module_alias_count > 0)
-    {
-        fprintf(file, "\n[modules]\n");
-        for (int i = 0; i < config->module_alias_count; i++)
-        {
-            ModuleAlias *alias = &config->module_aliases[i];
-            fprintf(file, "%s = \"%s\"\n", alias->name, alias->target);
-        }
-    }
-
-    // explicit dependency specs
+    // dependencies (also serve as module aliases)
     if (config->dep_count > 0)
     {
         fprintf(file, "\n[deps]\n");
@@ -852,8 +770,6 @@ bool config_save(ProjectConfig *config, const char *config_path)
             fprintf(file, "%s = { path = \"%s\"", d->name, d->path);
             if (d->src_dir && strcmp(d->src_dir, "src") != 0)
                 fprintf(file, ", src = \"%s\"", d->src_dir);
-            if (d->is_runtime)
-                fprintf(file, ", runtime = true");
             fprintf(file, " }\n");
         }
     }
@@ -876,11 +792,7 @@ ProjectConfig *config_create_default(const char *project_name)
     config->target_name = strdup(project_name);
     // directories
     config->src_dir = strdup("src");
-    config->dep_dir = strdup("dep");
-    config->lib_dir = strdup("lib");
     config->out_dir = strdup("out");
-    // runtime module will be provided by std dependency (if present)
-    config->runtime_module = NULL;
 
     return config;
 }
@@ -1002,39 +914,7 @@ char *config_resolve_src_dir(ProjectConfig *config, const char *project_dir)
     return path;
 }
 
-char *config_resolve_dep_dir(ProjectConfig *config, const char *project_dir)
-{
-    if (!config || !config->dep_dir)
-        return NULL;
 
-    // if dep dir is absolute path, return as is
-    if (config->dep_dir[0] == '/')
-        return strdup(config->dep_dir);
-
-    // resolve relative to project directory
-    size_t len  = strlen(project_dir) + strlen(config->dep_dir) + 2;
-    char  *path = malloc(len);
-    snprintf(path, len, "%s/%s", project_dir, config->dep_dir);
-
-    return path;
-}
-
-char *config_resolve_lib_dir(ProjectConfig *config, const char *project_dir)
-{
-    if (!config || !config->lib_dir)
-        return NULL;
-
-    // if lib dir is absolute path, return as is
-    if (config->lib_dir[0] == '/')
-        return strdup(config->lib_dir);
-
-    // resolve relative to project directory
-    size_t len  = strlen(project_dir) + strlen(config->lib_dir) + 2;
-    char  *path = malloc(len);
-    snprintf(path, len, "%s/%s", project_dir, config->lib_dir);
-
-    return path;
-}
 
 char *config_resolve_out_dir(ProjectConfig *config, const char *project_dir)
 {
@@ -1095,45 +975,7 @@ char *config_resolve_obj_dir(ProjectConfig *config, const char *project_dir, con
     return path;
 }
 
-char *config_resolve_runtime_path(ProjectConfig *config, const char *project_dir)
-{
-    if (!config || !config->runtime_path)
-        return NULL;
 
-    // if runtime path is absolute, return as is
-    if (config->runtime_path[0] == '/')
-        return strdup(config->runtime_path);
-
-    // resolve relative to project directory
-    size_t len  = strlen(project_dir) + strlen(config->runtime_path) + 2;
-    char  *path = malloc(len);
-    snprintf(path, len, "%s/%s", project_dir, config->runtime_path);
-
-    return path;
-}
-
-// runtime module management
-bool config_set_runtime_module(ProjectConfig *config, const char *module_path)
-{
-    if (!config || !module_path)
-        return false;
-
-    free(config->runtime_module);
-    config->runtime_module = strdup(module_path);
-    return true;
-}
-
-char *config_get_runtime_module(ProjectConfig *config)
-{
-    if (!config || !config->runtime_module)
-        return NULL;
-    return strdup(config->runtime_module);
-}
-
-bool config_has_runtime_module(ProjectConfig *config)
-{
-    return config && config->runtime_module && strlen(config->runtime_module) > 0;
-}
 
 static bool ensure_directory_exists(const char *path)
 {
@@ -1181,28 +1023,6 @@ bool config_ensure_directories(ProjectConfig *config, const char *project_dir)
             return false;
         }
         free(src_dir);
-    }
-
-    char *dep_dir = config_resolve_dep_dir(config, project_dir);
-    if (dep_dir)
-    {
-        if (!ensure_directory_exists(dep_dir))
-        {
-            free(dep_dir);
-            return false;
-        }
-        free(dep_dir);
-    }
-
-    char *lib_dir = config_resolve_lib_dir(config, project_dir);
-    if (lib_dir)
-    {
-        if (!ensure_directory_exists(lib_dir))
-        {
-            free(lib_dir);
-            return false;
-        }
-        free(lib_dir);
     }
 
     char *out_dir = config_resolve_out_dir(config, project_dir);
@@ -1302,67 +1122,18 @@ bool config_has_dep(ProjectConfig *config, const char *name)
     return config_get_dep(config, name) != NULL;
 }
 
-static ModuleAlias *config_find_module_alias(ProjectConfig *config, const char *alias)
+// deps now serve as module aliases automatically
+static const char *config_get_dep_alias(ProjectConfig *config, const char *alias)
 {
     if (!config || !alias)
         return NULL;
-
-    for (int i = 0; i < config->module_alias_count; i++)
-    {
-        if (strcmp(config->module_aliases[i].name, alias) == 0)
-        {
-            return &config->module_aliases[i];
-        }
-    }
+    
+    // check if alias matches a dependency name
+    DepSpec *dep = config_get_dep(config, alias);
+    if (dep)
+        return dep->name; // dependency name IS the module prefix
+    
     return NULL;
-}
-
-bool config_add_module_alias(ProjectConfig *config, const char *alias, const char *target)
-{
-    if (!config || !alias || !target)
-        return false;
-
-    ModuleAlias *existing = config_find_module_alias(config, alias);
-    if (existing)
-    {
-        char *new_target = strdup(target);
-        if (!new_target)
-            return false;
-        free(existing->target);
-        existing->target = new_target;
-        return true;
-    }
-
-    if (config->module_alias_count == config->module_alias_capacity)
-    {
-        int          new_capacity = config->module_alias_capacity == 0 ? 4 : config->module_alias_capacity * 2;
-        ModuleAlias *new_entries  = realloc(config->module_aliases, (size_t)new_capacity * sizeof(ModuleAlias));
-        if (!new_entries)
-            return false;
-        config->module_aliases        = new_entries;
-        config->module_alias_capacity = new_capacity;
-    }
-
-    ModuleAlias *slot = &config->module_aliases[config->module_alias_count];
-    slot->name        = strdup(alias);
-    slot->target      = strdup(target);
-    if (!slot->name || !slot->target)
-    {
-        free(slot->name);
-        free(slot->target);
-        slot->name   = NULL;
-        slot->target = NULL;
-        return false;
-    }
-
-    config->module_alias_count++;
-    return true;
-}
-
-const char *config_get_module_alias(ProjectConfig *config, const char *alias)
-{
-    ModuleAlias *entry = config_find_module_alias(config, alias);
-    return entry ? entry->target : NULL;
 }
 
 static bool is_self_alias(const char *alias)
@@ -1408,7 +1179,7 @@ char *config_expand_module_path(ProjectConfig *config, const char *module_path)
     }
     else
     {
-        alias_target = config_get_module_alias(config, head);
+        alias_target = config_get_dep_alias(config, head);
     }
 
     char *result = NULL;

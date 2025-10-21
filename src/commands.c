@@ -446,15 +446,6 @@ int mach_cmd_build(int argc, char **argv)
     if (cfg)
     {
         module_manager_set_config(&driver->module_manager, cfg, project_dir_root);
-        // proactively load runtime module so it's compiled and linked
-        if (config_has_runtime_module(cfg))
-        {
-            char   *rt = config_get_runtime_module(cfg);
-            Module *m  = module_manager_load_module(&driver->module_manager, rt);
-            if (m)
-                m->needs_linking = true;
-            free(rt);
-        }
     }
     for (int i = 0; i < inc.count; i++)
         module_manager_add_search_path(&driver->module_manager, inc.items[i]);
@@ -692,28 +683,6 @@ int mach_cmd_build(int argc, char **argv)
             return 1;
         }
         module_manager_get_link_objects(&driver->module_manager, &dep_objs, &dep_count);
-        // no lockfile writing; reproducibility can be handled by VCS and pinned dep paths
-        // ensure runtime module is part of link if configured
-        if (config_has_runtime_module(cfg))
-        {
-            char   *rt = config_get_runtime_module(cfg);
-            Module *m  = module_manager_find_module(&driver->module_manager, rt);
-            if (!m)
-                m = module_manager_load_module(&driver->module_manager, rt);
-            if (m)
-            {
-                m->needs_linking = true;
-                // re-collect objects after marking runtime
-                if (dep_objs)
-                {
-                    for (int i = 0; i < dep_count; i++)
-                        free(dep_objs[i]);
-                    free(dep_objs);
-                }
-                module_manager_get_link_objects(&driver->module_manager, &dep_objs, &dep_count);
-            }
-            free(rt);
-        }
     }
 
     if (link_exe)

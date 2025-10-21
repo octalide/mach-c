@@ -1330,48 +1330,9 @@ bool module_manager_compile_dependencies(ModuleManager *manager, const char *out
 
             if (!module->is_analyzed)
             {
-                SemanticDriver *driver = semantic_driver_create();
-
-                module_manager_set_config(&driver->module_manager, manager->config, manager->project_dir);
-
-                bool analyzed = semantic_driver_analyze(driver, module->ast, module->name, module->file_path);
-                if (!analyzed)
-                {
-                    // propagate semantic errors to module manager errors
-                    for (size_t ei = 0; ei < driver->diagnostics.count; ei++)
-                    {
-                        module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", driver->diagnostics.entries[ei].message ? driver->diagnostics.entries[ei].message : "semantic error");
-                    }
-                    manager->had_error = true;
-
-                    semantic_driver_destroy(driver);
-                    return false;
-                }
-
-                if (module->symbols)
-                {
-                    symbol_table_dnit(module->symbols);
-                    free(module->symbols);
-                }
-                module->symbols                    = malloc(sizeof(SymbolTable));
-                *module->symbols                   = driver->symbol_table;
-                driver->symbol_table.global_scope  = NULL;
-                driver->symbol_table.current_scope = NULL;
-                driver->symbol_table.module_scope  = NULL;
-
-                // prevent freeing symbol tables of driver-managed modules
-                for (int mi = 0; mi < driver->module_manager.capacity; mi++)
-                {
-                    Module *m = driver->module_manager.modules[mi];
-                    while (m)
-                    {
-                        m->symbols = NULL;
-                        m          = m->next;
-                    }
-                }
-
-                module->is_analyzed = true;
-                semantic_driver_destroy(driver);
+                module_error_list_add(&manager->errors, module->name, module->file_path ? module->file_path : "<unknown>", "module has not been analyzed");
+                manager->had_error = true;
+                return false;
             }
 
             if (module->is_compiled && module->object_path)

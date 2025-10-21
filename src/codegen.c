@@ -2521,6 +2521,7 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
     size_t fixed_param_count = func_type->function.param_count;
 
     bool forwards_varargs = false;
+    int  varargs_markers  = 0;
     if (expr->call_expr.args)
     {
         for (int i = 0; i < arg_expr_count; i++)
@@ -2529,7 +2530,7 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
             if (arg_node && arg_node->kind == AST_EXPR_VARARGS)
             {
                 forwards_varargs = true;
-                break;
+                varargs_markers++;
             }
         }
     }
@@ -2547,39 +2548,47 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
         }
     }
 
-    if (uses_mach_varargs && arg_expr_count < (int)fixed_param_count)
+    if (uses_mach_varargs && !forwards_varargs && arg_expr_count < (int)fixed_param_count)
     {
         codegen_error(ctx, expr, "not enough arguments for variadic function");
         return NULL;
     }
 
-    int           total_args = uses_mach_varargs ? (int)fixed_param_count + 2 : arg_expr_count;
-    LLVMValueRef *args       = NULL;
+    // account for varargs markers that will be skipped in actual arg emission
+    int actual_arg_count = arg_expr_count - varargs_markers;
+    int total_args       = uses_mach_varargs ? (int)fixed_param_count + 2 : actual_arg_count;
+    LLVMValueRef *args   = NULL;
     if (total_args > 0)
         args = malloc(sizeof(LLVMValueRef) * total_args);
 
     // evaluate fixed parameters
-    int fixed_emit = arg_expr_count < (int)fixed_param_count ? arg_expr_count : (int)fixed_param_count;
-    for (int i = 0; i < fixed_emit; i++)
+    int fixed_emit    = 0;
+    int arg_src_index = 0;
+    for (arg_src_index = 0; arg_src_index < arg_expr_count && fixed_emit < (int)fixed_param_count; arg_src_index++)
     {
-        AstNode     *arg_node = expr->call_expr.args->items[i];
-        LLVMValueRef value    = codegen_expr(ctx, arg_node);
+        AstNode *arg_node = expr->call_expr.args->items[arg_src_index];
+        
+        // skip varargs forwarding marker in fixed parameter positions
+        if (arg_node->kind == AST_EXPR_VARARGS)
+            continue;
+
+        LLVMValueRef value = codegen_expr(ctx, arg_node);
         if (!value)
         {
             free(args);
-            codegen_error(ctx, expr, "failed to generate call argument %d", i);
+            codegen_error(ctx, expr, "failed to generate call argument %d", arg_src_index);
             return NULL;
         }
-        value   = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
-        args[i] = value;
+        value                = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
+        args[fixed_emit]     = value;
 
-        Type *param_type = func_type->function.param_types[i];
+        Type *param_type = func_type->function.param_types[fixed_emit];
         Type *pt         = type_resolve_alias(param_type);
         Type *at         = type_resolve_alias(arg_node->type);
 
         if (at && at->kind == TYPE_ARRAY && pt && (pt->kind == TYPE_POINTER || pt->kind == TYPE_PTR))
         {
-            args[i] = LLVMBuildExtractValue(ctx->builder, args[i], 0, "array_data");
+            args[fixed_emit] = LLVMBuildExtractValue(ctx->builder, args[fixed_emit], 0, "array_data");
         }
 
         if (pt && at && type_is_numeric(pt) && type_is_numeric(at))
@@ -2588,60 +2597,62 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
             if (type_is_float(at) && type_is_float(pt))
             {
                 if (at->size < pt->size)
-                    args[i] = LLVMBuildFPExt(ctx->builder, args[i], expected_llvm, "fpext");
+                    args[fixed_emit] = LLVMBuildFPExt(ctx->builder, args[fixed_emit], expected_llvm, "fpext");
                 else if (at->size > pt->size)
-                    args[i] = LLVMBuildFPTrunc(ctx->builder, args[i], expected_llvm, "fptrunc");
+                    args[fixed_emit] = LLVMBuildFPTrunc(ctx->builder, args[fixed_emit], expected_llvm, "fptrunc");
             }
             else if (type_is_integer(at) && type_is_integer(pt))
             {
                 if (at->size < pt->size)
                 {
                     if (type_is_signed(at))
-                        args[i] = LLVMBuildSExt(ctx->builder, args[i], expected_llvm, "sext");
+                        args[fixed_emit] = LLVMBuildSExt(ctx->builder, args[fixed_emit], expected_llvm, "sext");
                     else
-                        args[i] = LLVMBuildZExt(ctx->builder, args[i], expected_llvm, "zext");
+                        args[fixed_emit] = LLVMBuildZExt(ctx->builder, args[fixed_emit], expected_llvm, "zext");
                 }
                 else if (at->size > pt->size)
                 {
-                    args[i] = LLVMBuildTrunc(ctx->builder, args[i], expected_llvm, "trunc");
+                    args[fixed_emit] = LLVMBuildTrunc(ctx->builder, args[fixed_emit], expected_llvm, "trunc");
                 }
             }
             else if (type_is_float(at) && type_is_integer(pt))
             {
                 if (type_is_signed(pt))
-                    args[i] = LLVMBuildFPToSI(ctx->builder, args[i], expected_llvm, "fptosi");
+                    args[fixed_emit] = LLVMBuildFPToSI(ctx->builder, args[fixed_emit], expected_llvm, "fptosi");
                 else
-                    args[i] = LLVMBuildFPToUI(ctx->builder, args[i], expected_llvm, "fptoui");
+                    args[fixed_emit] = LLVMBuildFPToUI(ctx->builder, args[fixed_emit], expected_llvm, "fptoui");
             }
             else if (type_is_integer(at) && type_is_float(pt))
             {
                 if (type_is_signed(at))
-                    args[i] = LLVMBuildSIToFP(ctx->builder, args[i], expected_llvm, "sitofp");
+                    args[fixed_emit] = LLVMBuildSIToFP(ctx->builder, args[fixed_emit], expected_llvm, "sitofp");
                 else
-                    args[i] = LLVMBuildUIToFP(ctx->builder, args[i], expected_llvm, "uitofp");
+                    args[fixed_emit] = LLVMBuildUIToFP(ctx->builder, args[fixed_emit], expected_llvm, "uitofp");
             }
         }
         else if (pt && at && (type_is_pointer_like(pt) && type_is_pointer_like(at)))
         {
             LLVMTypeRef expected_llvm = codegen_get_llvm_type(ctx, param_type);
-            if (expected_llvm && LLVMTypeOf(args[i]) != expected_llvm)
-                args[i] = LLVMBuildBitCast(ctx->builder, args[i], expected_llvm, "ptrcast");
+            if (expected_llvm && LLVMTypeOf(args[fixed_emit]) != expected_llvm)
+                args[fixed_emit] = LLVMBuildBitCast(ctx->builder, args[fixed_emit], expected_llvm, "ptrcast");
         }
         else if (pt && at && type_is_pointer_like(pt) && type_is_integer(at))
         {
             LLVMTypeRef expected_llvm = codegen_get_llvm_type(ctx, param_type);
             if (expected_llvm)
-                args[i] = LLVMBuildIntToPtr(ctx->builder, args[i], expected_llvm, "inttoptr_arg");
+                args[fixed_emit] = LLVMBuildIntToPtr(ctx->builder, args[fixed_emit], expected_llvm, "inttoptr_arg");
         }
         else if (pt && at && type_is_integer(pt) && type_is_pointer_like(at))
         {
             LLVMTypeRef expected_llvm = codegen_get_llvm_type(ctx, param_type);
             if (expected_llvm)
-                args[i] = LLVMBuildPtrToInt(ctx->builder, args[i], expected_llvm, "ptrtoint_arg");
+                args[fixed_emit] = LLVMBuildPtrToInt(ctx->builder, args[fixed_emit], expected_llvm, "ptrtoint_arg");
         }
+
+        fixed_emit++;
     }
 
-    if (arg_expr_count < (int)fixed_param_count)
+    if (fixed_emit < (int)fixed_param_count)
     {
         free(args);
         codegen_error(ctx, expr, "not enough arguments for function call");
@@ -2729,11 +2740,15 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
     }
     else
     {
+        // C-style varargs: iterate through all variadic arguments
+        // note: arg array index may differ from source index if AST_EXPR_VARARGS markers are present
+        int arg_dst_index = (int)fixed_param_count;
         for (int i = (int)fixed_param_count; i < arg_expr_count; i++)
         {
             AstNode *arg_node = expr->call_expr.args->items[i];
             if (arg_node->kind == AST_EXPR_VARARGS)
             {
+                // varargs forwarding not supported in C-style varargs
                 continue;
             }
             LLVMValueRef value = codegen_expr(ctx, arg_node);
@@ -2743,26 +2758,27 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
                 codegen_error(ctx, expr, "failed to generate call argument %d", i);
                 return NULL;
             }
-            value    = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
-            args[i]  = value;
-            Type *at = type_resolve_alias(arg_node->type);
+            value                  = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
+            args[arg_dst_index]    = value;
+            Type *at               = type_resolve_alias(arg_node->type);
 
             if (at && at->kind == TYPE_ARRAY)
             {
-                args[i] = LLVMBuildExtractValue(ctx->builder, args[i], 0, "vararg_array_data");
+                args[arg_dst_index] = LLVMBuildExtractValue(ctx->builder, args[arg_dst_index], 0, "vararg_array_data");
             }
             else if (at && type_is_float(at) && at->size < 8)
             {
-                args[i] = LLVMBuildFPExt(ctx->builder, args[i], LLVMDoubleTypeInContext(ctx->context), "vararg_fpromote");
+                args[arg_dst_index] = LLVMBuildFPExt(ctx->builder, args[arg_dst_index], LLVMDoubleTypeInContext(ctx->context), "vararg_fpromote");
             }
             else if (at && type_is_integer(at) && at->size < 4)
             {
                 LLVMTypeRef i32ty = LLVMInt32TypeInContext(ctx->context);
                 if (type_is_signed(at))
-                    args[i] = LLVMBuildSExt(ctx->builder, args[i], i32ty, "vararg_ipromote");
+                    args[arg_dst_index] = LLVMBuildSExt(ctx->builder, args[arg_dst_index], i32ty, "vararg_ipromote");
                 else
-                    args[i] = LLVMBuildZExt(ctx->builder, args[i], i32ty, "vararg_ipromote");
+                    args[arg_dst_index] = LLVMBuildZExt(ctx->builder, args[arg_dst_index], i32ty, "vararg_ipromote");
             }
+            arg_dst_index++;
         }
     }
 

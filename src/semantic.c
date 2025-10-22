@@ -284,6 +284,59 @@ static size_t hash_specialization_key(Symbol *generic_symbol, Type **type_args, 
     return hash;
 }
 
+// compare types for specialization cache - does NOT resolve aliases
+static bool type_equals_strict(Type *a, Type *b)
+{
+    if (a == b)
+        return true;
+    if (!a || !b)
+        return false;
+
+    if (a->kind != b->kind)
+        return false;
+
+    switch (a->kind)
+    {
+    case TYPE_ALIAS:
+    {
+        if (b->kind != TYPE_ALIAS)
+            return false;
+        if (a->name && b->name)
+            return strcmp(a->name, b->name) == 0;
+        return a->alias.target == b->alias.target && type_equals_strict(a->alias.target, b->alias.target);
+    }
+
+    case TYPE_POINTER:
+        return type_equals_strict(a->pointer.base, b->pointer.base);
+
+    case TYPE_ARRAY:
+        return type_equals_strict(a->array.elem_type, b->array.elem_type);
+
+    case TYPE_FUNCTION:
+        if (a->function.param_count != b->function.param_count)
+            return false;
+        if (a->function.is_variadic != b->function.is_variadic)
+            return false;
+        if (!type_equals_strict(a->function.return_type, b->function.return_type))
+            return false;
+        for (size_t i = 0; i < a->function.param_count; i++)
+        {
+            if (!type_equals_strict(a->function.param_types[i], b->function.param_types[i]))
+                return false;
+        }
+        return true;
+
+    case TYPE_STRUCT:
+    case TYPE_UNION:
+        if (a->name && b->name)
+            return strcmp(a->name, b->name) == 0;
+        return a == b;
+
+    default:
+        return a == b;
+    }
+}
+
 static bool keys_equal(const SpecializationKey *a, const SpecializationKey *b)
 {
     if (a->generic_symbol != b->generic_symbol)
@@ -292,7 +345,7 @@ static bool keys_equal(const SpecializationKey *a, const SpecializationKey *b)
         return false;
     for (size_t i = 0; i < a->type_arg_count; i++)
     {
-        if (!type_equals(a->type_args[i], b->type_args[i]))
+        if (!type_equals_strict(a->type_args[i], b->type_args[i]))
             return false;
     }
     return true;
@@ -458,11 +511,14 @@ static char *type_to_mangled_string(Type *type)
     if (!type)
         return strdup("unknown");
 
-    // if type has a name (like "string" alias), use it
-    if (type->name && strlen(type->name) > 0)
+    // for aliases with names, use the alias name directly for better readability
+    if (type->kind == TYPE_ALIAS && type->name && strlen(type->name) > 0)
         return sanitize_type_name(type->name);
 
-    char buffer[256];
+    // for named types (structs, unions), use the name
+    if ((type->kind == TYPE_STRUCT || type->kind == TYPE_UNION) && type->name && strlen(type->name) > 0)
+        return sanitize_type_name(type->name);
+
     switch (type->kind)
     {
     case TYPE_U8:
@@ -480,12 +536,22 @@ static char *type_to_mangled_string(Type *type)
         return strdup(type->name ? type->name : "type");
 
     case TYPE_POINTER:
-        snprintf(buffer, sizeof(buffer), "ptr_%s", type_to_mangled_string(type->pointer.base));
-        return strdup(buffer);
+    {
+        char *base_str = type_to_mangled_string(type->pointer.base);
+        char *result   = malloc(strlen("ptr_") + strlen(base_str) + 1);
+        sprintf(result, "ptr_%s", base_str);
+        free(base_str);
+        return result;
+    }
 
     case TYPE_ARRAY:
-        snprintf(buffer, sizeof(buffer), "arr_%s", type_to_mangled_string(type->array.elem_type));
-        return strdup(buffer);
+    {
+        char *elem_str = type_to_mangled_string(type->array.elem_type);
+        char *result   = malloc(strlen("arr_") + strlen(elem_str) + 1);
+        sprintf(result, "arr_%s", elem_str);
+        free(elem_str);
+        return result;
+    }
 
     case TYPE_STRUCT:
     case TYPE_UNION:
@@ -821,7 +887,31 @@ static Type *resolve_type_in_context(SemanticDriver *driver, const AnalysisConte
         Type *elem = resolve_type_in_context(driver, ctx, type_node->type_array.elem_type);
         if (!elem)
             return NULL;
-        Type *arr       = type_array_create(elem);
+
+        Type *arr = NULL;
+        if (type_node->type_array.size)
+        {
+            // fixed-size array [N]T - evaluate size
+            // for now, only support integer literals
+            if (type_node->type_array.size->kind != AST_EXPR_LIT || type_node->type_array.size->lit_expr.kind != TOKEN_LIT_INT)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "array size must be an integer literal");
+                return NULL;
+            }
+            int64_t size_val = type_node->type_array.size->lit_expr.int_val;
+            if (size_val <= 0)
+            {
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, type_node, ctx->file_path, "array size must be positive");
+                return NULL;
+            }
+            arr = type_fixed_array_create(elem, (size_t)size_val);
+        }
+        else
+        {
+            // slice/fat pointer []T
+            arr = type_array_create(elem);
+        }
+
         type_node->type = arr;
         return arr;
     }
@@ -3166,31 +3256,36 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
             Symbol *method_sym        = NULL;
             char    mangled_name[512] = {0};
 
+            // dereference pointer types for method lookup (methods can be called on pointer receivers)
+            Type *lookup_type = receiver_type;
+            if (lookup_type->kind == TYPE_POINTER)
+                lookup_type = lookup_type->pointer.base;
+
             // try to find method on alias type before resolving (for types like string = []char)
-            if (receiver_type->kind == TYPE_ALIAS && receiver_type->name)
+            if (lookup_type->kind == TYPE_ALIAS && lookup_type->name)
             {
-                snprintf(mangled_name, sizeof(mangled_name), "%s__%s", receiver_type->name, method_name);
+                snprintf(mangled_name, sizeof(mangled_name), "%s__%s", lookup_type->name, method_name);
                 method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
             }
 
             // resolve aliases for further processing
-            receiver_type = type_resolve_alias(receiver_type);
+            lookup_type = type_resolve_alias(lookup_type);
 
             // try looking up methods on the resolved type
-            if (!method_sym && (receiver_type->kind == TYPE_STRUCT || receiver_type->kind == TYPE_UNION))
+            if (!method_sym && (lookup_type->kind == TYPE_STRUCT || lookup_type->kind == TYPE_UNION))
             {
-                if (receiver_type->name)
+                if (lookup_type->name)
                 {
                     // first try: look up fully specialized method
                     // "std_types_result__Result$string$string" -> "std_types_result__Result$string$string__is_err"
-                    snprintf(mangled_name, sizeof(mangled_name), "%s__%s", receiver_type->name, method_name);
+                    snprintf(mangled_name, sizeof(mangled_name), "%s__%s", lookup_type->name, method_name);
                     method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
 
                     // if not found and type is specialized, instantiate generic method
-                    if (!method_sym && receiver_type->generic_origin && receiver_type->type_arg_count > 0)
+                    if (!method_sym && lookup_type->generic_origin && lookup_type->type_arg_count > 0)
                     {
                         // use stored type arguments from the specialized type
-                        Symbol *generic_type_sym = receiver_type->generic_origin;
+                        Symbol *generic_type_sym = lookup_type->generic_origin;
 
                         // construct generic method name from the generic type
                         char generic_method_name[256];
@@ -3223,10 +3318,10 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                         }
 
                         // instantiate generic method with type arguments from the specialized type
-                        method_sym = instantiate_generic_function(driver, ctx, generic_method, receiver_type->type_args, receiver_type->type_arg_count);
+                        method_sym = instantiate_generic_function(driver, ctx, generic_method, lookup_type->type_args, lookup_type->type_arg_count);
                         if (!method_sym)
                         {
-                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to instantiate generic method '%s' with %zu type arguments", generic_method_name, receiver_type->type_arg_count);
+                            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to instantiate generic method '%s' with %zu type arguments", generic_method_name, lookup_type->type_arg_count);
                             return NULL;
                         }
                     }
@@ -3235,6 +3330,28 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
 
             if (method_sym && method_sym->kind == SYMBOL_FUNC && method_sym->func.is_method)
             {
+                // check if method expects pointer receiver and coerce if needed
+                AstNode *receiver_arg = receiver;
+                if (method_sym->type && method_sym->type->kind == TYPE_FUNCTION && method_sym->type->function.param_count > 0)
+                {
+                    Type *first_param_type = method_sym->type->function.param_types[0];
+                    if (first_param_type && first_param_type->kind == TYPE_POINTER)
+                    {
+                        // method expects pointer receiver, but we have value type
+                        if (receiver_type->kind != TYPE_POINTER)
+                        {
+                            // create address-of operation
+                            AstNode *addr_of = malloc(sizeof(AstNode));
+                            ast_node_init(addr_of, AST_EXPR_UNARY);
+                            addr_of->token           = NULL; // don't share token to avoid double-free
+                            addr_of->unary_expr.op   = TOKEN_QUESTION;
+                            addr_of->unary_expr.expr = receiver;
+                            addr_of->type            = type_pointer_create(receiver_type);
+                            receiver_arg             = addr_of;
+                        }
+                    }
+                }
+
                 // transform method call: prepend receiver as first argument
                 if (!expr->call_expr.args)
                 {
@@ -3243,7 +3360,7 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                 }
 
                 // insert receiver at the beginning
-                ast_list_prepend(expr->call_expr.args, receiver);
+                ast_list_prepend(expr->call_expr.args, receiver_arg);
 
                 // replace func with identifier pointing to method symbol
                 AstNode *ident = malloc(sizeof(AstNode));
@@ -3254,6 +3371,9 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                 ident->type            = method_sym->type;
 
                 // clear receiver from field expr to prevent double-free
+                // receiver is now owned by either:
+                // - the addr_of node (if wrapped), which is in args
+                // - directly in args (if not wrapped)
                 field_expr->field_expr.object = NULL;
                 field_expr->token             = NULL;
 
@@ -3290,7 +3410,45 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
             }
 
             AstNode *arg      = expr->call_expr.args->items[0];
-            Type    *arg_type = analyze_expr(driver, ctx, arg);
+            Type    *arg_type = NULL;
+
+            // Check if argument is a type node (e.g., size_of(*u64))
+            if (arg->kind >= AST_TYPE_NAME && arg->kind <= AST_TYPE_UNI)
+            {
+                arg_type = resolve_type_in_context(driver, ctx, arg);
+                // Store the resolved type on the arg node for codegen
+                arg->type = arg_type;
+            }
+            // Check if it's an identifier - try to resolve as a type name first
+            else if (arg->kind == AST_EXPR_IDENT)
+            {
+                // Create a temporary type node and try resolving it
+                AstNode type_node                = {0};
+                type_node.kind                   = AST_TYPE_NAME;
+                type_node.type_name.name         = arg->ident_expr.name;
+                type_node.type_name.generic_args = NULL;
+
+                // Try to resolve it as a type (handles builtins and user types)
+                arg_type = resolve_type_in_context(driver, ctx, &type_node);
+
+                // If it resolved to error type, it's not a valid type identifier
+                // So reject it rather than falling back to expression analysis
+                if (!arg_type || arg_type == type_error())
+                {
+                    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "size_of expects a type, but '%s' is not a valid type", arg->ident_expr.name);
+                    return NULL;
+                }
+
+                // Store the resolved type on the arg node for codegen
+                arg->type = arg_type;
+            }
+            else
+            {
+                // Reject expressions - size_of should only accept types
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "size_of expects a type argument, not an expression");
+                return NULL;
+            }
+
             if (!arg_type)
                 return NULL;
 
@@ -3307,7 +3465,44 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
             }
 
             AstNode *arg      = expr->call_expr.args->items[0];
-            Type    *arg_type = analyze_expr(driver, ctx, arg);
+            Type    *arg_type = NULL;
+
+            // Check if argument is a type node (e.g., align_of(*u64))
+            if (arg->kind >= AST_TYPE_NAME && arg->kind <= AST_TYPE_UNI)
+            {
+                arg_type = resolve_type_in_context(driver, ctx, arg);
+                // Store the resolved type on the arg node for codegen
+                arg->type = arg_type;
+            }
+            // Check if it's an identifier - try to resolve as a type name first
+            else if (arg->kind == AST_EXPR_IDENT)
+            {
+                // Create a temporary type node and try resolving it
+                AstNode type_node                = {0};
+                type_node.kind                   = AST_TYPE_NAME;
+                type_node.type_name.name         = arg->ident_expr.name;
+                type_node.type_name.generic_args = NULL;
+
+                // Try to resolve it as a type (handles builtins and user types)
+                arg_type = resolve_type_in_context(driver, ctx, &type_node);
+
+                // If it resolved to error type, it's not a valid type identifier
+                if (!arg_type || arg_type == type_error())
+                {
+                    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "align_of expects a type, but '%s' is not a valid type", arg->ident_expr.name);
+                    return NULL;
+                }
+
+                // Store the resolved type on the arg node for codegen
+                arg->type = arg_type;
+            }
+            else
+            {
+                // Reject expressions - align_of should only accept types
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "align_of expects a type argument, not an expression");
+                return NULL;
+            }
+
             if (!arg_type)
                 return NULL;
 
@@ -3405,7 +3600,7 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
                     if (!type_args[i])
                     {
                         free(type_args);
-                        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to resolve type argument for generic call");
+                        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "failed to resolve type argument %zu for generic call", i + 1);
                         return NULL;
                     }
                 }
@@ -3462,7 +3657,18 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
         Type *param_type = func_type->function.param_types[i];
         if (!type_equals(arg_type, param_type) && !type_can_assign_to(arg_type, param_type))
         {
-            diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr->call_expr.args->items[i], ctx->file_path, "argument %zu has incompatible type", i + 1);
+            char *arg_type_str   = type_to_string(arg_type);
+            char *param_type_str = type_to_string(param_type);
+            diagnostic_emit(&driver->diagnostics,
+                            DIAG_ERROR,
+                            expr->call_expr.args->items[i],
+                            ctx->file_path,
+                            "argument %zu has incompatible type (expected '%s', got '%s')",
+                            i + 1,
+                            param_type_str ? param_type_str : "<unknown>",
+                            arg_type_str ? arg_type_str : "<unknown>");
+            free(arg_type_str);
+            free(param_type_str);
             return NULL;
         }
     }
@@ -4019,8 +4225,9 @@ static bool analyze_var_stmt_body(SemanticDriver *driver, const AnalysisContext 
         // global variable - just analyze initializer
         if (stmt->var_stmt.init)
         {
-            Type *var_type  = stmt->type;
-            Type *init_type = analyze_expr(driver, ctx, stmt->var_stmt.init);
+            Type *var_type = stmt->type;
+            // pass var_type as hint for correct literal typing
+            Type *init_type = analyze_expr_with_hint(driver, ctx, stmt->var_stmt.init, var_type);
             if (!init_type)
             {
                 return false;
@@ -4088,7 +4295,8 @@ static bool analyze_var_stmt_body(SemanticDriver *driver, const AnalysisContext 
     // analyze initializer (if annotation present we may not have inspected yet)
     if (stmt->var_stmt.init && !init_type)
     {
-        init_type = analyze_expr(driver, ctx, stmt->var_stmt.init);
+        // pass var_type as hint so integer literals get the correct type
+        init_type = analyze_expr_with_hint(driver, ctx, stmt->var_stmt.init, var_type);
         if (!init_type)
             return false;
     }
@@ -4145,7 +4353,11 @@ static bool analyze_ret_stmt(SemanticDriver *driver, const AnalysisContext *ctx,
 
     if (!type_equals(ret_type, func_ret) && !type_can_assign_to(ret_type, func_ret))
     {
-        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "incompatible return type");
+        char *ret_type_str = type_to_string(ret_type);
+        char *func_ret_str = type_to_string(func_ret);
+        diagnostic_emit(&driver->diagnostics, DIAG_ERROR, stmt, ctx->file_path, "incompatible return type (expected '%s', got '%s')", func_ret_str ? func_ret_str : "<unknown>", ret_type_str ? ret_type_str : "<unknown>");
+        free(ret_type_str);
+        free(func_ret_str);
         return false;
     }
 
@@ -4350,7 +4562,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
 
     bool success = true;
 
-    // ==== PHASE 1: COLLECT ALL MODULES ====
     // Enqueue dependencies from entry module
     for (int i = 0; i < root->program.stmts->count; i++)
     {
@@ -4373,7 +4584,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // ==== PHASE 2: PASS A ON ALL MODULES (DECLARE SYMBOLS) ====
     // First, declare symbols in entry module
     if (!analyze_pass_a_declarations(driver, &ctx, root))
     {
@@ -4404,7 +4614,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // ==== PHASE 3: IMPORT RESOLUTION (PROCESS USE STATEMENTS) ====
     // Process imports in entry module
     for (int i = 0; i < root->program.stmts->count; i++)
     {
@@ -4449,7 +4658,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // ==== PHASE 4: PASS B ON ALL MODULES (RESOLVE SIGNATURES) ====
     // Resolve signatures in entry module
     if (!analyze_pass_b_signatures(driver, &ctx, root))
     {
@@ -4480,7 +4688,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // ==== PHASE 5: PASS C ON ALL MODULES (ANALYZE BODIES) ====
     // Analyze bodies in entry module
     if (!analyze_pass_c_bodies(driver, &ctx, root))
     {
@@ -4523,7 +4730,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         }
     }
 
-    // ==== PHASE 6: PROCESS GENERIC INSTANTIATIONS ====
     if (!process_instantiation_queue(driver, &ctx))
     {
         diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module_path, "generic instantiation failed");

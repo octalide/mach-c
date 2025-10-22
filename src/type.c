@@ -232,6 +232,24 @@ Type *type_array_create(Type *elem_type)
     type->type_args       = NULL;
     type->type_arg_count  = 0;
     type->array.elem_type = elem_type;
+    type->array.size      = 0;
+    type->array.is_slice  = true; // slice/fat pointer []T
+    return type;
+}
+
+Type *type_fixed_array_create(Type *elem_type, size_t size)
+{
+    Type *type            = malloc(sizeof(Type));
+    type->kind            = TYPE_ARRAY;
+    type->size            = elem_type->size * size;
+    type->alignment       = elem_type->alignment;
+    type->name            = NULL;
+    type->generic_origin  = NULL;
+    type->type_args       = NULL;
+    type->type_arg_count  = 0;
+    type->array.elem_type = elem_type;
+    type->array.size      = size;
+    type->array.is_slice  = false; // fixed-size [N]T
     return type;
 }
 

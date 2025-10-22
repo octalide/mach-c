@@ -3410,7 +3410,45 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
             }
 
             AstNode *arg      = expr->call_expr.args->items[0];
-            Type    *arg_type = analyze_expr(driver, ctx, arg);
+            Type    *arg_type = NULL;
+
+            // Check if argument is a type node (e.g., size_of(*u64))
+            if (arg->kind >= AST_TYPE_NAME && arg->kind <= AST_TYPE_UNI)
+            {
+                arg_type = resolve_type_in_context(driver, ctx, arg);
+                // Store the resolved type on the arg node for codegen
+                arg->type = arg_type;
+            }
+            // Check if it's an identifier - try to resolve as a type name first
+            else if (arg->kind == AST_EXPR_IDENT)
+            {
+                // Create a temporary type node and try resolving it
+                AstNode type_node                = {0};
+                type_node.kind                   = AST_TYPE_NAME;
+                type_node.type_name.name         = arg->ident_expr.name;
+                type_node.type_name.generic_args = NULL;
+
+                // Try to resolve it as a type (handles builtins and user types)
+                arg_type = resolve_type_in_context(driver, ctx, &type_node);
+
+                // If it resolved to error type, it's not a valid type identifier
+                // So reject it rather than falling back to expression analysis
+                if (!arg_type || arg_type == type_error())
+                {
+                    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "size_of expects a type, but '%s' is not a valid type", arg->ident_expr.name);
+                    return NULL;
+                }
+
+                // Store the resolved type on the arg node for codegen
+                arg->type = arg_type;
+            }
+            else
+            {
+                // Reject expressions - size_of should only accept types
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "size_of expects a type argument, not an expression");
+                return NULL;
+            }
+
             if (!arg_type)
                 return NULL;
 
@@ -3427,7 +3465,44 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
             }
 
             AstNode *arg      = expr->call_expr.args->items[0];
-            Type    *arg_type = analyze_expr(driver, ctx, arg);
+            Type    *arg_type = NULL;
+
+            // Check if argument is a type node (e.g., align_of(*u64))
+            if (arg->kind >= AST_TYPE_NAME && arg->kind <= AST_TYPE_UNI)
+            {
+                arg_type = resolve_type_in_context(driver, ctx, arg);
+                // Store the resolved type on the arg node for codegen
+                arg->type = arg_type;
+            }
+            // Check if it's an identifier - try to resolve as a type name first
+            else if (arg->kind == AST_EXPR_IDENT)
+            {
+                // Create a temporary type node and try resolving it
+                AstNode type_node                = {0};
+                type_node.kind                   = AST_TYPE_NAME;
+                type_node.type_name.name         = arg->ident_expr.name;
+                type_node.type_name.generic_args = NULL;
+
+                // Try to resolve it as a type (handles builtins and user types)
+                arg_type = resolve_type_in_context(driver, ctx, &type_node);
+
+                // If it resolved to error type, it's not a valid type identifier
+                if (!arg_type || arg_type == type_error())
+                {
+                    diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "align_of expects a type, but '%s' is not a valid type", arg->ident_expr.name);
+                    return NULL;
+                }
+
+                // Store the resolved type on the arg node for codegen
+                arg->type = arg_type;
+            }
+            else
+            {
+                // Reject expressions - align_of should only accept types
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "align_of expects a type argument, not an expression");
+                return NULL;
+            }
+
             if (!arg_type)
                 return NULL;
 
@@ -4150,8 +4225,9 @@ static bool analyze_var_stmt_body(SemanticDriver *driver, const AnalysisContext 
         // global variable - just analyze initializer
         if (stmt->var_stmt.init)
         {
-            Type *var_type  = stmt->type;
-            Type *init_type = analyze_expr(driver, ctx, stmt->var_stmt.init);
+            Type *var_type = stmt->type;
+            // pass var_type as hint for correct literal typing
+            Type *init_type = analyze_expr_with_hint(driver, ctx, stmt->var_stmt.init, var_type);
             if (!init_type)
             {
                 return false;
@@ -4219,7 +4295,8 @@ static bool analyze_var_stmt_body(SemanticDriver *driver, const AnalysisContext 
     // analyze initializer (if annotation present we may not have inspected yet)
     if (stmt->var_stmt.init && !init_type)
     {
-        init_type = analyze_expr(driver, ctx, stmt->var_stmt.init);
+        // pass var_type as hint so integer literals get the correct type
+        init_type = analyze_expr_with_hint(driver, ctx, stmt->var_stmt.init, var_type);
         if (!init_type)
             return false;
     }
@@ -4485,7 +4562,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
 
     bool success = true;
 
-    // ==== PHASE 1: COLLECT ALL MODULES ====
     // Enqueue dependencies from entry module
     for (int i = 0; i < root->program.stmts->count; i++)
     {
@@ -4508,7 +4584,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // ==== PHASE 2: PASS A ON ALL MODULES (DECLARE SYMBOLS) ====
     // First, declare symbols in entry module
     if (!analyze_pass_a_declarations(driver, &ctx, root))
     {
@@ -4539,7 +4614,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // ==== PHASE 3: IMPORT RESOLUTION (PROCESS USE STATEMENTS) ====
     // Process imports in entry module
     for (int i = 0; i < root->program.stmts->count; i++)
     {
@@ -4584,7 +4658,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // ==== PHASE 4: PASS B ON ALL MODULES (RESOLVE SIGNATURES) ====
     // Resolve signatures in entry module
     if (!analyze_pass_b_signatures(driver, &ctx, root))
     {
@@ -4615,7 +4688,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         return false;
     }
 
-    // ==== PHASE 5: PASS C ON ALL MODULES (ANALYZE BODIES) ====
     // Analyze bodies in entry module
     if (!analyze_pass_c_bodies(driver, &ctx, root))
     {
@@ -4658,7 +4730,6 @@ bool semantic_driver_analyze(SemanticDriver *driver, AstNode *root, const char *
         }
     }
 
-    // ==== PHASE 6: PROCESS GENERIC INSTANTIATIONS ====
     if (!process_instantiation_queue(driver, &ctx))
     {
         diagnostic_emit(&driver->diagnostics, DIAG_ERROR, NULL, module_path, "generic instantiation failed");

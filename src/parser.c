@@ -904,11 +904,33 @@ static AstNode *parser_finish_call(Parser *parser, AstNode *callee, AstList *typ
         return NULL;
     }
 
+    // Check if this is a type intrinsic that expects type arguments instead of expressions
+    bool is_type_intrinsic = false;
+    if (callee->kind == AST_EXPR_IDENT)
+    {
+        const char *name = callee->ident_expr.name;
+        if (strcmp(name, "size_of") == 0 || strcmp(name, "align_of") == 0 || strcmp(name, "offset_of") == 0 || strcmp(name, "type_of") == 0)
+        {
+            is_type_intrinsic = true;
+        }
+    }
+
     if (!parser_check(parser, TOKEN_R_PAREN))
     {
         do
         {
-            AstNode *arg = parser_parse_expr(parser);
+            AstNode *arg = NULL;
+            if (is_type_intrinsic)
+            {
+                // Parse as type instead of expression
+                arg = parser_parse_type(parser);
+            }
+            else
+            {
+                // Normal expression argument
+                arg = parser_parse_expr(parser);
+            }
+
             if (!arg)
             {
                 ast_node_dnit(call);

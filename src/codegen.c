@@ -1474,6 +1474,11 @@ LLVMValueRef codegen_stmt_var(CodegenContext *ctx, AstNode *stmt)
         // function-local: allocate and store
         LLVMValueRef alloca = codegen_create_alloca(ctx, llvm_type, stmt->var_stmt.name);
         codegen_set_symbol_value(ctx, stmt->symbol, alloca);
+
+        // always initialize to zero first to avoid undef in SROA'd variables
+        LLVMValueRef zero_val = LLVMConstNull(llvm_type);
+        LLVMBuildStore(ctx->builder, zero_val, alloca);
+
         if (stmt->var_stmt.init)
         {
             bool old_mutable_init        = ctx->generating_mutable_init;
@@ -2218,10 +2223,28 @@ LLVMValueRef codegen_expr_binary(CodegenContext *ctx, AstNode *expr)
         {
             index = LLVMBuildNeg(ctx->builder, rhs, "negindex");
         }
-        // byte addressing with i8 element type (opaque ptr compatible)
-        LLVMTypeRef  i8ty = LLVMInt8TypeInContext(ctx->context);
-        LLVMValueRef gep  = LLVMBuildGEP2(ctx->builder, i8ty, lhs, &index, 1, "ptradd");
-        return gep;
+
+        // Get the pointee type to scale the index correctly
+        Type *pointee_type = NULL;
+        if (lhs_type->kind == TYPE_POINTER)
+        {
+            pointee_type = lhs_type->pointer.base;
+        }
+
+        // Use proper element type for GEP scaling
+        if (pointee_type)
+        {
+            LLVMTypeRef  elem_ty = codegen_get_llvm_type(ctx, pointee_type);
+            LLVMValueRef gep     = LLVMBuildGEP2(ctx->builder, elem_ty, lhs, &index, 1, "ptradd");
+            return gep;
+        }
+        else
+        {
+            // Fallback to byte addressing for untyped pointers (TYPE_PTR)
+            LLVMTypeRef  i8ty = LLVMInt8TypeInContext(ctx->context);
+            LLVMValueRef gep  = LLVMBuildGEP2(ctx->builder, i8ty, lhs, &index, 1, "ptradd");
+            return gep;
+        }
     }
 
     switch (expr->binary_expr.op)
@@ -2725,6 +2748,7 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
                 for (int j = 0; j < extra_arg_count; j++)
                 {
                     AstNode     *arg_node = expr->call_expr.args->items[fixed_param_count + j];
+                    Type        *arg_type = type_resolve_alias(arg_node->type);
                     LLVMValueRef value    = codegen_expr(ctx, arg_node);
                     if (!value)
                     {
@@ -2732,9 +2756,26 @@ LLVMValueRef codegen_expr_call(CodegenContext *ctx, AstNode *expr)
                         codegen_error(ctx, expr, "failed to generate variadic argument %d", fixed_param_count + j);
                         return NULL;
                     }
-                    value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
 
-                    Type        *arg_type     = type_resolve_alias(arg_node->type);
+                    // For composite types (arrays, structs), we need the full value, not a loaded scalar
+                    // For arrays, codegen_expr already returns the fat pointer struct value
+                    // For simple types, we need to load from allocas
+                    if (arg_type && (arg_type->kind == TYPE_ARRAY || arg_type->kind == TYPE_STRUCT || arg_type->kind == TYPE_UNION))
+                    {
+                        // Composite types: if it's a pointer to the composite, load it
+                        if (LLVMIsAAllocaInst(value) || LLVMIsAGlobalVariable(value))
+                        {
+                            LLVMTypeRef composite_ty = codegen_get_llvm_type(ctx, arg_type);
+                            value                    = LLVMBuildLoad2(ctx->builder, composite_ty, value, "composite_load");
+                        }
+                        // else: already a composite value
+                    }
+                    else
+                    {
+                        // Simple types: load if needed
+                        value = codegen_load_if_needed(ctx, value, arg_node->type, arg_node);
+                    }
+
                     LLVMValueRef stored_value = value;
                     LLVMTypeRef  value_ty     = LLVMTypeOf(value);
 

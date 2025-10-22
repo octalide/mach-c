@@ -3227,58 +3227,76 @@ static Type *analyze_unary_expr(SemanticDriver *driver, const AnalysisContext *c
 
 static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ctx, AstNode *expr)
 {
-    // handle module member function calls: module.func(args)
-    if (expr->call_expr.func && expr->call_expr.func->kind == AST_EXPR_FIELD && expr->call_expr.func->field_expr.object && expr->call_expr.func->field_expr.object->kind == AST_EXPR_IDENT)
+    // Handle potential method calls FIRST: obj.method(args) -> method(obj, args)
+    // This must happen before analyzing the func to avoid rejecting valid method calls
+    if (expr->call_expr.func && expr->call_expr.func->kind == AST_EXPR_FIELD)
     {
-        const char *obj_name = expr->call_expr.func->field_expr.object->ident_expr.name;
-        Symbol     *obj_sym  = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, obj_name);
+        AstNode *field_expr = expr->call_expr.func;
+        AstNode *receiver   = field_expr->field_expr.object;
 
-        if (obj_sym && obj_sym->kind == SYMBOL_MODULE)
+        // Special case: check if this is module.function() where object is an identifier for a module
+        if (receiver->kind == AST_EXPR_IDENT)
         {
-            // this is module.function() - not a method call, just resolve normally via analyze_expr
-            // the field expression analysis will handle looking up the function in the module scope
-            // so we don't need to transform it, just fall through to normal call processing
-        }
-        else
-        {
-            // handle method calls: obj.method(args) -> method(obj, args)
-            AstNode *field_expr = expr->call_expr.func;
-            AstNode *receiver   = field_expr->field_expr.object;
+            const char *obj_name = receiver->ident_expr.name;
+            Symbol     *obj_sym  = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, obj_name);
 
-            // analyze receiver to get its type
-            Type *receiver_type = analyze_expr(driver, ctx, receiver);
-            if (!receiver_type)
-                return NULL;
-
-            // look up method in the receiver's type
-            const char *method_name = field_expr->field_expr.field;
-
-            Symbol *method_sym        = NULL;
-            char    mangled_name[512] = {0};
-
-            // dereference pointer types for method lookup (methods can be called on pointer receivers)
-            Type *lookup_type = receiver_type;
-            if (lookup_type->kind == TYPE_POINTER)
-                lookup_type = lookup_type->pointer.base;
-
-            // try to find method on alias type before resolving (for types like string = []char)
-            if (lookup_type->kind == TYPE_ALIAS && lookup_type->name)
+            if (obj_sym && obj_sym->kind == SYMBOL_MODULE)
             {
+                // This is module.function() - fall through to normal call analysis
+                // The field expression will look up the function in the module scope
+                goto normal_call_analysis;
+            }
+        }
+
+        // Potential method call: analyze receiver and try method lookup
+        // analyze receiver to get its type
+        Type *receiver_type = analyze_expr(driver, ctx, receiver);
+        if (!receiver_type)
+            return NULL;
+
+        // look up method in the receiver's type
+        const char *method_name = field_expr->field_expr.field;
+
+        Symbol *method_sym        = NULL;
+        char    mangled_name[512] = {0};
+
+        // dereference pointer types for method lookup (methods can be called on pointer receivers)
+        Type *lookup_type = receiver_type;
+        if (lookup_type->kind == TYPE_POINTER)
+            lookup_type = lookup_type->pointer.base;
+
+        // try to find method on alias type before resolving (for types like string = []char)
+        if (lookup_type->kind == TYPE_ALIAS && lookup_type->name)
+        {
                 snprintf(mangled_name, sizeof(mangled_name), "%s__%s", lookup_type->name, method_name);
                 method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
             }
+
+            // Store the original type before resolving, in case we need it later
+            Type *original_type = lookup_type;
 
             // resolve aliases for further processing
             lookup_type = type_resolve_alias(lookup_type);
 
             // try looking up methods on the resolved type
-            if (!method_sym && (lookup_type->kind == TYPE_STRUCT || lookup_type->kind == TYPE_UNION))
+            if (!method_sym && (lookup_type->kind == TYPE_STRUCT || lookup_type->kind == TYPE_UNION || lookup_type->kind == TYPE_ARRAY))
             {
-                if (lookup_type->name)
+                // For array types that came from an alias, use the alias name
+                const char *type_name_for_lookup = NULL;
+                if (lookup_type->kind == TYPE_ARRAY && original_type->kind == TYPE_ALIAS && original_type->name)
+                {
+                    type_name_for_lookup = original_type->name;
+                }
+                else if (lookup_type->name)
+                {
+                    type_name_for_lookup = lookup_type->name;
+                }
+                
+                if (type_name_for_lookup)
                 {
                     // first try: look up fully specialized method
                     // "std_types_result__Result$string$string" -> "std_types_result__Result$string$string__is_err"
-                    snprintf(mangled_name, sizeof(mangled_name), "%s__%s", lookup_type->name, method_name);
+                    snprintf(mangled_name, sizeof(mangled_name), "%s__%s", type_name_for_lookup, method_name);
                     method_sym = lookup_in_scope_chain(ctx->current_scope, ctx->module_scope, ctx->global_scope, mangled_name);
 
                     // if not found and type is specialized, instantiate generic method
@@ -3390,12 +3408,18 @@ static Type *analyze_call_expr(SemanticDriver *driver, const AnalysisContext *ct
             else
             {
                 // not a method - might be a function stored in a field, which isn't supported yet
-                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, "member access on non-composite type");
+                diagnostic_emit(&driver->diagnostics, DIAG_ERROR, expr, ctx->file_path, 
+                                "no method '%s' found on type (kind=%d, name=%s)", 
+                                method_name,
+                                receiver_type ? receiver_type->kind : -1,
+                                receiver_type && receiver_type->name ? receiver_type->name : "(null)");
                 return NULL;
             }
-        }
     }
 
+normal_call_analysis:
+    ;  // label must be followed by a statement
+    
     if (expr->call_expr.func && expr->call_expr.func->kind == AST_EXPR_IDENT)
     {
         const char *intr_name = expr->call_expr.func->ident_expr.name;
@@ -3779,6 +3803,9 @@ static Type *analyze_index_expr(SemanticDriver *driver, const AnalysisContext *c
     if (!array_type || !index_type)
         return NULL;
 
+    // Store original type to preserve aliases
+    Type *original_array_type = array_type;
+
     // dereference pointer
     if (array_type->kind == TYPE_POINTER)
         array_type = array_type->pointer.base;
@@ -3797,7 +3824,15 @@ static Type *analyze_index_expr(SemanticDriver *driver, const AnalysisContext *c
         return NULL;
     }
 
-    expr->type = array_type->array.elem_type;
+    // Try to get element type from original (unresolved) type to preserve aliases
+    Type *elem_type = array_type->array.elem_type;
+    if (original_array_type->kind == TYPE_ARRAY)
+    {
+        // Original was already an array, use its element type
+        elem_type = original_array_type->array.elem_type;
+    }
+
+    expr->type = elem_type;
     return expr->type;
 }
 
